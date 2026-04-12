@@ -1,0 +1,7 @@
+# Sample training data for the task duration estimator — replace with real user history.
+task_id,title,task_type,course,word_count,days_until_due,actual_minutes
+1,Read chapter 5,reading,biology,4000,3,60
+2,Problem set 3,homework,calculus,0,2,90
+3,Literature review draft,project,english,0,7,180
+4,Lab report,homework,chemistry,1500,4,120
+5,Exam review,exam_prep,statistics,0,1,150

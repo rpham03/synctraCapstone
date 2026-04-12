@@ -1,0 +1,41 @@
+# Flutter project manifest — declares dependencies, assets, and SDK constraints.
+name: syntra
+description: AI-powered calendar assistant for students.
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # State management
+  flutter_bloc: ^8.1.3
+  equatable: ^2.0.5
+  # Networking
+  dio: ^5.3.2
+  # Local storage
+  hive_flutter: ^1.1.0
+  # Auth
+  google_sign_in: ^6.1.5
+  # Calendar UI
+  table_calendar: ^3.0.9
+  # Chat UI
+  flutter_chat_ui: ^1.6.10
+  # Utils
+  intl: ^0.18.1
+  get_it: ^7.6.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  build_runner: ^2.4.6
+  mockito: ^5.4.2
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/icons/
