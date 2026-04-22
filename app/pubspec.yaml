@@ -1,38 +1,52 @@
 # Flutter project manifest — declares dependencies, assets, and SDK constraints.
-name: syntra
-description: AI-powered calendar assistant for students.
+name: synctra
+description: AI-powered calendar assistant for students — Synctra.
 publish_to: 'none'
 version: 0.1.0
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: '>=3.3.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
+
+  # Backend / Auth
+  supabase_flutter: ^2.5.6       # Supabase auth + database + realtime
+  google_sign_in: ^6.2.1         # Google OAuth (wired through Supabase)
+
+  # Navigation
+  go_router: ^14.2.7             # Declarative routing with redirect guards
+
   # State management
-  flutter_bloc: ^8.1.3
+  flutter_bloc: ^8.1.6
   equatable: ^2.0.5
-  # Networking
-  dio: ^5.3.2
-  # Local storage
-  hive_flutter: ^1.1.0
-  # Auth
-  google_sign_in: ^6.1.5
+
   # Calendar UI
-  table_calendar: ^3.0.9
-  # Chat UI
-  flutter_chat_ui: ^1.6.10
+  table_calendar: ^3.1.2         # Week/month calendar widget
+
+  # Networking
+  dio: ^5.4.3                    # HTTP client for backend calls
+
+  # Local storage
+  shared_preferences: ^2.3.2    # Persist small user prefs (theme, token cache)
+
   # Utils
-  intl: ^0.18.1
-  get_it: ^7.6.4
+  intl: ^0.19.0                  # Date/time formatting
+  get_it: ^8.0.0                 # Service locator / DI
+  uuid: ^4.4.0                   # Generate local IDs before sync
+
+  # UI helpers
+  flutter_svg: ^2.0.10
+  gap: ^3.0.1                    # Spacing widget
+  shimmer: ^3.0.0                # Loading skeleton effect
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.0
-  build_runner: ^2.4.6
-  mockito: ^5.4.2
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.11
+  mockito: ^5.4.4
 
 flutter:
   uses-material-design: true
