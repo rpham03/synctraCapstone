@@ -1,13 +1,25 @@
-# Python dependencies for the Syntra FastAPI backend.
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-pydantic==2.7.1
-pydantic-settings==2.2.1
+# Core — needed to run the API server right now
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
 httpx==0.27.0
-sqlalchemy==2.0.30
-alembic==1.13.1
-psycopg2-binary==2.9.9
-redis==5.0.4
-google-api-python-client==2.127.0
-google-auth-oauthlib==1.2.0
 python-dotenv==1.0.1
+
+# iCal feed parsing
+icalendar==5.0.13
+recurring-ical-events==3.2.0
+
+# ── Install later when wiring up the database ─────────────────────────────────
+# Uncomment these once you are ready to connect to Supabase/PostgreSQL:
+#
+# sqlalchemy==2.0.30
+# alembic==1.13.1
+# psycopg2-binary==2.9.10      # bumped from 2.9.9 — has Python 3.13 wheels
+# redis==5.0.4
+
+# ── Install later when wiring up Google OAuth ──────────────────────────────────
+# Uncomment when implementing the /auth/google flow:
+#
+# google-api-python-client==2.127.0
+# google-auth-oauthlib==1.2.0

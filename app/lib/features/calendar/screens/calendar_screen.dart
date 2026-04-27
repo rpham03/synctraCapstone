@@ -1,10 +1,16 @@
 // Main calendar view — displays fixed events and AI-suggested schedule blocks.
 // On desktop: calendar on the left, day event list on the right.
 // On mobile: stacked vertically with bottom FAB.
+import 'dart:convert';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:intl/intl.dart';
+import 'package:uuid/uuid.dart';
 
+import '../../../core/constants/api_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../data/models/event_model.dart';
@@ -26,10 +32,68 @@ class _CalendarScreenState extends State<CalendarScreen> {
   final List<EventModel> _fixedEvents = [];
   final List<ScheduleBlockModel> _suggestedBlocks = [];
 
+  // feedId → parsed events; rebuilt whenever a feed is synced
+  final Map<String, List<EventModel>> _feedEvents = {};
+  // ordered list of {id, name, url} for saved feeds
+  final List<Map<String, String>> _icalFeeds = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedFeeds();
+  }
+
+  Future<void> _loadSavedFeeds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('ical_feeds') ?? [];
+    for (final item in raw) {
+      final feed = jsonDecode(item) as Map<String, dynamic>;
+      final id   = feed['id']   as String;
+      final name = feed['name'] as String;
+      final url  = feed['url']  as String;
+      _icalFeeds.add({'id': id, 'name': name, 'url': url});
+      // best-effort on startup — errors are silently ignored
+      _syncFeed(id, name, url).catchError((_) {});
+    }
+  }
+
+  // Throws on any failure so callers can surface the error to the user.
+  Future<void> _syncFeed(String feedId, String name, String url) async {
+    final resp = await Dio().post(
+      '${ApiConstants.baseUrl}/events/ical-feeds/preview',
+      data: {'url': url, 'name': name},
+    );
+    final events = (resp.data['events'] as List)
+        .map((e) => EventModel.fromJson(e as Map<String, dynamic>))
+        .toList();
+    if (mounted) setState(() => _feedEvents[feedId] = events);
+  }
+
+  Future<void> _addFeed(String url, String name) async {
+    final id   = const Uuid().v4();
+    final prefs = await SharedPreferences.getInstance();
+    _icalFeeds.add({'id': id, 'name': name, 'url': url});
+    await prefs.setStringList(
+        'ical_feeds', _icalFeeds.map((f) => jsonEncode(f)).toList());
+    await _syncFeed(id, name, url);
+  }
+
+  Future<void> _removeFeed(String feedId) async {
+    final prefs = await SharedPreferences.getInstance();
+    _icalFeeds.removeWhere((f) => f['id'] == feedId);
+    await prefs.setStringList(
+        'ical_feeds', _icalFeeds.map((f) => jsonEncode(f)).toList());
+    setState(() => _feedEvents.remove(feedId));
+  }
+
   List<dynamic> _eventsForDay(DateTime day) {
     final fixed  = _fixedEvents.where((e) => isSameDay(e.startTime, day)).toList();
+    final ical   = _feedEvents.values
+        .expand((events) => events)
+        .where((e) => isSameDay(e.startTime, day))
+        .toList();
     final blocks = _suggestedBlocks.where((b) => isSameDay(b.startTime, day)).toList();
-    return [...fixed, ...blocks];
+    return [...fixed, ...ical, ...blocks];
   }
 
   void _onDaySelected(DateTime selected, DateTime focused) {
@@ -39,26 +103,53 @@ class _CalendarScreenState extends State<CalendarScreen> {
     });
   }
 
+  void _openIcalFeedsSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _IcalFeedsSheet(
+        feeds: List.from(_icalFeeds),
+        feedEventCounts: {
+          for (final e in _feedEvents.entries) e.key: e.value.length,
+        },
+        onAdd: (url, name) async {
+          await _addFeed(url, name);
+        },
+        onRemove: (id) async {
+          await _removeFeed(id);
+        },
+        onSync: (id, name, url) async {
+          await _syncFeed(id, name, url);
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Responsive.isDesktop(context)
         ? _DesktopLayout(
-            focusedDay:  _focusedDay,
-            selectedDay: _selectedDay,
-            format:      _format,
-            eventsForDay: _eventsForDay,
-            onDaySelected: _onDaySelected,
-            onFormatChanged: (f) => setState(() => _format = f),
-            onPageChanged: (f) => setState(() => _focusedDay = f),
+            focusedDay:       _focusedDay,
+            selectedDay:      _selectedDay,
+            format:           _format,
+            eventsForDay:     _eventsForDay,
+            onDaySelected:    _onDaySelected,
+            onFormatChanged:  (f) => setState(() => _format = f),
+            onPageChanged:    (f) => setState(() => _focusedDay = f),
+            onOpenIcalFeeds:  _openIcalFeedsSheet,
           )
         : _MobileLayout(
-            focusedDay:  _focusedDay,
-            selectedDay: _selectedDay,
-            format:      _format,
-            eventsForDay: _eventsForDay,
-            onDaySelected: _onDaySelected,
-            onFormatChanged: (f) => setState(() => _format = f),
-            onPageChanged: (f) => setState(() => _focusedDay = f),
+            focusedDay:       _focusedDay,
+            selectedDay:      _selectedDay,
+            format:           _format,
+            eventsForDay:     _eventsForDay,
+            onDaySelected:    _onDaySelected,
+            onFormatChanged:  (f) => setState(() => _format = f),
+            onPageChanged:    (f) => setState(() => _focusedDay = f),
+            onOpenIcalFeeds:  _openIcalFeedsSheet,
           );
   }
 }
@@ -73,6 +164,7 @@ class _DesktopLayout extends StatelessWidget {
   final void Function(DateTime, DateTime) onDaySelected;
   final void Function(CalendarFormat) onFormatChanged;
   final void Function(DateTime) onPageChanged;
+  final VoidCallback onOpenIcalFeeds;
 
   const _DesktopLayout({
     required this.focusedDay,
@@ -82,6 +174,7 @@ class _DesktopLayout extends StatelessWidget {
     required this.onDaySelected,
     required this.onFormatChanged,
     required this.onPageChanged,
+    required this.onOpenIcalFeeds,
   });
 
   @override
@@ -97,7 +190,6 @@ class _DesktopLayout extends StatelessWidget {
           ),
         ]),
         actions: [
-          // AI schedule button in the top bar on desktop
           FilledButton.icon(
             onPressed: () {/* TODO: trigger AI schedule generation */},
             icon: const Icon(Icons.auto_awesome, size: 18),
@@ -105,6 +197,11 @@ class _DesktopLayout extends StatelessWidget {
             style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
           ),
           const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.link),
+            tooltip: 'iCal Feeds',
+            onPressed: onOpenIcalFeeds,
+          ),
           IconButton(icon: const Icon(Icons.sync), tooltip: 'Sync', onPressed: () {}),
           IconButton(icon: const Icon(Icons.person_outline), onPressed: () {}),
           const SizedBox(width: 8),
@@ -119,13 +216,13 @@ class _DesktopLayout extends StatelessWidget {
             child: Column(
               children: [
                 _CalendarWidget(
-                  focusedDay: focusedDay,
-                  selectedDay: selectedDay,
-                  format: CalendarFormat.month, // always show month on desktop
-                  eventsForDay: eventsForDay,
-                  onDaySelected: onDaySelected,
+                  focusedDay:      focusedDay,
+                  selectedDay:     selectedDay,
+                  format:          CalendarFormat.month,
+                  eventsForDay:    eventsForDay,
+                  onDaySelected:   onDaySelected,
                   onFormatChanged: onFormatChanged,
-                  onPageChanged: onPageChanged,
+                  onPageChanged:   onPageChanged,
                   showFormatButton: false,
                 ),
 
@@ -140,6 +237,8 @@ class _DesktopLayout extends StatelessWidget {
                     _LegendDot(color: AppColors.collabEvent,   label: 'Group Events'),
                     const SizedBox(width: 16),
                     _LegendDot(color: AppColors.deadline,      label: 'Deadlines'),
+                    const SizedBox(width: 16),
+                    _LegendDot(color: Colors.purple,           label: 'iCal Feeds'),
                   ]),
                 ),
               ],
@@ -154,7 +253,6 @@ class _DesktopLayout extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Day header
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 20, 16, 8),
                   child: Column(
@@ -162,8 +260,7 @@ class _DesktopLayout extends StatelessWidget {
                     children: [
                       Text(
                         DateFormat('EEEE').format(selectedDay),
-                        style: TextStyle(
-                            color: Colors.grey[500], fontSize: 13),
+                        style: TextStyle(color: Colors.grey[500], fontSize: 13),
                       ),
                       Text(
                         DateFormat('MMMM d, y').format(selectedDay),
@@ -180,7 +277,6 @@ class _DesktopLayout extends StatelessWidget {
                 ),
                 const Divider(height: 1),
 
-                // Events
                 Expanded(
                   child: dayEvents.isEmpty
                       ? _EmptyDay(day: selectedDay)
@@ -189,14 +285,13 @@ class _DesktopLayout extends StatelessWidget {
                           itemCount: dayEvents.length,
                           itemBuilder: (_, i) {
                             final item = dayEvents[i];
-                            if (item is EventModel)       return _FixedEventTile(event: item);
+                            if (item is EventModel)         return _FixedEventTile(event: item);
                             if (item is ScheduleBlockModel) return _BlockTile(block: item);
                             return const SizedBox.shrink();
                           },
                         ),
                 ),
 
-                // Add event button at bottom of panel
                 Padding(
                   padding: const EdgeInsets.all(12),
                   child: OutlinedButton.icon(
@@ -229,6 +324,7 @@ class _MobileLayout extends StatelessWidget {
   final void Function(DateTime, DateTime) onDaySelected;
   final void Function(CalendarFormat) onFormatChanged;
   final void Function(DateTime) onPageChanged;
+  final VoidCallback onOpenIcalFeeds;
 
   const _MobileLayout({
     required this.focusedDay,
@@ -238,6 +334,7 @@ class _MobileLayout extends StatelessWidget {
     required this.onDaySelected,
     required this.onFormatChanged,
     required this.onPageChanged,
+    required this.onOpenIcalFeeds,
   });
 
   @override
@@ -248,19 +345,24 @@ class _MobileLayout extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Synctra'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.link),
+            tooltip: 'iCal Feeds',
+            onPressed: onOpenIcalFeeds,
+          ),
           IconButton(icon: const Icon(Icons.person_outline), onPressed: () {}),
         ],
       ),
       body: Column(
         children: [
           _CalendarWidget(
-            focusedDay: focusedDay,
-            selectedDay: selectedDay,
-            format: format,
-            eventsForDay: eventsForDay,
-            onDaySelected: onDaySelected,
+            focusedDay:      focusedDay,
+            selectedDay:     selectedDay,
+            format:          format,
+            eventsForDay:    eventsForDay,
+            onDaySelected:   onDaySelected,
             onFormatChanged: onFormatChanged,
-            onPageChanged: onPageChanged,
+            onPageChanged:   onPageChanged,
             showFormatButton: true,
           ),
           const Divider(height: 1),
@@ -288,7 +390,7 @@ class _MobileLayout extends StatelessWidget {
                     itemCount: dayEvents.length,
                     itemBuilder: (_, i) {
                       final item = dayEvents[i];
-                      if (item is EventModel)       return _FixedEventTile(event: item);
+                      if (item is EventModel)         return _FixedEventTile(event: item);
                       if (item is ScheduleBlockModel) return _BlockTile(block: item);
                       return const SizedBox.shrink();
                     },
@@ -332,8 +434,8 @@ class _CalendarWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return TableCalendar(
-      firstDay: DateTime.utc(2024, 1, 1),
-      lastDay: DateTime.utc(2030, 12, 31),
+      firstDay:  DateTime.utc(2024, 1, 1),
+      lastDay:   DateTime.utc(2030, 12, 31),
       focusedDay: focusedDay,
       calendarFormat: format,
       selectedDayPredicate: (d) => isSameDay(selectedDay, d),
@@ -358,6 +460,239 @@ class _CalendarWidget extends StatelessWidget {
       headerStyle: HeaderStyle(
         formatButtonVisible: showFormatButton,
         titleCentered: true,
+      ),
+    );
+  }
+}
+
+// ── iCal feeds bottom sheet ────────────────────────────────────────────────────
+
+class _IcalFeedsSheet extends StatefulWidget {
+  final List<Map<String, String>> feeds;
+  final Map<String, int> feedEventCounts;
+  final Future<void> Function(String url, String name) onAdd;
+  final Future<void> Function(String feedId) onRemove;
+  final Future<void> Function(String id, String name, String url) onSync;
+
+  const _IcalFeedsSheet({
+    required this.feeds,
+    required this.feedEventCounts,
+    required this.onAdd,
+    required this.onRemove,
+    required this.onSync,
+  });
+
+  @override
+  State<_IcalFeedsSheet> createState() => _IcalFeedsSheetState();
+}
+
+class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
+  bool _showForm = false;
+  final _urlCtrl  = TextEditingController();
+  final _nameCtrl = TextEditingController();
+  bool _isLoading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final url = _urlCtrl.text.trim();
+    if (url.isEmpty) {
+      setState(() => _error = 'Please enter a URL.');
+      return;
+    }
+    if (!url.startsWith('http://') &&
+        !url.startsWith('https://') &&
+        !url.startsWith('webcal://')) {
+      setState(() => _error = 'URL must start with http://, https://, or webcal://');
+      return;
+    }
+
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      await widget.onAdd(url, _nameCtrl.text.trim());
+      if (mounted) Navigator.of(context).pop();
+    } on DioException catch (e) {
+      if (mounted) {
+        final detail = e.response?.data?['detail']?.toString()
+            ?? e.message
+            ?? 'Unknown error';
+        setState(() {
+          _isLoading = false;
+          _error = detail;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _error = e.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16, right: 16, top: 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // drag handle
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+
+          // Header row
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('iCal Feeds',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              TextButton.icon(
+                onPressed: () => setState(() {
+                  _showForm = !_showForm;
+                  _error = null;
+                }),
+                icon: Icon(_showForm ? Icons.close : Icons.add),
+                label: Text(_showForm ? 'Cancel' : 'Add Feed'),
+              ),
+            ],
+          ),
+
+          // Add feed form
+          if (_showForm) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _urlCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Calendar URL',
+                hintText: 'https://…  or  webcal://…',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              autofocus: true,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _nameCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Name (optional)',
+                hintText: 'e.g. Work Calendar',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+            ],
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: _isLoading ? null : _submit,
+                child: _isLoading
+                    ? const SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white))
+                    : const Text('Import'),
+              ),
+            ),
+          ],
+
+          // Empty state
+          if (widget.feeds.isEmpty && !_showForm) ...[
+            const SizedBox(height: 24),
+            Center(
+              child: Column(
+                children: [
+                  Icon(Icons.link_off, size: 44, color: Colors.grey[300]),
+                  const SizedBox(height: 8),
+                  Text('No iCal feeds yet.',
+                      style: TextStyle(color: Colors.grey[500])),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Paste a link from Google Calendar, Outlook,\nApple Calendar, or any .ics URL.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+          ],
+
+          // Feed list
+          if (widget.feeds.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ...widget.feeds.map((feed) {
+              final count = widget.feedEventCounts[feed['id']] ?? -1;
+              final countLabel = count < 0 ? 'not synced' : '$count events';
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.calendar_today_outlined, size: 20),
+                title: Text(feed['name'] ?? 'Unnamed Feed'),
+                subtitle: Text(
+                  '$countLabel\n${feed['url'] ?? ''}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11),
+                ),
+                isThreeLine: true,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 20),
+                      tooltip: 'Re-sync',
+                      onPressed: () async {
+                        try {
+                          await widget.onSync(
+                              feed['id']!, feed['name']!, feed['url']!);
+                          if (context.mounted) Navigator.of(context).pop();
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Sync failed: $e'),
+                                  backgroundColor: Colors.red),
+                            );
+                          }
+                        }
+                      },
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.delete_outline,
+                          size: 20, color: Colors.red[300]),
+                      onPressed: () async {
+                        await widget.onRemove(feed['id']!);
+                        if (context.mounted) Navigator.of(context).pop();
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ],
       ),
     );
   }
@@ -395,6 +730,7 @@ class _FixedEventTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = event.source == 'ical' ? Colors.purple : AppColors.fixedEvent;
     final time = '${_fmt(event.startTime)} – ${_fmt(event.endTime)}';
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -402,7 +738,7 @@ class _FixedEventTile extends StatelessWidget {
         leading: Container(
           width: 4, height: 40,
           decoration: BoxDecoration(
-            color: AppColors.fixedEvent,
+            color: accentColor,
             borderRadius: BorderRadius.circular(2),
           ),
         ),
@@ -453,18 +789,19 @@ class _SourceBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = switch (source) {
-      'canvas'          => 'Canvas',
-      'google_calendar' => 'GCal',
-      _                 => 'Manual',
+    final (label, color) = switch (source) {
+      'canvas'          => ('Canvas', Colors.orange),
+      'google_calendar' => ('GCal',   Colors.blue),
+      'ical'            => ('iCal',   Colors.purple),
+      _                 => ('Manual', Colors.grey),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: Colors.grey[100],
+        color: (color as Color).withAlpha(25),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Text(label, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+      child: Text(label, style: TextStyle(fontSize: 11, color: color)),
     );
   }
 }

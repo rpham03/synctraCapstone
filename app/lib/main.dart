@@ -11,14 +11,8 @@ Future<void> main() async {
   // Initialize Supabase — replace the placeholders with your project values
   // from https://supabase.com/dashboard → Settings → API
   await Supabase.initialize(
-    url: const String.fromEnvironment(
-      'SUPABASE_URL',
-      defaultValue: 'YOUR_SUPABASE_URL',
-    ),
-    anonKey: const String.fromEnvironment(
-      'SUPABASE_ANON_KEY',
-      defaultValue: 'YOUR_SUPABASE_ANON_KEY',
-    ),
+    url: 'https://wewuafrajfsqhaajofju.supabase.co',
+    anonKey: 'sb_publishable_nLRlBikbHmLFz3uM762vXg_FNvH6GPa',
   );
 
   runApp(const SynctraApp());
