@@ -40,6 +40,7 @@ class AuthService {
     return _client.auth.signInWithOAuth(
       OAuthProvider.google,
       redirectTo: 'io.synctra.app://login-callback',
+      scopes: 'email profile https://www.googleapis.com/auth/calendar',
     );
   }
 
