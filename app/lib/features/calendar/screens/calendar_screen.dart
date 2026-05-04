@@ -37,10 +37,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
   // ordered list of {id, name, url} for saved feeds
   final List<Map<String, String>> _icalFeeds = [];
 
+  // Course URL import state (same pattern as iCal feeds)
+  final Map<String, List<EventModel>> _courseImportEvents = {};
+  final List<Map<String, String>> _courseImports = [];
+
   @override
   void initState() {
     super.initState();
     _loadSavedFeeds();
+    _loadSavedCourseImports();
   }
 
   Future<void> _loadSavedFeeds() async {
@@ -54,6 +59,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
       _icalFeeds.add({'id': id, 'name': name, 'url': url});
       // best-effort on startup — errors are silently ignored
       _syncFeed(id, name, url).catchError((_) {});
+    }
+  }
+
+  Future<void> _loadSavedCourseImports() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList('course_imports') ?? [];
+    for (final item in raw) {
+      final feed = jsonDecode(item) as Map<String, dynamic>;
+      final id   = feed['id']   as String;
+      final name = feed['name'] as String;
+      final url  = feed['url']  as String;
+      _courseImports.add({'id': id, 'name': name, 'url': url});
+      _syncCourseImport(id, name, url).catchError((_) {});
     }
   }
 
@@ -86,14 +104,46 @@ class _CalendarScreenState extends State<CalendarScreen> {
     setState(() => _feedEvents.remove(feedId));
   }
 
+  Future<void> _syncCourseImport(String importId, String name, String url) async {
+    final resp = await Dio().post(
+      '${ApiConstants.baseUrl}/events/course-import',
+      data: {'url': url, 'name': name},
+    );
+    final events = (resp.data['events'] as List)
+        .map((e) => EventModel.fromJson(e as Map<String, dynamic>))
+        .toList();
+    if (mounted) setState(() => _courseImportEvents[importId] = events);
+  }
+
+  Future<void> _addCourseImport(String url, String name) async {
+    final id    = const Uuid().v4();
+    final prefs = await SharedPreferences.getInstance();
+    _courseImports.add({'id': id, 'name': name, 'url': url});
+    await prefs.setStringList(
+        'course_imports', _courseImports.map((f) => jsonEncode(f)).toList());
+    await _syncCourseImport(id, name, url);
+  }
+
+  Future<void> _removeCourseImport(String importId) async {
+    final prefs = await SharedPreferences.getInstance();
+    _courseImports.removeWhere((f) => f['id'] == importId);
+    await prefs.setStringList(
+        'course_imports', _courseImports.map((f) => jsonEncode(f)).toList());
+    setState(() => _courseImportEvents.remove(importId));
+  }
+
   List<dynamic> _eventsForDay(DateTime day) {
     final fixed  = _fixedEvents.where((e) => isSameDay(e.startTime, day)).toList();
     final ical   = _feedEvents.values
         .expand((events) => events)
         .where((e) => isSameDay(e.startTime, day))
         .toList();
+    final course = _courseImportEvents.values
+        .expand((events) => events)
+        .where((e) => isSameDay(e.startTime, day))
+        .toList();
     final blocks = _suggestedBlocks.where((b) => isSameDay(b.startTime, day)).toList();
-    return [...fixed, ...ical, ...blocks];
+    return [...fixed, ...ical, ...course, ...blocks];
   }
 
   void _onDaySelected(DateTime selected, DateTime focused) {
@@ -128,28 +178,55 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
   }
 
+  void _openCourseImportSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _CourseImportSheet(
+        imports: List.from(_courseImports),
+        importEventCounts: {
+          for (final e in _courseImportEvents.entries) e.key: e.value.length,
+        },
+        onAdd: (url, name) async {
+          await _addCourseImport(url, name);
+        },
+        onRemove: (id) async {
+          await _removeCourseImport(id);
+        },
+        onSync: (id, name, url) async {
+          await _syncCourseImport(id, name, url);
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Responsive.isDesktop(context)
         ? _DesktopLayout(
-            focusedDay:       _focusedDay,
-            selectedDay:      _selectedDay,
-            format:           _format,
-            eventsForDay:     _eventsForDay,
-            onDaySelected:    _onDaySelected,
-            onFormatChanged:  (f) => setState(() => _format = f),
-            onPageChanged:    (f) => setState(() => _focusedDay = f),
-            onOpenIcalFeeds:  _openIcalFeedsSheet,
+            focusedDay:            _focusedDay,
+            selectedDay:           _selectedDay,
+            format:                _format,
+            eventsForDay:          _eventsForDay,
+            onDaySelected:         _onDaySelected,
+            onFormatChanged:       (f) => setState(() => _format = f),
+            onPageChanged:         (f) => setState(() => _focusedDay = f),
+            onOpenIcalFeeds:       _openIcalFeedsSheet,
+            onOpenCourseImport:    _openCourseImportSheet,
           )
         : _MobileLayout(
-            focusedDay:       _focusedDay,
-            selectedDay:      _selectedDay,
-            format:           _format,
-            eventsForDay:     _eventsForDay,
-            onDaySelected:    _onDaySelected,
-            onFormatChanged:  (f) => setState(() => _format = f),
-            onPageChanged:    (f) => setState(() => _focusedDay = f),
-            onOpenIcalFeeds:  _openIcalFeedsSheet,
+            focusedDay:            _focusedDay,
+            selectedDay:           _selectedDay,
+            format:                _format,
+            eventsForDay:          _eventsForDay,
+            onDaySelected:         _onDaySelected,
+            onFormatChanged:       (f) => setState(() => _format = f),
+            onPageChanged:         (f) => setState(() => _focusedDay = f),
+            onOpenIcalFeeds:       _openIcalFeedsSheet,
+            onOpenCourseImport:    _openCourseImportSheet,
           );
   }
 }
@@ -165,6 +242,7 @@ class _DesktopLayout extends StatelessWidget {
   final void Function(CalendarFormat) onFormatChanged;
   final void Function(DateTime) onPageChanged;
   final VoidCallback onOpenIcalFeeds;
+  final VoidCallback onOpenCourseImport;
 
   const _DesktopLayout({
     required this.focusedDay,
@@ -175,6 +253,7 @@ class _DesktopLayout extends StatelessWidget {
     required this.onFormatChanged,
     required this.onPageChanged,
     required this.onOpenIcalFeeds,
+    required this.onOpenCourseImport,
   });
 
   @override
@@ -197,6 +276,11 @@ class _DesktopLayout extends StatelessWidget {
             style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
           ),
           const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.school_outlined),
+            tooltip: 'Import Course URL',
+            onPressed: onOpenCourseImport,
+          ),
           IconButton(
             icon: const Icon(Icons.link),
             tooltip: 'iCal Feeds',
@@ -229,17 +313,18 @@ class _DesktopLayout extends StatelessWidget {
                 // Legend
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-                  child: Row(children: [
-                    _LegendDot(color: AppColors.fixedEvent,    label: 'Classes & Exams'),
-                    const SizedBox(width: 16),
-                    _LegendDot(color: AppColors.flexibleBlock, label: 'Study Blocks'),
-                    const SizedBox(width: 16),
-                    _LegendDot(color: AppColors.collabEvent,   label: 'Group Events'),
-                    const SizedBox(width: 16),
-                    _LegendDot(color: AppColors.deadline,      label: 'Deadlines'),
-                    const SizedBox(width: 16),
-                    _LegendDot(color: Colors.purple,           label: 'iCal Feeds'),
-                  ]),
+                  child: Wrap(
+                    spacing: 16,
+                    runSpacing: 6,
+                    children: [
+                      _LegendDot(color: AppColors.fixedEvent,    label: 'Classes & Exams'),
+                      _LegendDot(color: AppColors.flexibleBlock, label: 'Study Blocks'),
+                      _LegendDot(color: AppColors.collabEvent,   label: 'Group Events'),
+                      _LegendDot(color: AppColors.deadline,      label: 'Deadlines'),
+                      _LegendDot(color: Colors.purple,           label: 'iCal Feeds'),
+                      _LegendDot(color: Colors.teal,             label: 'Course Import'),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -325,6 +410,7 @@ class _MobileLayout extends StatelessWidget {
   final void Function(CalendarFormat) onFormatChanged;
   final void Function(DateTime) onPageChanged;
   final VoidCallback onOpenIcalFeeds;
+  final VoidCallback onOpenCourseImport;
 
   const _MobileLayout({
     required this.focusedDay,
@@ -335,6 +421,7 @@ class _MobileLayout extends StatelessWidget {
     required this.onFormatChanged,
     required this.onPageChanged,
     required this.onOpenIcalFeeds,
+    required this.onOpenCourseImport,
   });
 
   @override
@@ -345,6 +432,11 @@ class _MobileLayout extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Synctra'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.school_outlined),
+            tooltip: 'Import Course URL',
+            onPressed: onOpenCourseImport,
+          ),
           IconButton(
             icon: const Icon(Icons.link),
             tooltip: 'iCal Feeds',
@@ -730,7 +822,11 @@ class _FixedEventTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final accentColor = event.source == 'ical' ? Colors.purple : AppColors.fixedEvent;
+    final accentColor = switch (event.source) {
+      'ical'   => Colors.purple,
+      'course' => Colors.teal,
+      _        => AppColors.fixedEvent,
+    };
     final time = '${_fmt(event.startTime)} – ${_fmt(event.endTime)}';
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -790,10 +886,11 @@ class _SourceBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (source) {
-      'canvas'          => ('Canvas', Colors.orange),
-      'google_calendar' => ('GCal',   Colors.blue),
-      'ical'            => ('iCal',   Colors.purple),
-      _                 => ('Manual', Colors.grey),
+      'canvas'          => ('Canvas',  Colors.orange),
+      'google_calendar' => ('GCal',    Colors.blue),
+      'ical'            => ('iCal',    Colors.purple),
+      'course'          => ('Course',  Colors.teal),
+      _                 => ('Manual',  Colors.grey),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -802,6 +899,244 @@ class _SourceBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(label, style: TextStyle(fontSize: 11, color: color)),
+    );
+  }
+}
+
+// ── Course URL import bottom sheet ────────────────────────────────────────────
+
+class _CourseImportSheet extends StatefulWidget {
+  final List<Map<String, String>> imports;
+  final Map<String, int> importEventCounts;
+  final Future<void> Function(String url, String name) onAdd;
+  final Future<void> Function(String importId) onRemove;
+  final Future<void> Function(String id, String name, String url) onSync;
+
+  const _CourseImportSheet({
+    required this.imports,
+    required this.importEventCounts,
+    required this.onAdd,
+    required this.onRemove,
+    required this.onSync,
+  });
+
+  @override
+  State<_CourseImportSheet> createState() => _CourseImportSheetState();
+}
+
+class _CourseImportSheetState extends State<_CourseImportSheet> {
+  bool _showForm = false;
+  final _urlCtrl  = TextEditingController();
+  final _nameCtrl = TextEditingController();
+  bool _isLoading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final url = _urlCtrl.text.trim();
+    if (url.isEmpty) {
+      setState(() => _error = 'Please enter a URL.');
+      return;
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      setState(() => _error = 'URL must start with http:// or https://');
+      return;
+    }
+
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      await widget.onAdd(url, _nameCtrl.text.trim());
+      if (mounted) Navigator.of(context).pop();
+    } on DioException catch (e) {
+      if (mounted) {
+        final detail = e.response?.data?['detail']?.toString()
+            ?? e.message
+            ?? 'Unknown error';
+        setState(() { _isLoading = false; _error = detail; });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _isLoading = false; _error = e.toString(); });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16, right: 16, top: 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // drag handle
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+
+          // Header row
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(children: [
+                const Icon(Icons.school_outlined, size: 20),
+                const SizedBox(width: 8),
+                const Text('Course Import',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ]),
+              TextButton.icon(
+                onPressed: () => setState(() {
+                  _showForm = !_showForm;
+                  _error = null;
+                }),
+                icon: Icon(_showForm ? Icons.close : Icons.add),
+                label: Text(_showForm ? 'Cancel' : 'Add Course'),
+              ),
+            ],
+          ),
+
+          // Add course form
+          if (_showForm) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _urlCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Course Page URL',
+                hintText: 'https://courses.university.edu/cse101/26sp/',
+                border: OutlineInputBorder(),
+              ),
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              autofocus: true,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _nameCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Course Name (optional)',
+                hintText: 'e.g. CSE 369 — Spring 2026',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(children: [
+              const Icon(Icons.info_outline, size: 14, color: Colors.grey),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Extracts assignments, deadlines, and class meetings from the page.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                ),
+              ),
+            ]),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+            ],
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _isLoading ? null : _submit,
+                icon: _isLoading
+                    ? const SizedBox(
+                        width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.auto_awesome, size: 18),
+                label: Text(_isLoading ? 'Parsing with AI…' : 'Import'),
+                style: FilledButton.styleFrom(backgroundColor: Colors.teal),
+              ),
+            ),
+          ],
+
+          // Empty state
+          if (widget.imports.isEmpty && !_showForm) ...[
+            const SizedBox(height: 24),
+            Center(
+              child: Column(
+                children: [
+                  Icon(Icons.school_outlined, size: 44, color: Colors.grey[300]),
+                  const SizedBox(height: 8),
+                  Text('No course imports yet.',
+                      style: TextStyle(color: Colors.grey[500])),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Paste any public course page URL and we\nwill extract your assignments and schedule.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+          ],
+
+          // Import list
+          if (widget.imports.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ...widget.imports.map((imp) {
+              final count = widget.importEventCounts[imp['id']] ?? -1;
+              final countLabel = count < 0 ? 'not synced' : '$count events';
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.school_outlined, size: 20, color: Colors.teal),
+                title: Text(imp['name'] ?? 'Unnamed Course'),
+                subtitle: Text(
+                  '$countLabel\n${imp['url'] ?? ''}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11),
+                ),
+                isThreeLine: true,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 20),
+                      tooltip: 'Re-parse',
+                      onPressed: () async {
+                        try {
+                          await widget.onSync(imp['id']!, imp['name']!, imp['url']!);
+                          if (context.mounted) Navigator.of(context).pop();
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Sync failed: $e'),
+                                  backgroundColor: Colors.red),
+                            );
+                          }
+                        }
+                      },
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.delete_outline,
+                          size: 20, color: Colors.red[300]),
+                      onPressed: () async {
+                        await widget.onRemove(imp['id']!);
+                        if (context.mounted) Navigator.of(context).pop();
+                      },
+                    ),
+                  ],
+                ),
+              );
+            }),
+          ],
+        ],
+      ),
     );
   }
 }

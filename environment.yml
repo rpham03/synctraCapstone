@@ -1,4 +1,4 @@
-name: syntra-backend
+name: syntra
 channels:
   - conda-forge
   - defaults
@@ -8,6 +8,7 @@ dependencies:
   - psycopg2          # installed via conda to avoid build issues on Apple Silicon
   - redis-py          # conda-forge has a reliable build
   - pip:
+    # ── Backend (FastAPI) ──────────────────────────────────────────────────────
     - fastapi==0.115.0
     - "uvicorn[standard]==0.30.6"
     - pydantic==2.9.2

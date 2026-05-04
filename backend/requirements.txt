@@ -10,6 +10,10 @@ python-dotenv==1.0.1
 icalendar==5.0.13
 recurring-ical-events==3.2.0
 
+# Course URL import — HTML scraping + rule-based date extraction
+beautifulsoup4==4.12.3
+python-dateutil>=2.9.0
+
 # ── Install later when wiring up the database ─────────────────────────────────
 # Uncomment these once you are ready to connect to Supabase/PostgreSQL:
 #
