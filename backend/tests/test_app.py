@@ -23,6 +23,15 @@ def test_tasks_list_empty():
     assert r.json() == {"tasks": []}
 
 
+def test_canvas_assignments_without_token_returns_503(monkeypatch):
+    import app.core.config.settings as settings_mod
+
+    monkeypatch.setattr(settings_mod.settings, "canvas_api_token", "")
+    r = client.get("/api/v1/canvas/assignments")
+    assert r.status_code == 503
+    assert "CANVAS_API_TOKEN" in r.json().get("detail", "")
+
+
 def test_chat_message():
     r = client.post(
         "/api/v1/chat/message",
