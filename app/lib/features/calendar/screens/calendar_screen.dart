@@ -545,10 +545,8 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
         bottom: MediaQuery.of(context).viewInsets.bottom + 24,
       ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // drag handle
           Center(
             child: Container(
               width: 40, height: 4,
@@ -559,8 +557,6 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
               ),
             ),
           ),
-
-          // Header row
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -576,122 +572,138 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
               ),
             ],
           ),
-
-          // Add feed form
-          if (_showForm) ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: _urlCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Calendar URL',
-                hintText: 'https://…  or  webcal://…',
-                border: OutlineInputBorder(),
-              ),
-              keyboardType: TextInputType.url,
-              autocorrect: false,
-              autofocus: true,
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _nameCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Name (optional)',
-                hintText: 'e.g. Work Calendar',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 8),
-              Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
-            ],
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _isLoading ? null : _submit,
-                child: _isLoading
-                    ? const SizedBox(
-                        width: 20, height: 20,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                    : const Text('Import'),
-              ),
-            ),
-          ],
-
-          // Empty state
-          if (widget.feeds.isEmpty && !_showForm) ...[
-            const SizedBox(height: 24),
-            Center(
+          Expanded(
+            child: SingleChildScrollView(
+              keyboardDismissBehavior:
+                  ScrollViewKeyboardDismissBehavior.onDrag,
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.link_off, size: 44, color: Colors.grey[300]),
-                  const SizedBox(height: 8),
-                  Text('No iCal feeds yet.',
-                      style: TextStyle(color: Colors.grey[500])),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Paste a link from Google Calendar, Outlook,\nApple Calendar, or any .ics URL.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 12, color: Colors.grey[400]),
-                  ),
+                  if (_showForm) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _urlCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Calendar URL',
+                        hintText: 'https://…  or  webcal://…',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      autofocus: true,
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Name (optional)',
+                        hintText: 'e.g. Work Calendar',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    if (_error != null) ...[
+                      const SizedBox(height: 8),
+                      Text(_error!,
+                          style: const TextStyle(
+                              color: Colors.red, fontSize: 13)),
+                    ],
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: _isLoading ? null : _submit,
+                      child: _isLoading
+                          ? const SizedBox(
+                              width: 20, height: 20,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white))
+                          : const Text('Import'),
+                    ),
+                  ],
+                  if (widget.feeds.isEmpty && !_showForm) ...[
+                    const SizedBox(height: 24),
+                    Center(
+                      child: Column(
+                        children: [
+                          Icon(Icons.link_off,
+                              size: 44, color: Colors.grey[300]),
+                          const SizedBox(height: 8),
+                          Text('No iCal feeds yet.',
+                              style: TextStyle(color: Colors.grey[500])),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Paste a link from Google Calendar, Outlook,\nApple Calendar, or any .ics URL.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey[400]),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                  ],
+                  if (widget.feeds.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    ...widget.feeds.map((feed) {
+                      final count =
+                          widget.feedEventCounts[feed['id']] ?? -1;
+                      final countLabel =
+                          count < 0 ? 'not synced' : '$count events';
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.calendar_today_outlined,
+                            size: 20),
+                        title: Text(feed['name'] ?? 'Unnamed Feed'),
+                        subtitle: Text(
+                          '$countLabel\n${feed['url'] ?? ''}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        isThreeLine: true,
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.refresh, size: 20),
+                              tooltip: 'Re-sync',
+                              onPressed: () async {
+                                try {
+                                  await widget.onSync(feed['id']!,
+                                      feed['name']!, feed['url']!);
+                                  if (context.mounted) {
+                                    Navigator.of(context).pop();
+                                  }
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context)
+                                        .showSnackBar(
+                                      SnackBar(
+                                          content: Text('Sync failed: $e'),
+                                          backgroundColor: Colors.red),
+                                    );
+                                  }
+                                }
+                              },
+                            ),
+                            IconButton(
+                              icon: Icon(Icons.delete_outline,
+                                  size: 20, color: Colors.red[300]),
+                              onPressed: () async {
+                                await widget.onRemove(feed['id']!);
+                                if (context.mounted) {
+                                  Navigator.of(context).pop();
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                  ],
                 ],
               ),
             ),
-            const SizedBox(height: 24),
-          ],
-
-          // Feed list
-          if (widget.feeds.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            ...widget.feeds.map((feed) {
-              final count = widget.feedEventCounts[feed['id']] ?? -1;
-              final countLabel = count < 0 ? 'not synced' : '$count events';
-              return ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.calendar_today_outlined, size: 20),
-                title: Text(feed['name'] ?? 'Unnamed Feed'),
-                subtitle: Text(
-                  '$countLabel\n${feed['url'] ?? ''}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11),
-                ),
-                isThreeLine: true,
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.refresh, size: 20),
-                      tooltip: 'Re-sync',
-                      onPressed: () async {
-                        try {
-                          await widget.onSync(
-                              feed['id']!, feed['name']!, feed['url']!);
-                          if (context.mounted) Navigator.of(context).pop();
-                        } catch (e) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('Sync failed: $e'),
-                                  backgroundColor: Colors.red),
-                            );
-                          }
-                        }
-                      },
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.delete_outline,
-                          size: 20, color: Colors.red[300]),
-                      onPressed: () async {
-                        await widget.onRemove(feed['id']!);
-                        if (context.mounted) Navigator.of(context).pop();
-                      },
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ],
+          ),
         ],
       ),
     );

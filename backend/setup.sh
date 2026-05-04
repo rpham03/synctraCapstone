@@ -2,16 +2,10 @@
 # Run this once to create the conda environment and install dependencies.
 # Usage: bash setup.sh
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 conda create -n syntra-backend python=3.11 -y
-conda run -n syntra-backend pip install \
-  "fastapi==0.115.0" \
-  "uvicorn[standard]==0.30.6" \
-  "pydantic==2.9.2" \
-  "pydantic-settings==2.5.2" \
-  "httpx==0.27.0" \
-  "python-dotenv==1.0.1" \
-  "icalendar==5.0.13" \
-  "recurring-ical-events==3.2.0"
+conda run -n syntra-backend pip install -r "${SCRIPT_DIR}/requirements.txt" \
+  -r "${SCRIPT_DIR}/requirements-dev.txt"
 
 echo ""
 echo "Done! To start the server run:"

@@ -3,4 +3,8 @@ from fastapi import APIRouter
 
 router = APIRouter()
 
-# TODO: implement tasks endpoints
+
+@router.get("/")
+async def list_tasks() -> dict:
+    """Return tasks for the signed-in user (stub until Canvas/DB sync is connected)."""
+    return {"tasks": []}
