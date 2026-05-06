@@ -20,3 +20,4 @@ dependencies:
     - recurring-ical-events==3.2.0
     - google-api-python-client==2.127.0
     - google-auth-oauthlib==1.2.0
+    - pytest>=8.3.0

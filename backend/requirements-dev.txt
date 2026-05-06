@@ -1,0 +1,2 @@
+# Local development and CI — not required to run the API in production.
+pytest>=8.3.0

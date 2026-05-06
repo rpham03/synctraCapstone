@@ -13,7 +13,6 @@ import '../../shared/widgets/main_shell.dart';
 
 class AppRouter {
   static final _rootNavigatorKey = GlobalKey<NavigatorState>();
-  static final _shellNavigatorKey = GlobalKey<NavigatorState>();
 
   static GoRouter get router => GoRouter(
         navigatorKey: _rootNavigatorKey,
@@ -41,26 +40,43 @@ class AppRouter {
             builder: (_, __) => const SignupScreen(),
           ),
 
-          // Main app shell — bottom nav wraps these four tabs
-          ShellRoute(
-            navigatorKey: _shellNavigatorKey,
-            builder: (_, __, child) => MainShell(child: child),
-            routes: [
-              GoRoute(
-                path: '/calendar',
-                builder: (_, __) => const CalendarScreen(),
+          // Main shell — IndexedStack keeps each tab’s state while switching.
+          StatefulShellRoute.indexedStack(
+            builder: (context, state, navigationShell) {
+              return MainShell(navigationShell: navigationShell);
+            },
+            branches: [
+              StatefulShellBranch(
+                routes: [
+                  GoRoute(
+                    path: '/calendar',
+                    builder: (_, __) => const CalendarScreen(),
+                  ),
+                ],
               ),
-              GoRoute(
-                path: '/tasks',
-                builder: (_, __) => const TasksScreen(),
+              StatefulShellBranch(
+                routes: [
+                  GoRoute(
+                    path: '/tasks',
+                    builder: (_, __) => const TasksScreen(),
+                  ),
+                ],
               ),
-              GoRoute(
-                path: '/chat',
-                builder: (_, __) => const ChatScreen(),
+              StatefulShellBranch(
+                routes: [
+                  GoRoute(
+                    path: '/chat',
+                    builder: (_, __) => const ChatScreen(),
+                  ),
+                ],
               ),
-              GoRoute(
-                path: '/collab',
-                builder: (_, __) => const CollabScreen(),
+              StatefulShellBranch(
+                routes: [
+                  GoRoute(
+                    path: '/collab',
+                    builder: (_, __) => const CollabScreen(),
+                  ),
+                ],
               ),
             ],
           ),

@@ -5,7 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/responsive.dart';
 
-// Navigation items shared by both layouts
+// Navigation items shared by both layouts (order must match StatefulShellRoute branches).
 const _tabs = [
   _TabItem(icon: Icons.calendar_month_outlined, activeIcon: Icons.calendar_month, label: 'Calendar', path: '/calendar'),
   _TabItem(icon: Icons.checklist_outlined,       activeIcon: Icons.checklist,       label: 'Tasks',    path: '/tasks'),
@@ -14,43 +14,45 @@ const _tabs = [
 ];
 
 class MainShell extends StatelessWidget {
-  final Widget child;
-  const MainShell({super.key, required this.child});
-
-  int _selectedIndex(BuildContext context) {
-    final location = GoRouterState.of(context).matchedLocation;
-    final idx = _tabs.indexWhere((t) => location.startsWith(t.path));
-    return idx < 0 ? 0 : idx;
-  }
+  final StatefulNavigationShell navigationShell;
+  const MainShell({super.key, required this.navigationShell});
 
   @override
   Widget build(BuildContext context) {
+    final selectedIndex = navigationShell.currentIndex;
     return Responsive.isDesktop(context)
-        ? _DesktopShell(child: child, selectedIndex: _selectedIndex(context))
-        : _MobileShell(child: child, selectedIndex: _selectedIndex(context));
+        ? _DesktopShell(
+            navigationShell: navigationShell,
+            selectedIndex: selectedIndex,
+          )
+        : _MobileShell(
+            navigationShell: navigationShell,
+            selectedIndex: selectedIndex,
+          );
   }
 }
 
-// ── Desktop layout — left sidebar ─────────────────────────────────────────────
+// ── Desktop layout — left sidebar ─────────────────────────────────────────
 
 class _DesktopShell extends StatelessWidget {
-  final Widget child;
+  final StatefulNavigationShell navigationShell;
   final int selectedIndex;
-  const _DesktopShell({required this.child, required this.selectedIndex});
+  const _DesktopShell({
+    required this.navigationShell,
+    required this.selectedIndex,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Row(
         children: [
-          // Sidebar
           Container(
             width: 240,
             color: Colors.white,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Logo
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 32, 20, 8),
                   child: Row(children: [
@@ -70,18 +72,13 @@ class _DesktopShell extends StatelessWidget {
                 const SizedBox(height: 8),
                 const Divider(indent: 16, endIndent: 16),
                 const SizedBox(height: 8),
-
-                // Nav items
                 for (int i = 0; i < _tabs.length; i++)
                   _SidebarItem(
                     tab: _tabs[i],
                     selected: i == selectedIndex,
-                    onTap: () => context.go(_tabs[i].path),
+                    onTap: () => navigationShell.goBranch(i),
                   ),
-
                 const Spacer(),
-
-                // Bottom actions
                 const Divider(indent: 16, endIndent: 16),
                 _SidebarItem(
                   tab: const _TabItem(
@@ -107,12 +104,8 @@ class _DesktopShell extends StatelessWidget {
               ],
             ),
           ),
-
-          // Vertical divider
           const VerticalDivider(width: 1),
-
-          // Main content
-          Expanded(child: child),
+          Expanded(child: navigationShell),
         ],
       ),
     );
@@ -164,20 +157,23 @@ class _SidebarItem extends StatelessWidget {
   }
 }
 
-// ── Mobile layout — bottom nav bar ────────────────────────────────────────────
+// ── Mobile layout — bottom nav bar ───────────────────────────────────────────
 
 class _MobileShell extends StatelessWidget {
-  final Widget child;
+  final StatefulNavigationShell navigationShell;
   final int selectedIndex;
-  const _MobileShell({required this.child, required this.selectedIndex});
+  const _MobileShell({
+    required this.navigationShell,
+    required this.selectedIndex,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: child,
+      body: navigationShell,
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedIndex,
-        onDestinationSelected: (i) => context.go(_tabs[i].path),
+        onDestinationSelected: navigationShell.goBranch,
         backgroundColor: Colors.white,
         indicatorColor: AppColors.primary.withAlpha(30),
         destinations: _tabs
