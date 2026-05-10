@@ -14,6 +14,9 @@ recurring-ical-events==3.2.0
 beautifulsoup4==4.12.3
 python-dateutil>=2.9.0
 
+# AI-powered assignment parsing (ChatGPT only)
+openai==1.41.1         # ChatGPT API for hybrid regex+AI parsing
+
 # ── Install later when wiring up the database ─────────────────────────────────
 # Uncomment these once you are ready to connect to Supabase/PostgreSQL:
 #

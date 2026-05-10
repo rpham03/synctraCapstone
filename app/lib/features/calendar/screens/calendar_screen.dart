@@ -15,6 +15,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../data/models/event_model.dart';
 import '../../../data/models/schedule_block_model.dart';
+import '../../../data/services/course_import_service.dart';
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -37,15 +38,23 @@ class _CalendarScreenState extends State<CalendarScreen> {
   // ordered list of {id, name, url} for saved feeds
   final List<Map<String, String>> _icalFeeds = [];
 
-  // Course URL import state (same pattern as iCal feeds)
+  // Course URL import state — populated from Supabase on init
   final Map<String, List<EventModel>> _courseImportEvents = {};
   final List<Map<String, String>> _courseImports = [];
+  final _courseImportService = CourseImportService();
+  bool _disposed = false;
 
   @override
   void initState() {
     super.initState();
     _loadSavedFeeds();
     _loadSavedCourseImports();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
   }
 
   Future<void> _loadSavedFeeds() async {
@@ -63,15 +72,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   Future<void> _loadSavedCourseImports() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList('course_imports') ?? [];
-    for (final item in raw) {
-      final feed = jsonDecode(item) as Map<String, dynamic>;
-      final id   = feed['id']   as String;
-      final name = feed['name'] as String;
-      final url  = feed['url']  as String;
-      _courseImports.add({'id': id, 'name': name, 'url': url});
-      _syncCourseImport(id, name, url).catchError((_) {});
+    try {
+      final records = await _courseImportService.loadImports();
+      for (final rec in records) {
+        // Load cached events from Supabase — no re-scrape on startup
+        final events = await _courseImportService.loadEventsForImport(rec.id);
+        if (_disposed || !mounted) return;
+        setState(() {
+          _courseImports.add({'id': rec.id, 'name': rec.courseName, 'url': rec.courseUrl});
+          _courseImportEvents[rec.id] = events;
+        });
+      }
+    } catch (_) {
+      // Not authenticated yet or network offline — silently skip
     }
   }
 
@@ -84,7 +97,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final events = (resp.data['events'] as List)
         .map((e) => EventModel.fromJson(e as Map<String, dynamic>))
         .toList();
-    if (mounted) setState(() => _feedEvents[feedId] = events);
+    if (!_disposed && mounted) setState(() => _feedEvents[feedId] = events);
   }
 
   Future<void> _addFeed(String url, String name) async {
@@ -105,31 +118,48 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   Future<void> _syncCourseImport(String importId, String name, String url) async {
-    final resp = await Dio().post(
-      '${ApiConstants.baseUrl}/events/course-import',
-      data: {'url': url, 'name': name},
+    final rec = await _courseImportService.syncImport(
+      importId: importId,
+      url: url,
+      name: name,
     );
-    final events = (resp.data['events'] as List)
-        .map((e) => EventModel.fromJson(e as Map<String, dynamic>))
-        .toList();
-    if (mounted) setState(() => _courseImportEvents[importId] = events);
+    final events = await _courseImportService.loadEventsForImport(rec.id);
+    if (!_disposed && mounted) {
+      setState(() {
+        final idx = _courseImports.indexWhere((f) => f['id'] == importId);
+        if (idx >= 0) {
+          _courseImports[idx] = {
+            'id': rec.id,
+            'name': rec.courseName,
+            'url': rec.courseUrl,
+          };
+        }
+        _courseImportEvents[importId] = events;
+      });
+    }
   }
 
   Future<void> _addCourseImport(String url, String name) async {
-    final id    = const Uuid().v4();
-    final prefs = await SharedPreferences.getInstance();
-    _courseImports.add({'id': id, 'name': name, 'url': url});
-    await prefs.setStringList(
-        'course_imports', _courseImports.map((f) => jsonEncode(f)).toList());
-    await _syncCourseImport(id, name, url);
+    final rec = await _courseImportService.addImport(url, name);
+    final events = await _courseImportService.loadEventsForImport(rec.id);
+    if (!_disposed && mounted) {
+      setState(() {
+        _courseImports.add({
+          'id': rec.id,
+          'name': rec.courseName,
+          'url': rec.courseUrl,
+        });
+        _courseImportEvents[rec.id] = events;
+      });
+    }
   }
 
   Future<void> _removeCourseImport(String importId) async {
-    final prefs = await SharedPreferences.getInstance();
-    _courseImports.removeWhere((f) => f['id'] == importId);
-    await prefs.setStringList(
-        'course_imports', _courseImports.map((f) => jsonEncode(f)).toList());
-    setState(() => _courseImportEvents.remove(importId));
+    await _courseImportService.removeImport(importId);
+    setState(() {
+      _courseImports.removeWhere((f) => f['id'] == importId);
+      _courseImportEvents.remove(importId);
+    });
   }
 
   List<dynamic> _eventsForDay(DateTime day) {
