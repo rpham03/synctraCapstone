@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     secret_key: str = "change-me-in-production"
     canvas_api_token: str = ""
+    # REST root including /api/v1 — UW default; override for other schools.
+    canvas_api_base_url: str = "https://canvas.uw.edu/api/v1"
     google_client_id: str = ""
     google_client_secret: str = ""
 

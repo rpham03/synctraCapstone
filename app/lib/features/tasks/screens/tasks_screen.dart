@@ -1,7 +1,9 @@
 // Task list view — shows Canvas assignments and manually added tasks with due dates.
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/constants/api_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/task_model.dart';
 
@@ -16,12 +18,56 @@ class _TasksScreenState extends State<TasksScreen> {
   // Filter state — which sources to show
   final Set<String> _activeFilters = {'canvas', 'manual'};
 
-  // TODO: replace with real data from repository
   final List<TaskModel> _tasks = [];
+  bool _syncing = false;
 
   List<TaskModel> get _filtered =>
       _tasks.where((t) => _activeFilters.contains(t.source)).toList()
         ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+
+  Future<void> _syncCanvas() async {
+    setState(() => _syncing = true);
+    try {
+      final response = await Dio().get<Map<String, dynamic>>(
+        '${ApiConstants.baseUrl}/canvas/assignments',
+      );
+      final raw = response.data?['tasks'];
+      if (raw is! List) {
+        throw const FormatException('Invalid response: missing tasks list');
+      }
+      final incoming = raw
+          .whereType<Map>()
+          .map((m) => TaskModel.fromJson(Map<String, dynamic>.from(m)))
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _tasks.removeWhere((t) => t.source == 'canvas');
+        _tasks.addAll(incoming);
+        _syncing = false;
+      });
+      if (mounted && incoming.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Canvas: no dated assignments returned.')),
+        );
+      }
+    } on DioException catch (e) {
+      if (!mounted) return;
+      setState(() => _syncing = false);
+      final msg = switch (e.response?.data) {
+        final Map m when m['detail'] != null => m['detail'].toString(),
+        _ => e.message ?? 'Canvas sync failed',
+      };
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg), backgroundColor: Colors.red[700]),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _syncing = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('$e'), backgroundColor: Colors.red[700]),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -30,9 +76,15 @@ class _TasksScreenState extends State<TasksScreen> {
         title: const Text('Tasks'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.sync),
+            icon: _syncing
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.sync),
             tooltip: 'Sync Canvas',
-            onPressed: () {/* TODO: trigger Canvas sync */},
+            onPressed: _syncing ? null : _syncCanvas,
           ),
           IconButton(
             icon: const Icon(Icons.filter_list),
@@ -115,7 +167,8 @@ class _TaskTile extends StatelessWidget {
   final ValueChanged<bool> onToggle;
   const _TaskTile({required this.task, required this.onToggle});
 
-  Color _urgencyColor(DateTime due) {
+  Color _urgencyColor(DateTime due, {required bool completed}) {
+    if (completed) return Colors.grey;
     final daysLeft = due.difference(DateTime.now()).inDays;
     if (daysLeft <= 1) return AppColors.deadline;
     if (daysLeft <= 3) return Colors.orange;
@@ -126,7 +179,15 @@ class _TaskTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final due = task.dueDate;
     final daysLeft = due.difference(DateTime.now()).inDays;
-    final urgency = _urgencyColor(due);
+    final completed = task.isCompleted;
+    final urgency = _urgencyColor(due, completed: completed);
+    final statusLabel = completed
+        ? 'Done'
+        : (daysLeft < 0
+            ? 'Overdue'
+            : daysLeft == 0
+                ? 'Today'
+                : '$daysLeft days');
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
@@ -161,15 +222,18 @@ class _TaskTile extends StatelessWidget {
           children: [
             Text(
               DateFormat('MMM d').format(due),
-              style: TextStyle(color: urgency, fontWeight: FontWeight.w600, fontSize: 13),
+              style: TextStyle(
+                color: completed ? Colors.grey[600] : urgency,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
             ),
             Text(
-              daysLeft < 0
-                  ? 'Overdue'
-                  : daysLeft == 0
-                      ? 'Today'
-                      : '$daysLeft days',
-              style: TextStyle(color: urgency, fontSize: 11),
+              statusLabel,
+              style: TextStyle(
+                color: completed ? Colors.grey[600] : urgency,
+                fontSize: 11,
+              ),
             ),
           ],
         ),
