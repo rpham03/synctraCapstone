@@ -133,11 +133,9 @@ class CourseImportService {
           'user_id': _userId,
           'title': ev['title'] as String,
           'description': ev['description'] as String?,
-          'start_time': start.toUtc().toIso8601String(),
-          'end_time': end.toUtc().toIso8601String(),
+          'start_time': start.toIso8601String(),
+          'end_time': end.toIso8601String(),
           'source': 'course',
-          // Stable within this import: importId + position index is fine
-          // because we always delete + re-insert on sync.
           'source_event_id': '$importId:$idx',
           'course_import_id': importId,
           'is_fixed': true,
@@ -151,23 +149,25 @@ class CourseImportService {
   }
 
   // Convert scraper's {date, time} pair into Flutter DateTimes.
-  // Assignments without a specific time default to 23:59 (end-of-day deadline).
+  // Keep dates in local time (don't convert to UTC) to avoid timezone shifts.
+  // If no time, use midnight (0:00) so it displays as all-day in calendar.
   (DateTime, DateTime) _parseTimes(Map<String, dynamic> ev) {
     final dateStr = ev['date'] as String; // "2026-04-15"
-    final timeStr = ev['time'] as String?; // "23:59" or null
+    final timeStr = ev['time'] as String?; // "10:30" or null
     final date = DateTime.parse(dateStr);
 
     final DateTime start;
-    if (timeStr != null) {
+    if (timeStr != null && timeStr.isNotEmpty) {
       final parts = timeStr.split(':');
       start = DateTime(
         date.year, date.month, date.day,
         int.parse(parts[0]), int.parse(parts[1]),
       );
     } else {
-      start = DateTime(date.year, date.month, date.day, 23, 59);
+      // Events without explicit time use midnight (all-day event)
+      start = DateTime(date.year, date.month, date.day, 0, 0);
     }
-    final end = start.add(const Duration(minutes: 30));
+    final end = start.add(const Duration(hours: 1));
     return (start, end);
   }
 

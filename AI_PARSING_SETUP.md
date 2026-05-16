@@ -1,40 +1,49 @@
-# ChatGPT-Enhanced Course Parsing Setup
+# Ollama-Based Course Parsing Setup
 
-This guide explains how to set up and use the new AI-enhanced parsing endpoints for the Syntra course import system using ChatGPT.
+This guide explains how to set up and use the new AI-enhanced parsing endpoints for the Syntra course import system using **Ollama** (free, private, local).
 
 ## Overview
 
 The system uses intelligent hybrid parsing that combines:
 - **Regex parsing** (80% of cases) — Fast, free, instant
-- **ChatGPT** (20% of cases) — For complex assignments
+- **Ollama** (20% of cases) — Free local AI for complex assignments
 - **Smart caching** — Never re-parse the same course twice
 
-**Result:** 80% fewer API calls while maintaining 95%+ accuracy, at $0.06 per 100 courses.
+**Result:** 80% fewer API calls, completely free, completely private, works offline!
 
 ---
 
 ## Installation
 
-### 1. Install Dependencies
+### 1. Install Ollama
+
+Download from: **https://ollama.ai**
+
+### 2. Pull a Model
+
+```bash
+ollama pull mistral
+```
+
+Models available:
+- `mistral` (4GB) — Recommended ⭐
+- `neural-chat` (4GB) — Alternative
+- `llama2` (4GB-8GB) — General purpose
+
+### 3. Start Ollama Server
+
+```bash
+ollama serve
+```
+
+You should see: `Listening on 127.0.0.1:11434`
+
+### 4. Install Backend Dependencies
 
 ```bash
 cd backend
 pip install -r requirements.txt
 ```
-
-This installs:
-- `openai` — ChatGPT API for hybrid parsing
-
-### 2. Set Environment Variable
-
-Create or update `backend/.env`:
-
-```bash
-OPENAI_API_KEY=sk-...your-openai-key...
-```
-
-**Get API Key:**
-- **OpenAI**: https://platform.openai.com/api-keys
 
 ---
 
@@ -42,7 +51,7 @@ OPENAI_API_KEY=sk-...your-openai-key...
 
 ### 1. Parse Course Text
 
-Parse raw course website text using hybrid regex + ChatGPT approach.
+Parse raw course website text using hybrid regex + Ollama approach.
 
 **Endpoint:** `POST /api/v1/course-import/parse-text`
 
@@ -51,14 +60,18 @@ Parse raw course website text using hybrid regex + ChatGPT approach.
 {
   "raw_text": "HW1 due Friday 4/10...",
   "course_name": "CSE 331",
-  "confidence_threshold": 0.75
+  "confidence_threshold": 0.75,
+  "ollama_model": "mistral",
+  "ollama_host": "http://localhost:11434"
 }
 ```
 
 **Parameters:**
 - `raw_text` (string, required) — Course text to parse
 - `course_name` (string) — Course identifier (default: "Unknown Course")
-- `confidence_threshold` (float) — Threshold for using ChatGPT (0.0-1.0, default: 0.75)
+- `confidence_threshold` (float) — Threshold for using Ollama (0.0-1.0, default: 0.75)
+- `ollama_model` (string) — Model to use (default: "mistral")
+- `ollama_host` (string) — Ollama server URL (default: "http://localhost:11434")
 
 **Response:**
 ```json
@@ -177,17 +190,20 @@ Cache result (never re-parse)
 | Method | API Calls | Cost | Speed |
 |--------|-----------|------|-------|
 | Pure ChatGPT (all AI) | 100 | $0.30 | 30s |
-| **Hybrid (ChatGPT + Regex)** | **20** | **$0.06** | **2s** |
-| **Savings** | **80%** | **80%** | **15x faster** |
+| Pure Ollama (all AI) | 100 | **$0.00** | 60s |
+| **Hybrid (Ollama + Regex)** | **20** | **$0.00** | **~10s** |
+| **Savings vs ChatGPT** | **80%** | **80%** | Same |
 
 ### For 1000 Students (4 courses each)
 
 ```
 1000 students × 4 courses = 4000 imports/year
 Unique courses: ~100-200 (lots of repeats with caching)
-Actual API calls: ~200
+Actual API calls needed: ~200
 
-Annual cost: 200 × $0.003 = $0.60
+Annual cost with Ollama: $0.00 (COMPLETELY FREE!)
+Annual cost with ChatGPT: $0.60
+Savings: $0.60/year per 1000 students
 ```
 
 ---
@@ -270,39 +286,49 @@ Example metrics for 100 courses:
 
 ## Troubleshooting
 
-### "OPENAI_API_KEY not found"
-Make sure your `.env` file includes:
+### "Cannot connect to Ollama at http://localhost:11434"
+Make sure Ollama is running:
+```bash
+ollama serve
 ```
-OPENAI_API_KEY=sk-...
+
+Keep this terminal open while using the API.
+
+### "Model not found: mistral"
+Pull the model first:
+```bash
+ollama pull mistral
 ```
 
 ### "Failed to parse course text"
 Check that:
 1. `raw_text` is not empty
 2. Text contains assignment information
-3. API key is valid and has quota
+3. Ollama server is running: `ollama serve`
 
 ### Response time is slow
-If most courses are using ChatGPT:
 - Lower `confidence_threshold` to be more aggressive with regex
-- Enable caching to reuse results for repeated text
+- Enable GPU acceleration (NVIDIA/AMD)
+- Use a faster model: `ollama pull neural-chat`
 
 ---
 
 ## Next Steps
 
-1. Install dependencies: `pip install -r requirements.txt`
-2. Set `OPENAI_API_KEY` in `.env`
-3. Start server: `uvicorn app.main:app --reload`
-4. Test endpoints using curl examples above
-5. Integrate into your application
+1. ✅ Install Ollama: https://ollama.ai/download
+2. ✅ Pull model: `ollama pull mistral`
+3. ✅ Start server: `ollama serve`
+4. ✅ Install backend: `pip install -r requirements.txt`
+5. ✅ Start app: `uvicorn app.main:app --reload`
+6. ✅ Test endpoints using curl examples above
 
 ---
 
 ## References
 
+- **Ollama Setup Guide**: [OLLAMA_SETUP.md](OLLAMA_SETUP.md) (Detailed guide)
 - **Hybrid Parser**: [hybrid_parser.py](backend/app/api/v1/routes/hybrid_parser.py)
-- **ChatGPT Parser**: [openai_assignment_parser.py](backend/app/api/v1/routes/openai_assignment_parser.py)
+- **Ollama Parser**: [ollama_assignment_parser.py](backend/app/api/v1/routes/ollama_assignment_parser.py)
 - **Course Scraper**: [course_import.py](backend/app/api/v1/routes/course_import.py)
-- **OpenAI API Docs**: https://platform.openai.com/docs/
+- **Ollama Official**: https://ollama.ai
 
