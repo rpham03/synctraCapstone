@@ -40,6 +40,7 @@ CREATE TABLE public.events (
     location        TEXT,
     start_time      TIMESTAMPTZ NOT NULL,
     end_time        TIMESTAMPTZ NOT NULL,
+    event_type      TEXT        CHECK (event_type IN ('lecture', 'lab', 'section', 'discussion', 'exam', 'office_hours')),
     source          TEXT        NOT NULL CHECK (source IN ('canvas', 'google_calendar', 'manual', 'ical', 'course')),
     source_event_id TEXT,
     course_import_id UUID,

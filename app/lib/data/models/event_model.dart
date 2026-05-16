@@ -4,9 +4,11 @@ class EventModel {
   final String title;
   final DateTime startTime;
   final DateTime endTime;
-  final String source; // 'google_calendar' | 'canvas' | 'manual' | 'ical' | 'course'
+  // 'google_calendar' | 'canvas' | 'manual' | 'ical' | 'course'
+  final String source;
   final bool isFixed;
   final String? description;
+  final String? sourceEventId;
 
   const EventModel({
     required this.id,
@@ -16,7 +18,11 @@ class EventModel {
     required this.source,
     this.isFixed = true,
     this.description,
+    this.sourceEventId,
   });
+
+  bool get isDateOnlyCourseEvent =>
+      source == 'course' && (sourceEventId?.contains('_date_only_') ?? false);
 
   // From backend scraper JSON response
   factory EventModel.fromJson(Map<String, dynamic> json) => EventModel(
@@ -27,6 +33,7 @@ class EventModel {
         source: json['source'] as String? ?? 'manual',
         isFixed: json['is_fixed'] as bool? ?? true,
         description: json['description'] as String?,
+        sourceEventId: json['source_event_id'] as String?,
       );
 
   // From Supabase row
@@ -38,6 +45,7 @@ class EventModel {
         source: row['source'] as String,
         isFixed: row['is_fixed'] as bool? ?? true,
         description: row['description'] as String?,
+        sourceEventId: row['source_event_id'] as String?,
       );
 
   // For upserting into Supabase events table

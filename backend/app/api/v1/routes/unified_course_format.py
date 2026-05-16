@@ -39,7 +39,7 @@ class UnifiedClassEvent(BaseModel):
     event_name: str  # "Lecture 5", "Lab A", "Discussion Section"
     event_type: str  # "lecture", "section", "lab", "discussion", "office_hours", "exam"
     date: str  # ISO format: "2026-04-10"
-    start_time: str  # 24h format: "10:30"
+    start_time: Optional[str]  # 24h format: "10:30", null if not specified
     end_time: Optional[str]  # 24h format: "11:20"
     location: Optional[str]  # "CSE2 B215", "Zoom", "Engineering Building Room 101"
     description: Optional[str]  # "Introduction to algorithms", "Office hours"

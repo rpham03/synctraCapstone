@@ -92,15 +92,18 @@ class CourseImportService {
       '${ApiConstants.baseUrl}/course-import/',
       queryParameters: {'course_url': url},
       options: Options(
-        sendTimeout: const Duration(seconds: 60),
-        receiveTimeout: const Duration(seconds: 60),
+        sendTimeout: const Duration(seconds: 180),
+        receiveTimeout: const Duration(seconds: 180),
       ),
     );
 
     final data = resp.data as Map<String, dynamic>;
-    final scrapedEvents = data['events'] as List<dynamic>;
-    final bestSource = data['best_source'] as String?;
-    final courseName = name.isNotEmpty ? name : _nameFromUrl(url);
+    final courseName = name.isNotEmpty
+        ? name
+        : (data['course_name'] as String? ?? _nameFromUrl(url));
+    final totalImported = data['total_imported'] as int? ?? 0;
+    final classEvents = data['class_events'] as List<dynamic>? ?? [];
+    final assignments = data['assignments'] as List<dynamic>? ?? [];
 
     // 2. Upsert the course_imports row.
     final importRow = await _db
@@ -110,9 +113,9 @@ class CourseImportService {
             'user_id': _userId,
             'course_url': url,
             'course_name': courseName,
-            'best_source': bestSource,
+            'best_source': 'ai_parsed',
             'last_synced_at': DateTime.now().toUtc().toIso8601String(),
-            'event_count': scrapedEvents.length,
+            'event_count': totalImported,
           },
           onConflict: 'user_id, course_url',
         )
@@ -121,61 +124,108 @@ class CourseImportService {
 
     final importId = importRow['id'] as String;
 
-    // 3. Delete stale events for this import, then re-insert fresh ones.
-    await _db.from('events').delete().eq('course_import_id', importId);
-
-    if (scrapedEvents.isNotEmpty) {
-      final rows = scrapedEvents.asMap().entries.map((entry) {
+    // 3. Save events from backend response.
+    final rows = <Map<String, dynamic>>[
+      ...classEvents.asMap().entries.map((entry) {
         final idx = entry.key;
         final ev = entry.value as Map<String, dynamic>;
-        final (start, end) = _parseTimes(ev);
+        final title = ev['event_name'] as String;
+        final rawStartTime = ev['start_time'] as String?;
+        final hasTime = rawStartTime != null && rawStartTime.trim().isNotEmpty;
+        final startTime = hasTime ? rawStartTime : '00:00';
+        final endTime =
+            hasTime ? ((ev['end_time'] as String?) ?? startTime) : startTime;
+        final startIso = '${ev['date']}T$startTime';
+        final endIso = '${ev['date']}T$endTime';
+
         return {
           'user_id': _userId,
-          'title': ev['title'] as String,
+          'title': title,
           'description': ev['description'] as String?,
-          'start_time': start.toIso8601String(),
-          'end_time': end.toIso8601String(),
+          'location': ev['location'] as String?,
+          'start_time': startIso,
+          'end_time': endIso,
+          'event_type': ev['event_type'] as String,
           'source': 'course',
-          'source_event_id': '$importId:$idx',
+          'source_event_id': _sourceEventId(
+            importId: importId,
+            kind: hasTime ? 'class' : 'class_date_only',
+            index: idx,
+            title: title,
+            startIso: startIso,
+            endIso: endIso,
+          ),
           'course_import_id': importId,
           'is_fixed': true,
         };
-      }).toList();
+      }),
+      ...assignments.asMap().entries.map((entry) {
+        final idx = entry.key;
+        final assignment = entry.value as Map<String, dynamic>;
+        final title = assignment['assignment_name'] as String;
+        final rawDueTime = assignment['due_time'] as String?;
+        final dueTime =
+            rawDueTime == null || rawDueTime.trim().isEmpty ? null : rawDueTime;
+        final dueIso = '${assignment['due_date']}T${dueTime ?? '00:00'}';
 
+        return {
+          'user_id': _userId,
+          'title': title,
+          'description': assignment['description'] as String?,
+          'location': null,
+          'start_time': dueIso,
+          'end_time': dueIso,
+          'event_type': assignment['assignment_type'] == 'exam' ? 'exam' : null,
+          'source': 'course',
+          'source_event_id': _sourceEventId(
+            importId: importId,
+            kind: dueTime == null ? 'assignment_date_only' : 'assignment',
+            index: idx,
+            title: title,
+            startIso: dueIso,
+            endIso: dueIso,
+          ),
+          'course_import_id': importId,
+          'is_fixed': true,
+        };
+      }),
+    ];
+
+    // Delete old events first, then insert the current scrape.
+    await _db.from('events').delete().eq('course_import_id', importId);
+    if (rows.isNotEmpty) {
       await _db.from('events').insert(rows);
     }
 
     return CourseImportRecord.fromSupabase(importRow);
   }
 
-  // Convert scraper's {date, time} pair into Flutter DateTimes.
-  // Keep dates in local time (don't convert to UTC) to avoid timezone shifts.
-  // If no time, use midnight (0:00) so it displays as all-day in calendar.
-  (DateTime, DateTime) _parseTimes(Map<String, dynamic> ev) {
-    final dateStr = ev['date'] as String; // "2026-04-15"
-    final timeStr = ev['time'] as String?; // "10:30" or null
-    final date = DateTime.parse(dateStr);
-
-    final DateTime start;
-    if (timeStr != null && timeStr.isNotEmpty) {
-      final parts = timeStr.split(':');
-      start = DateTime(
-        date.year, date.month, date.day,
-        int.parse(parts[0]), int.parse(parts[1]),
-      );
-    } else {
-      // Events without explicit time use midnight (all-day event)
-      start = DateTime(date.year, date.month, date.day, 0, 0);
-    }
-    final end = start.add(const Duration(hours: 1));
-    return (start, end);
-  }
-
   String _nameFromUrl(String url) {
     // Best-effort: extract last two path segments, e.g. "cse331/26sp"
-    final segments = Uri.parse(url).pathSegments.where((s) => s.isNotEmpty).toList();
-    if (segments.length >= 2) return segments.reversed.take(2).toList().reversed.join(' / ');
-    if (segments.isNotEmpty) return segments.last;
+    final segments =
+        Uri.parse(url).pathSegments.where((s) => s.isNotEmpty).toList();
+    if (segments.length >= 2) {
+      return segments.reversed.take(2).toList().reversed.join(' / ');
+    }
+    if (segments.isNotEmpty) {
+      return segments.last;
+    }
     return url;
+  }
+
+  String _sourceEventId({
+    required String importId,
+    required String kind,
+    required int index,
+    required String title,
+    required String startIso,
+    required String endIso,
+  }) {
+    final raw = '$importId|$kind|$startIso|$endIso|$title|$index';
+    return raw
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
   }
 }

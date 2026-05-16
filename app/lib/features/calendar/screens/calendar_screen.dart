@@ -857,7 +857,9 @@ class _FixedEventTile extends StatelessWidget {
       'course' => Colors.teal,
       _        => AppColors.fixedEvent,
     };
-    final time = '${_fmt(event.startTime)} – ${_fmt(event.endTime)}';
+    final time = event.isDateOnlyCourseEvent
+        ? null
+        : '${_fmt(event.startTime)} – ${_fmt(event.endTime)}';
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
@@ -870,7 +872,7 @@ class _FixedEventTile extends StatelessWidget {
         ),
         title: Text(event.title,
             style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text(time),
+        subtitle: time == null ? null : Text(time),
         trailing: _SourceBadge(source: event.source),
       ),
     );
