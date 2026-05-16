@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime
 from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -26,6 +26,76 @@ router = APIRouter(tags=["course-import"])
 
 ASSIGNMENT_DUE_RE = re.compile(r"\b(?:due|deadline)\b", re.IGNORECASE)
 CALENDAR_LINK_RE = re.compile(r"\b(?:calendar|schedule)\b", re.IGNORECASE)
+ASSIGNMENT_LINK_RE = re.compile(r"\b(?:assignments?|homework|hw)\b", re.IGNORECASE)
+TABLE_DATE_RE = re.compile(r"\b(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])/(\d{2}|\d{4})\b")
+MONTH_DAY_RE = re.compile(
+    r"\b(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)?\.?,?\s*"
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{2}|\d{4})(?!:))?\b",
+    re.IGNORECASE,
+)
+NUMERIC_MONTH_DAY_RE = re.compile(
+    r"\b(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)?\.?,?\s*\(?"
+    r"(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])(?:/(\d{2}|\d{4}))?\)?\b",
+    re.IGNORECASE,
+)
+DUE_PHRASE_RE = re.compile(r"\b(?:due|deadline)\b[^)]*", re.IGNORECASE)
+DUE_OR_INITIAL_SUBMISSION_RE = re.compile(
+    r"\b(?:due|deadline)\b|\bI\.?\s*S\.?(?:\s+by)?\b",
+    re.IGNORECASE,
+)
+DUE_TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b", re.IGNORECASE)
+DEFAULT_DUE_TIME_RE = re.compile(
+    r"\bdue\s+(?:at|by)\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b",
+    re.IGNORECASE,
+)
+INLINE_DUE_ASSIGNMENT_RE = re.compile(
+    r"\b(?P<title>(?:Homework|HW|Pset|Assignment\s+\d+|Project|Lab|A\d+|P\d+|C\d+|R\d+)"
+    r"[^.;]{0,140}?)\s*(?:\(|,)?\s*\bdue\b:?\s*"
+    r"(?P<due>.*?)(?=[.;)]|\b(?:Homework|HW|Pset|Assignment\s+\d+|Project|Lab|A\d+|P\d+|C\d+|R\d+)\b|$)",
+    re.IGNORECASE,
+)
+ASSIGNMENT_LIKE_RE = re.compile(
+    r"\b(?:assignment|homework|hw\d*|pset|problem\s*set|project|lab\d*|quiz|exam|"
+    r"reflection|resub|artifact|survey|c\d+|p\d+|r\d+|wa\d+|tha\d+)\b",
+    re.IGNORECASE,
+)
+MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+ASSIGNMENT_PAGE_CANDIDATES = [
+    "assignments/index.html",
+    "assignments/",
+    "homework/index.html",
+    "homework/",
+    "hw/index.html",
+    "hw/",
+]
 
 
 class CourseImportResponse(BaseModel):
@@ -173,6 +243,539 @@ def clean_calendar_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def infer_default_year(course_url: str) -> int:
+    """Infer academic year from UW quarter fragments like 26sp."""
+    match = re.search(r"/(\d{2})(?:wi|sp|su|au|fa)\b", course_url, re.IGNORECASE)
+    if match:
+        return 2000 + int(match.group(1))
+
+    return datetime.now().year
+
+
+def normalize_two_digit_year(year: int) -> int:
+    """Convert two-digit course years into 2000-based years."""
+    return year + 2000 if year < 100 else year
+
+
+def parse_numeric_course_date(text: str) -> datetime | None:
+    """Parse course schedule dates like 01/12/26 or 01/12/2026."""
+    match = TABLE_DATE_RE.search(text)
+    if not match:
+        return None
+
+    month, day, year = (int(part) for part in match.groups())
+    year = normalize_two_digit_year(year)
+
+    try:
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
+def parse_course_date(text: str, default_year: int) -> datetime | None:
+    """Parse course dates with or without an explicit year."""
+    if not text:
+        return None
+
+    numeric_with_year = parse_numeric_course_date(text)
+    if numeric_with_year:
+        return numeric_with_year
+
+    numeric_match = NUMERIC_MONTH_DAY_RE.search(text)
+    if numeric_match:
+        month, day = int(numeric_match.group(1)), int(numeric_match.group(2))
+        raw_year = numeric_match.group(3)
+        year = normalize_two_digit_year(int(raw_year)) if raw_year else default_year
+        try:
+            return datetime(year, month, day)
+        except ValueError:
+            return None
+
+    month_match = MONTH_DAY_RE.search(text)
+    if month_match:
+        month_name = month_match.group(1).lower().rstrip(".")
+        month = MONTHS.get(month_name[:3], MONTHS.get(month_name))
+        day = int(month_match.group(2))
+        raw_year = month_match.group(3)
+        year = normalize_two_digit_year(int(raw_year)) if raw_year else default_year
+        if month:
+            try:
+                return datetime(year, month, day)
+            except ValueError:
+                return None
+
+    return None
+
+
+def parse_due_time(text: str) -> tuple[int, int] | None:
+    """Parse due-time text such as 11:59pm into 24-hour clock values."""
+    match = DUE_TIME_RE.search(text)
+    if not match:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2) or "0")
+    meridiem = match.group(3).lower()
+
+    if hour < 1 or hour > 12 or minute > 59:
+        return None
+
+    if meridiem.startswith("p") and hour != 12:
+        hour += 12
+    elif meridiem.startswith("a") and hour == 12:
+        hour = 0
+
+    return hour, minute
+
+
+def find_default_due_time(soup) -> tuple[int, int] | None:
+    """Find a page-level default due time such as 'due at 11pm'."""
+    page_text = clean_calendar_text(soup.get_text(" ", strip=True))
+    match = DEFAULT_DUE_TIME_RE.search(page_text)
+    if not match:
+        return None
+
+    return parse_due_time(match.group(0))
+
+
+def extract_due_datetime(
+    due_text: str,
+    context_date: datetime | None,
+    default_year: int,
+    default_due_time: tuple[int, int] | None = None,
+) -> tuple[datetime, bool] | None:
+    """Resolve a due date/time from a cell using row date as context."""
+    due_date = parse_course_date(due_text, default_year)
+    if due_date is None and (
+        context_date is not None
+        and (
+            re.search(r"\btoday\b", due_text, re.IGNORECASE)
+            or DUE_OR_INITIAL_SUBMISSION_RE.search(due_text)
+            or parse_due_time(due_text)
+        )
+    ):
+        due_date = context_date
+
+    if due_date is None:
+        return None
+
+    due_time = parse_due_time(due_text) or default_due_time
+    if due_time:
+        hour, minute = due_time
+        return due_date.replace(hour=hour, minute=minute), False
+
+    return due_date, True
+
+
+def clean_due_assignment_title(title: str) -> str:
+    """Remove leftover punctuation around assignment titles from schedule cells."""
+    title = re.sub(r"\s*\($", "", title)
+    title = re.sub(r"\s*\([^)]*$", "", title)
+    title = re.sub(r"^\W+", "", title)
+    title = re.sub(r"\W+$", "", title)
+    title = clean_calendar_text(title)
+
+    # CSE 403 sometimes puts informational links before the real due item.
+    if " posted in ed " in title.lower():
+        title = re.split(r"\bposted in ed\b", title, flags=re.IGNORECASE)[-1]
+        title = clean_calendar_text(title)
+
+    return title
+
+
+def clean_schedule_assignment_title(title: str) -> str:
+    """Clean common schedule-table prefixes from an assignment title."""
+    title = clean_calendar_text(title)
+    title_matches = list(re.finditer(
+        r"\b(?:Homework\s*\d+|HW\s*\d+|Pset\s*\d+|Assignment\s+\d+|Lab\s*\d+|"
+        r"A\d+|P\d+|C\d+|R\d+|WA\d+|THA\d+)",
+        title,
+        flags=re.IGNORECASE,
+    ))
+    if title_matches:
+        first_match = title_matches[0]
+        last_match = title_matches[-1]
+        if first_match.start() > 0:
+            title = title[first_match.start():]
+        elif len(title_matches) > 1 and re.search(
+            r"\b(?:here|turn in|output comparison|tool)\b",
+            title[:last_match.start()],
+            re.IGNORECASE,
+        ):
+            title = title[last_match.start():]
+
+    title = re.sub(r"\([^)]*\b[Dd]ue\b[^)]*\)", "", title)
+    title = re.split(
+        r"\b(?:due|deadline)\b|\bI\.?\s*S\.?(?:\s+by)?\b|\bby\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)",
+        title,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    title = re.sub(r"^\s*(?:Released|Out|Assigned:|Assignment:)\s+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*\((?:pdf|html)\)\s*", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(?:Specification|template|pdf|html)\b", " ", title, flags=re.IGNORECASE)
+    title = re.sub(r"\]\([^)]*$", "", title)
+    title = re.sub(r"^[\s,;:()\\[\\]-]+|[\s,;:()\\[\\]-]+$", "", title)
+    return clean_calendar_text(title)
+
+
+def build_assignment_event(
+    title: str,
+    due_dt: datetime,
+    all_day: bool,
+    description: str,
+    index: int,
+) -> dict | None:
+    """Build a deterministic assignment event if the title is usable."""
+    clean_title = clean_schedule_assignment_title(title)
+    if not clean_title or clean_title.lower() in {"assignment", "assignments", "due", "deadline"}:
+        return None
+
+    return {
+        "id": f"{due_dt.isoformat()}_assignment_{index}",
+        "title": clean_title,
+        "start_time": due_dt.isoformat(),
+        "end_time": due_dt.isoformat(),
+        "source": "course",
+        "is_fixed": True,
+        "event_kind": "assignment",
+        "event_type": infer_assignment_type(clean_title),
+        "description": description,
+        "all_day": all_day,
+    }
+
+
+def parse_due_table_assignments(soup) -> list[dict]:
+    """Parse assignment due dates from schedule table assignment columns.
+
+    Some UW course pages, including CSE 403, store assignments in a table
+    column like: "Project proposal (due Mon 01/12/26 11:59pm)".
+    """
+    events = []
+
+    for row in soup.find_all("tr"):
+        cells = row.find_all(["td", "th"], recursive=False)
+        if not cells:
+            continue
+
+        row_date = parse_numeric_course_date(cells[0].get_text(" ", strip=True))
+        due_cells = [
+            cell for cell in cells
+            if "due" in {class_name.lower() for class_name in cell.get("class", [])}
+        ]
+
+        if not due_cells:
+            continue
+
+        for cell in due_cells:
+            cell_text = clean_calendar_text(cell.get_text(" ", strip=True))
+            if not ASSIGNMENT_DUE_RE.search(cell_text):
+                continue
+
+            previous_end = 0
+            for match in DUE_PHRASE_RE.finditer(cell_text):
+                due_text = match.group(0)
+                due_date = parse_numeric_course_date(due_text)
+
+                if due_date is None and re.search(r"\btoday\b", due_text, re.IGNORECASE):
+                    due_date = row_date
+                elif due_date is None and re.search(r"\bduring class\b", due_text, re.IGNORECASE):
+                    due_date = row_date
+
+                if due_date is None:
+                    continue
+
+                title_text = cell_text[previous_end:match.start()]
+                title = clean_due_assignment_title(title_text)
+                if not title:
+                    continue
+
+                due_time = parse_due_time(due_text)
+                all_day = due_time is None
+                if due_time:
+                    hour, minute = due_time
+                    due_dt = due_date.replace(hour=hour, minute=minute)
+                else:
+                    due_dt = due_date
+
+                events.append({
+                    "id": f"{due_dt.isoformat()}_table_assignment_{len(events)}",
+                    "title": title,
+                    "start_time": due_dt.isoformat(),
+                    "end_time": due_dt.isoformat(),
+                    "source": "course",
+                    "is_fixed": True,
+                    "event_kind": "assignment",
+                    "event_type": infer_assignment_type(title),
+                    "description": cell_text,
+                    "all_day": all_day,
+                })
+
+                previous_end = match.end()
+                while previous_end < len(cell_text) and cell_text[previous_end] in " )":
+                    previous_end += 1
+
+    return events
+
+
+def get_header_indices(headers: list[str]) -> tuple[int | None, int | None, int | None]:
+    """Find date, due-date, and assignment columns in table headers."""
+    date_col = None
+    due_col = None
+    assignment_col = None
+
+    for index, header in enumerate(headers):
+        normalized = header.lower()
+        if due_col is None and "due" in normalized:
+            due_col = index
+        if date_col is None and any(term in normalized for term in ("date", "day", "when")):
+            date_col = index
+        if assignment_col is None and any(
+            term in normalized
+            for term in ("assignment", "homework", "hw", "lab", "pset", "project")
+        ):
+            assignment_col = index
+
+    return date_col, due_col, assignment_col
+
+
+def append_assignment_event(
+    events: list[dict],
+    title: str,
+    due_result: tuple[datetime, bool] | None,
+    description: str,
+) -> None:
+    """Append a normalized assignment event when due parsing succeeded."""
+    if due_result is None:
+        return
+
+    due_dt, all_day = due_result
+    event = build_assignment_event(title, due_dt, all_day, description, len(events))
+    if event:
+        events.append(event)
+
+
+def parse_schedule_table_assignments(soup, default_year: int) -> list[dict]:
+    """Parse assignments from common course schedule/assignment tables."""
+    events = []
+    default_due_time = find_default_due_time(soup)
+
+    for table in soup.find_all("table"):
+        headers: list[str] = []
+        current_date = None
+
+        for row in table.find_all("tr"):
+            cells_el = row.find_all(["td", "th"], recursive=False)
+            cells = [clean_calendar_text(cell.get_text(" ", strip=True)) for cell in cells_el]
+            if not any(cells):
+                continue
+
+            combined_header = " ".join(cells).lower()
+            header_like = (
+                row.find("th") is not None
+                or (
+                    not parse_course_date(cells[0], default_year)
+                    and any(term in combined_header for term in ("date", "assignment", "homework", "due"))
+                    and not any(term in combined_header for term in ("released", "out ", " due "))
+                )
+            )
+            if header_like:
+                headers = [cell.lower() for cell in cells]
+                continue
+
+            first_cell_date = parse_course_date(cells[0], default_year)
+            if first_cell_date:
+                current_date = first_cell_date
+
+            date_col, due_col, assignment_col = get_header_indices(headers)
+            handled_header_assignment = False
+
+            if due_col is not None and due_col < len(cells):
+                due_text = cells[due_col]
+                if due_text:
+                    due_result = extract_due_datetime(
+                        due_text,
+                        current_date,
+                        default_year,
+                        default_due_time,
+                    )
+                    if due_result is None and current_date and ASSIGNMENT_LIKE_RE.search(due_text):
+                        due_result = (current_date, True)
+
+                    title = ""
+                    if assignment_col is not None and assignment_col < len(cells):
+                        title = cells[assignment_col]
+                    if not title:
+                        title = due_text
+                    append_assignment_event(
+                        events,
+                        title,
+                        due_result,
+                        " | ".join(cells),
+                    )
+                    handled_header_assignment = True
+
+            if (
+                due_col is None
+                and date_col is not None
+                and assignment_col is not None
+                and date_col < len(cells)
+                and assignment_col < len(cells)
+                and cells[assignment_col]
+            ):
+                append_assignment_event(
+                    events,
+                    cells[assignment_col],
+                    extract_due_datetime(cells[date_col], current_date, default_year, default_due_time),
+                    " | ".join(cells),
+                )
+                handled_header_assignment = True
+
+            if handled_header_assignment:
+                continue
+
+            row_text = " ".join(cells)
+            if not ASSIGNMENT_LIKE_RE.search(row_text):
+                continue
+
+            due_marked_indices = [
+                index for index, cell in enumerate(cells)
+                if DUE_OR_INITIAL_SUBMISSION_RE.search(cell)
+                or re.search(
+                    r"\bby\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b",
+                    cell,
+                    re.IGNORECASE,
+                )
+            ]
+
+            if not due_marked_indices and due_col is not None and due_col < len(cells) and cells[due_col]:
+                due_marked_indices = [due_col]
+
+            for due_index in due_marked_indices:
+                due_text = cells[due_index]
+                due_result = extract_due_datetime(
+                    due_text,
+                    current_date,
+                    default_year,
+                    default_due_time,
+                )
+                if due_result is None:
+                    continue
+
+                title = clean_schedule_assignment_title(due_text)
+                if not title or not ASSIGNMENT_LIKE_RE.search(title):
+                    previous_parts = [
+                        cell for index, cell in enumerate(cells[:due_index])
+                        if cell and not parse_course_date(cell, default_year)
+                    ]
+                    title = " ".join(previous_parts[-2:] + ([title] if title else []))
+                if not title:
+                    title = due_text
+
+                append_assignment_event(events, title, due_result, " | ".join(cells))
+
+    return events
+
+
+def parse_inline_due_assignments(soup, default_year: int) -> list[dict]:
+    """Parse prose snippets like 'Homework 1 ... Due Monday, May 25, 11pm'."""
+    events = []
+    default_due_time = find_default_due_time(soup)
+    text_soup = BeautifulSoup(str(soup), "html.parser")
+    for table in text_soup.find_all("table"):
+        table.decompose()
+    text = clean_calendar_text(text_soup.get_text(" ", strip=True))
+
+    for match in INLINE_DUE_ASSIGNMENT_RE.finditer(text):
+        title = match.group("title")
+        due_text = match.group("due")
+        if re.fullmatch(r"[ACPR]\d+", clean_schedule_assignment_title(title), re.IGNORECASE):
+            continue
+        due_result = extract_due_datetime(due_text, None, default_year, default_due_time)
+        append_assignment_event(events, title, due_result, match.group(0))
+
+    return events
+
+
+def parse_assignment_cards_with_date_context(soup, default_year: int) -> list[dict]:
+    """Parse card/list layouts where a date heading contains assignment labels."""
+    events = []
+    default_due_time = find_default_due_time(soup)
+
+    for card in soup.select(".MuiPaper-root"):
+        text = clean_calendar_text(card.get_text(" ", strip=True))
+        if "Assignment Due" not in text or "Assignment:" not in text:
+            continue
+
+        date = parse_course_date(text[:80], default_year)
+        if date is None:
+            continue
+
+        for title in re.split(r"\bAssignment:\s*", text, flags=re.IGNORECASE)[1:]:
+            title = re.split(r"\bAssignment\s+Due\b|\bReadings?\b|\b\d{1,2}:\d{2}\b", title)[0]
+            if default_due_time:
+                hour, minute = default_due_time
+                due_result = (date.replace(hour=hour, minute=minute), False)
+            else:
+                due_result = (date, True)
+            append_assignment_event(
+                events,
+                title,
+                due_result,
+                text,
+            )
+
+    current_date = None
+    root = soup.select_one("#calendar") or soup.select_one(".main-content") or soup.body
+    if root:
+        for node in root.descendants:
+            if isinstance(node, NavigableString):
+                text = clean_calendar_text(str(node))
+                if 3 <= len(text) <= 30:
+                    parsed_date = parse_course_date(text, default_year)
+                    if parsed_date:
+                        current_date = parsed_date
+                continue
+
+            if not isinstance(node, Tag):
+                continue
+
+            if node.name in {"strong", "span"}:
+                label = clean_calendar_text(
+                    " ".join(str(text) for text in node.find_all(string=True, recursive=False))
+                )
+                if "due" in label.lower() and ASSIGNMENT_LIKE_RE.search(label):
+                    append_assignment_event(
+                        events,
+                        label,
+                        extract_due_datetime(label, current_date, default_year, default_due_time),
+                        label,
+                    )
+
+    return events
+
+
+def parse_course_assignments(soup, default_year: int) -> list[dict]:
+    """Run all deterministic assignment extractors for a course page."""
+    events = []
+    events.extend(parse_assignment_cards(soup))
+    events.extend(parse_due_table_assignments(soup))
+    events.extend(parse_schedule_table_assignments(soup, default_year))
+    events.extend(parse_assignment_cards_with_date_context(soup, default_year))
+    events.extend(parse_inline_due_assignments(soup, default_year))
+
+    deduped = []
+    seen = set()
+    for event in events:
+        key = (event["title"], event["start_time"], event.get("all_day"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+
+    return deduped
+
+
 def infer_grid_item_type(class_names: set[str], title: str) -> str:
     """Infer event type from CSE grid-calendar CSS classes and title."""
     lower_classes = {class_name.lower() for class_name in class_names}
@@ -236,6 +839,53 @@ def parse_grid_calendar(soup) -> list[dict]:
     return events
 
 
+def parse_assignment_cards(soup) -> list[dict]:
+    """Parse assignment-card pages such as CSE446 assignments/index.html."""
+    events = []
+    for card in soup.select(".hw-card[data-date], .assignment-card[data-date], .assignment[data-date]"):
+        raw_date = card.get("data-date", "").strip()
+        if not raw_date:
+            continue
+
+        try:
+            due_dt = datetime.fromisoformat(raw_date)
+        except ValueError:
+            try:
+                due_dt = datetime.fromisoformat(f"{raw_date}T00:00:00")
+            except ValueError:
+                continue
+
+        title_el = (
+            card.select_one(".hw-title")
+            or card.select_one(".assignment-title")
+            or card.find(["h2", "h3", "h4"])
+        )
+        title = clean_calendar_text(
+            title_el.get_text(" ", strip=True) if title_el else card.get_text(" ", strip=True)
+        )
+        if not title:
+            continue
+
+        due_text_el = card.select_one(".hw-date") or card.select_one(".assignment-date")
+        due_text = clean_calendar_text(due_text_el.get_text(" ", strip=True) if due_text_el else "")
+        description = due_text
+
+        events.append({
+            "id": f"{due_dt.isoformat()}_assignment_{len(events)}",
+            "title": title,
+            "start_time": due_dt.isoformat(),
+            "end_time": due_dt.isoformat(),
+            "source": "course",
+            "is_fixed": True,
+            "event_kind": "assignment",
+            "event_type": infer_assignment_type(title),
+            "description": description,
+            "all_day": "T" not in raw_date,
+        })
+
+    return events
+
+
 def parse_supported_calendar_soup(soup) -> list[dict]:
     """Parse known deterministic calendar formats from a BeautifulSoup document."""
     if _has_monthtable(soup):
@@ -269,7 +919,7 @@ def calendar_event_to_unified(
             "due_date": start_dt.date().isoformat(),
             "due_time": None if all_day else start_time,
             "points": None,
-            "description": "",
+            "description": event.get("description", ""),
             "submission_method": None,
             "requirements": [],
             "is_individual": True,
@@ -300,12 +950,30 @@ def convert_calendar_events_to_unified(
     """Convert deterministic calendar parser output into the route response schema."""
     assignments = []
     class_events = []
+    seen_assignments = set()
+    seen_class_events = set()
 
     for event in events:
         assignment, class_event = calendar_event_to_unified(event, course_name, course_url)
         if assignment:
+            key = (
+                assignment["assignment_name"],
+                assignment["due_date"],
+                assignment.get("due_time"),
+            )
+            if key in seen_assignments:
+                continue
+            seen_assignments.add(key)
             assignments.append(assignment)
         if class_event:
+            key = (
+                class_event["event_name"],
+                class_event["date"],
+                class_event.get("start_time"),
+            )
+            if key in seen_class_events:
+                continue
+            seen_class_events.add(key)
             class_events.append(class_event)
 
     return {
@@ -325,7 +993,9 @@ async def parse_static_course_calendar(
     main_soup = BeautifulSoup(html, "html.parser")
     title_tag = main_soup.find("title")
     course_name = title_tag.get_text(strip=True) if title_tag else fallback_course_name
+    default_year = infer_default_year(course_url)
     calendar_events = []
+    assignment_events = parse_course_assignments(main_soup, default_year)
 
     async with httpx.AsyncClient(
         follow_redirects=True,
@@ -369,6 +1039,7 @@ async def parse_static_course_calendar(
                         continue
 
                     calendar_soup = BeautifulSoup(response.text, "html.parser")
+                    assignment_events.extend(parse_course_assignments(calendar_soup, default_year))
                     calendar_events = parse_supported_calendar_soup(calendar_soup)
                     if calendar_events:
                         candidate_title = calendar_soup.find("title")
@@ -378,8 +1049,41 @@ async def parse_static_course_calendar(
                 except Exception:
                     continue
 
+        assignment_candidate_urls = []
+        seen_assignment_urls = set()
+
+        def add_assignment_candidate(url: str) -> None:
+            if url not in seen_assignment_urls:
+                seen_assignment_urls.add(url)
+                assignment_candidate_urls.append(url)
+
+        for link in main_soup.find_all("a", href=True):
+            href = link["href"]
+            text = link.get_text(" ", strip=True)
+            if ASSIGNMENT_LINK_RE.search(href) or ASSIGNMENT_LINK_RE.search(text):
+                add_assignment_candidate(urljoin(course_url, href))
+
+        for path in ASSIGNMENT_PAGE_CANDIDATES:
+            add_assignment_candidate(urljoin(base_url, path))
+
+        for candidate_url in assignment_candidate_urls:
+            try:
+                response = await client.get(candidate_url)
+                if response.status_code != 200:
+                    continue
+
+                assignment_soup = BeautifulSoup(response.text, "html.parser")
+                found_assignments = parse_course_assignments(assignment_soup, default_year)
+                if found_assignments:
+                    assignment_events.extend(found_assignments)
+                    break
+            except Exception:
+                continue
+
     if not calendar_events:
         calendar_events = _html_fallback(main_soup, datetime.now().year)
+
+    calendar_events.extend(assignment_events)
 
     if not calendar_events:
         return None
