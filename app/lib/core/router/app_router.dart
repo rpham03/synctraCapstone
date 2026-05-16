@@ -14,7 +14,7 @@ import '../../shared/widgets/main_shell.dart';
 class AppRouter {
   static final _rootNavigatorKey = GlobalKey<NavigatorState>();
 
-  static GoRouter get router => GoRouter(
+  static final GoRouter router = GoRouter(
         navigatorKey: _rootNavigatorKey,
         initialLocation: '/calendar',
         // Redirect to login if user is not authenticated
