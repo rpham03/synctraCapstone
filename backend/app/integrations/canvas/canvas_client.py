@@ -22,8 +22,10 @@ def _submission_done(submission: dict | None) -> bool:
     return wf in ("submitted", "graded", "pending_review", "complete")
 
 
-def _due_at_in_view_window(due_at_iso: str, *, days_past: int = 7) -> bool:
+def _due_at_in_view_window(due_at_iso: object, *, days_past: int = 7) -> bool:
     """True if due is in [now - days_past, +infinity) — last week of history + all upcoming."""
+    if not isinstance(due_at_iso, str):
+        return False
     s = due_at_iso.strip()
     if not s:
         return False
@@ -103,7 +105,8 @@ class CanvasClient:
                 aid = a.get("id")
                 if aid is None:
                     continue
-                title = (a.get("name") or "Assignment").strip()
+                raw_name = a.get("name") or "Assignment"
+                title = raw_name.strip() if isinstance(raw_name, str) else "Assignment"
                 sub = a.get("submission")
                 if isinstance(sub, list):
                     sub = sub[0] if sub else None

@@ -32,7 +32,19 @@ def test_canvas_assignments_without_token_returns_503(monkeypatch):
     assert "CANVAS_API_TOKEN" in r.json().get("detail", "")
 
 
-def test_chat_message():
+def test_chat_message(monkeypatch):
+    import app.core.config.settings as settings_mod
+
+    monkeypatch.setattr(settings_mod.settings, "chat_llm_provider", "ollama")
+    monkeypatch.setattr(settings_mod.settings, "openai_api_key", "")
+
+    async def _fake_turn(*_a, **_k):
+        return "Here is what is due soon."
+
+    monkeypatch.setattr(
+        "app.services.chat_service.OllamaAgentService.run_turn",
+        _fake_turn,
+    )
     r = client.post(
         "/api/v1/chat/message",
         json={"message": "What is due this week?", "user_id": "test-user"},

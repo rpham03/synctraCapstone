@@ -1,9 +1,12 @@
 // Chat interface — lets users update their schedule through natural language.
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/constants/api_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/chat_message_model.dart';
+import '../../../data/services/calendar_events_loader.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -56,18 +59,55 @@ class _ChatScreenState extends State<ChatScreen> {
     _ctrl.clear();
     _scrollToBottom();
 
-    // TODO: call backend /api/v1/chat with the message
-    await Future.delayed(const Duration(seconds: 1));
-
-    setState(() {
-      _messages.add(ChatMessageModel(
-        id: '${DateTime.now().millisecondsSinceEpoch}_resp',
-        content: "Got it! I'm working on that — scheduling logic coming soon.",
-        role: MessageRole.assistant,
-        timestamp: DateTime.now(),
-      ));
-      _loading = false;
-    });
+    try {
+      final calendarEvents = await CalendarEventsLoader.loadForChat();
+      final response = await Dio().post<Map<String, dynamic>>(
+        '${ApiConstants.baseUrl}/chat/message',
+        data: {
+          'message': text,
+          'user_id': 'app-user',
+          'calendar_events': calendarEvents,
+        },
+      );
+      final reply = response.data?['reply']?.toString() ??
+          'Sorry, I did not get a reply from the server.';
+      if (!mounted) return;
+      setState(() {
+        _messages.add(ChatMessageModel(
+          id: '${DateTime.now().millisecondsSinceEpoch}_resp',
+          content: reply,
+          role: MessageRole.assistant,
+          timestamp: DateTime.now(),
+        ));
+        _loading = false;
+      });
+    } on DioException catch (e) {
+      if (!mounted) return;
+      final msg = switch (e.response?.data) {
+        final Map m when m['detail'] != null => m['detail'].toString(),
+        _ => e.message ?? 'Could not reach the chat API',
+      };
+      setState(() {
+        _messages.add(ChatMessageModel(
+          id: '${DateTime.now().millisecondsSinceEpoch}_err',
+          content: msg,
+          role: MessageRole.assistant,
+          timestamp: DateTime.now(),
+        ));
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _messages.add(ChatMessageModel(
+          id: '${DateTime.now().millisecondsSinceEpoch}_err',
+          content: '$e',
+          role: MessageRole.assistant,
+          timestamp: DateTime.now(),
+        ));
+        _loading = false;
+      });
+    }
     _scrollToBottom();
   }
 

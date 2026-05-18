@@ -5,6 +5,7 @@ pydantic==2.9.2
 pydantic-settings==2.5.2
 httpx==0.27.0
 python-dotenv==1.0.1
+openai>=1.55.0
 
 # iCal feed parsing
 icalendar==5.0.13
@@ -17,8 +18,8 @@ python-dateutil>=2.9.0
 # AI-powered assignment parsing (Ollama - local, private, free)
 # No SDK needed - uses HTTP API directly
 
-# Database — Supabase for storing calendar events
-supabase==2.2.1
+# Database — Supabase (2.15+ works with httpx 0.27; 2.30+ needs pydantic>=2.11.7)
+supabase>=2.15.0,<2.16
 
 # ── Install later when wiring up the database ─────────────────────────────────
 # Uncomment these once you are ready to connect to Supabase/PostgreSQL:
