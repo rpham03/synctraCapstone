@@ -8,9 +8,9 @@ class Breakpoints {
 }
 
 class Responsive {
-  /// True when running in a browser / desktop window wider than 900px.
+  /// True when there is room for the Notion-style sidebar + calendar mini panel + grid.
   static bool isDesktop(BuildContext context) =>
-      MediaQuery.sizeOf(context).width >= Breakpoints.tablet;
+      MediaQuery.sizeOf(context).width >= 1000;
 
   static bool isMobile(BuildContext context) =>
       MediaQuery.sizeOf(context).width < Breakpoints.mobile;

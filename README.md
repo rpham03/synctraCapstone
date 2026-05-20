@@ -21,7 +21,7 @@ syntraCapstone/
 
 ## Tech Stack
 
-- **Frontend**: Flutter (iOS, Android, Web)
+- **Frontend**: Flutter (iOS, Android, Web) — **mobile-first**; web targets quick access and larger screens, not a desktop-only layout.
 - **Backend**: Python + FastAPI
 - **ML**: Python (scikit-learn / PyTorch)
 - **Integrations**: Canvas LMS API, Google Calendar API

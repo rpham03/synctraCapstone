@@ -43,15 +43,7 @@ class ScheduleChatCoordinator {
     final weekStart = _startOfIsoWeek(now);
     final weekEnd = weekStart.add(const Duration(days: 7));
 
-    final fixed = <FixedEvent>[
-      for (final e in _store.previewFixed)
-        FixedEvent(
-          id: e.id,
-          title: e.title,
-          startTime: e.startTime,
-          endTime: e.endTime,
-        ),
-    ];
+    final fixed = _store.fixedEventsForScheduling();
 
     final constraints = <UserConstraint>[];
     final t = userMessage.toLowerCase();
@@ -84,6 +76,102 @@ class ScheduleChatCoordinator {
           now: now,
         );
     }
+  }
+
+  /// Pack study time before a Canvas due (or similar) using the same engine as chat.
+  String scheduleStudyForDueItem({
+    required String taskId,
+    required String title,
+    required DateTime dueDate,
+    double hours = 1.5,
+    bool preferMorning = false,
+  }) {
+    final now = DateTime.now();
+    final weekStart = _startOfIsoWeek(now);
+    final weekEnd = weekStart.add(const Duration(days: 7));
+    final fixed = _store.fixedEventsForScheduling();
+    const constraints = <UserConstraint>[];
+
+    final enriched = _llm.enrichTaskStub(
+      taskId: taskId,
+      title: title,
+      hours: hours,
+      priority: 'medium',
+      urgency: false,
+    );
+    final err = SchedulingService.validateEnrichedTask(enriched);
+    if (err != null) {
+      return 'Could not schedule: $err';
+    }
+
+    final task = SchedulingService.flexibleFromLlm(
+      enriched,
+      title: title,
+      dueDate: dueDate,
+      preferMorning: preferMorning,
+    );
+
+    final byId = <String, List<ScheduleBlockModel>>{};
+    for (final b in _store.blocks) {
+      byId.putIfAbsent(b.taskId, () => []).add(b);
+    }
+    final existingFlexible = <FlexibleTask>[
+      for (final e in byId.entries)
+        FlexibleTask(
+          id: e.key,
+          title: e.value.first.taskTitle,
+          dueDate: weekEnd.subtract(const Duration(seconds: 1)),
+          estimatedDuration: e.value.fold<Duration>(
+            Duration.zero,
+            (s, b) => s + b.endTime.difference(b.startTime),
+          ),
+          priority: 0,
+        ),
+    ];
+
+    final allTasks = [...existingFlexible, task];
+    const config = SchedulingConfig(
+      bufferAroundFixedEvents: Duration(minutes: 15),
+      minimumBlockSize: Duration(minutes: 30),
+    );
+
+    final result = _scheduling.scheduleWithNearestAlternative(
+      weekStart: weekStart,
+      weekEnd: weekEnd,
+      fixedEvents: fixed,
+      flexibleTasks: allTasks,
+      task: task,
+      config: config,
+      userConstraints: constraints,
+      constraintClock: now,
+    );
+
+    final newBlocks = result.weekBlocks ?? const [];
+    if (newBlocks.isNotEmpty) {
+      final titles = <String, String>{
+        for (final b in _store.blocks) b.taskId: b.taskTitle,
+        task.id: title,
+      };
+      for (final s in newBlocks) {
+        titles.putIfAbsent(s.taskId, () => s.taskId);
+      }
+      _store.applySynctraPreview(
+        scheduled: [...newBlocks],
+        taskTitles: titles,
+        fixed: fixed,
+      );
+    }
+
+    final intent = SchedulingIntent(
+      action: 'add',
+      taskName: title,
+      durationHours: hours,
+    );
+    return _llm.generateSchedulingReply(
+      userMessage: 'Schedule study for $title',
+      intent: intent,
+      result: result,
+    );
   }
 
   SchedulingResult _runQuery(
