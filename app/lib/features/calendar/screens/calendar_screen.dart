@@ -261,6 +261,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
       .where((e) => e.source == 'canvas' && isSameDay(e.startTime, day))
       .toList();
 
+  /// Due-date chips only — timed Canvas items live in the hour grid.
+  List<EventModel> _canvasChipsOnDay(DateTime day) => _canvasOnDay(day)
+      .where((e) => !_canvasShowsInTimeGrid(e))
+      .toList();
+
   List<EventModel> _courseAllDayOnDay(DateTime day) => _allEvents()
       .where((e) => e.isDateOnlyCourseEvent && isSameDay(e.startTime, day))
       .toList();
@@ -333,20 +338,20 @@ class _CalendarScreenState extends State<CalendarScreen> {
   String _toolbarTitle() {
     switch (_viewMode) {
       case _CalendarViewMode.day:
-        return DateFormat('EEEE, MMMM d, y').format(_focusedDay);
+        return DateFormat('EEEE, MMMM d, yyyy').format(_focusedDay);
       case _CalendarViewMode.week:
         final days = _visibleDays();
         final a = days.first;
         final b = days.last;
         if (a.month == b.month && a.year == b.year) {
-          return '${DateFormat('MMM d').format(a)} – ${DateFormat('d, y').format(b)}';
+          return '${DateFormat('MMMM d').format(a)} – ${DateFormat('d, yyyy').format(b)}';
         }
         if (a.year == b.year) {
           return '${DateFormat('MMM d').format(a)} – ${DateFormat('MMM d, y').format(b)}';
         }
         return '${DateFormat('MMM d, y').format(a)} – ${DateFormat('MMM d, y').format(b)}';
       case _CalendarViewMode.month:
-        return DateFormat('MMMM y').format(_focusedDay);
+        return DateFormat('MMMM yyyy').format(_focusedDay);
     }
   }
 
@@ -721,7 +726,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onDaySelected: _onDaySelected,
       onPageChanged: (d) => setState(() => _focusedDay = d),
       timedEventsOnDay: _timedEventsOnDay,
-      canvasOnDay: _canvasOnDay,
+      canvasOnDay: _canvasChipsOnDay,
       courseAllDayOnDay: _courseAllDayOnDay,
       blocksOnDay: _blocksOnDay,
       visibleDays: _visibleDays(),
@@ -988,6 +993,188 @@ class _CalendarToolbar extends StatelessWidget {
     required this.onSuggestSchedule,
   });
 
+  static const _compactToolbarBreakpoint = 720.0;
+
+  Widget _navCluster(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (showMenuButton)
+          _compactIconButton(
+            context,
+            tooltip: 'Menu — nav & planner',
+            onPressed: onOpenMenu,
+            icon: Icons.menu,
+          ),
+        _compactIconButton(
+          context,
+          tooltip: 'Previous',
+          onPressed: onPrev,
+          icon: Icons.chevron_left,
+        ),
+        _compactIconButton(
+          context,
+          tooltip: 'Next',
+          onPressed: onNext,
+          icon: Icons.chevron_right,
+        ),
+        TextButton(
+          onPressed: onToday,
+          style: TextButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            minimumSize: const Size(0, 36),
+          ),
+          child: const Text('Today'),
+        ),
+      ],
+    );
+  }
+
+  Widget _viewModeControl(BuildContext context, {required bool iconOnly}) {
+    if (iconOnly) {
+      return SegmentedButton<_CalendarViewMode>(
+        style: const ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        segments: const [
+          ButtonSegment(
+            value: _CalendarViewMode.day,
+            icon: Icon(Icons.view_day_outlined, size: 18),
+            tooltip: 'Day',
+          ),
+          ButtonSegment(
+            value: _CalendarViewMode.week,
+            icon: Icon(Icons.view_week_outlined, size: 18),
+            tooltip: 'Week',
+          ),
+          ButtonSegment(
+            value: _CalendarViewMode.month,
+            icon: Icon(Icons.calendar_view_month_outlined, size: 18),
+            tooltip: 'Month',
+          ),
+        ],
+        selected: {viewMode},
+        onSelectionChanged: (s) => onViewModeChanged(s.first),
+      );
+    }
+    return SegmentedButton<_CalendarViewMode>(
+      style: const ButtonStyle(visualDensity: VisualDensity.compact),
+      segments: const [
+        ButtonSegment(value: _CalendarViewMode.day, label: Text('Day')),
+        ButtonSegment(value: _CalendarViewMode.week, label: Text('Week')),
+        ButtonSegment(value: _CalendarViewMode.month, label: Text('Month')),
+      ],
+      selected: {viewMode},
+      onSelectionChanged: (s) => onViewModeChanged(s.first),
+    );
+  }
+
+  Widget _compactIconButton(
+    BuildContext context, {
+    required String tooltip,
+    required VoidCallback onPressed,
+    required IconData icon,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+      icon: Icon(icon, size: 22),
+    );
+  }
+
+  List<Widget> _actionIconButtons(BuildContext context) {
+    return [
+      _compactIconButton(
+        context,
+        tooltip: 'Suggest schedule',
+        onPressed: onSuggestSchedule,
+        icon: Icons.schedule_outlined,
+      ),
+      _compactIconButton(
+        context,
+        tooltip: 'iCal feeds',
+        onPressed: onOpenIcal,
+        icon: Icons.link_outlined,
+      ),
+      _compactIconButton(
+        context,
+        tooltip: 'Course import',
+        onPressed: onOpenCourseImport,
+        icon: Icons.school_outlined,
+      ),
+      _compactIconButton(
+        context,
+        tooltip: 'Account & settings',
+        onPressed: () => context.push('/settings'),
+        icon: Icons.person_outline,
+      ),
+    ];
+  }
+
+  Widget _overflowMenu(BuildContext context) {
+    return PopupMenuButton<_ToolbarMenuAction>(
+      tooltip: 'More calendar actions',
+      icon: const Icon(Icons.more_horiz),
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+      onSelected: (action) {
+        switch (action) {
+          case _ToolbarMenuAction.schedule:
+            onSuggestSchedule();
+          case _ToolbarMenuAction.ical:
+            onOpenIcal();
+          case _ToolbarMenuAction.course:
+            onOpenCourseImport();
+          case _ToolbarMenuAction.settings:
+            context.push('/settings');
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(
+          value: _ToolbarMenuAction.schedule,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.schedule_outlined),
+            title: Text('Suggest schedule'),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem(
+          value: _ToolbarMenuAction.ical,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.link_outlined),
+            title: Text('iCal feeds'),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem(
+          value: _ToolbarMenuAction.course,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.school_outlined),
+            title: Text('Course import'),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem(
+          value: _ToolbarMenuAction.settings,
+          child: ListTile(
+            dense: true,
+            leading: Icon(Icons.person_outline),
+            title: Text('Settings'),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -999,99 +1186,84 @@ class _CalendarToolbar extends StatelessWidget {
       shadowColor: Colors.black.withValues(alpha: 0.08),
       surfaceTintColor: Colors.transparent,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
         decoration: BoxDecoration(
           border: Border(
-              bottom: BorderSide(
-                  color: scheme.outlineVariant.withValues(alpha: 0.6))),
+            bottom: BorderSide(
+              color: scheme.outlineVariant.withValues(alpha: 0.6),
+            ),
+          ),
         ),
         child: LayoutBuilder(
           builder: (context, constraints) {
-            return Row(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          tooltip: 'Previous',
-                          onPressed: onPrev,
-                          icon: const Icon(Icons.chevron_left),
-                        ),
-                        IconButton(
-                          tooltip: 'Next',
-                          onPressed: onNext,
-                          icon: const Icon(Icons.chevron_right),
-                        ),
-                        TextButton(
-                            onPressed: onToday, child: const Text('Today')),
-                        const SizedBox(width: 8),
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                            maxWidth:
-                                (constraints.maxWidth * 0.35).clamp(120, 360),
-                          ),
-                          child: Text(
-                            title,
-                            style: textTheme.titleMedium
-                                ?.copyWith(fontWeight: FontWeight.w500),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        SegmentedButton<_CalendarViewMode>(
-                          segments: const [
-                            ButtonSegment(
-                                value: _CalendarViewMode.day,
-                                label: Text('Day')),
-                            ButtonSegment(
-                                value: _CalendarViewMode.week,
-                                label: Text('Week')),
-                            ButtonSegment(
-                                value: _CalendarViewMode.month,
-                                label: Text('Month')),
-                          ],
-                          selected: {viewMode},
-                          onSelectionChanged: (s) => onViewModeChanged(s.first),
-                        ),
-                        if (showMenuButton)
-                          IconButton(
-                            tooltip: 'Menu — nav & planner',
-                            onPressed: onOpenMenu,
-                            icon: const Icon(Icons.menu),
-                          ),
-                        IconButton(
-                          tooltip: 'Suggest schedule',
-                          onPressed: onSuggestSchedule,
-                          icon: const Icon(Icons.schedule_outlined),
-                        ),
-                        IconButton(
-                          tooltip: 'iCal Feeds',
-                          onPressed: onOpenIcal,
-                          icon: const Icon(Icons.link_outlined),
-                        ),
-                        IconButton(
-                          tooltip: 'Course Import',
-                          onPressed: onOpenCourseImport,
-                          icon: const Icon(Icons.school_outlined),
-                        ),
-                        IconButton(
-                          tooltip: 'Account & settings',
-                          onPressed: () => context.push('/settings'),
-                          icon: const Icon(Icons.person_outline),
-                        ),
-                      ],
+            final compact = constraints.maxWidth < _compactToolbarBreakpoint;
+            final useOverflowMenu = constraints.maxWidth < 400;
+
+            final syncIt = Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: SyncItLaunchButton(
+                isOpen: aiChatOpen,
+                onPressed: onToggleAiChat,
+                compact: compact,
+              ),
+            );
+
+            if (!compact) {
+              return Row(
+                children: [
+                  _navCluster(context),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w500,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  _viewModeControl(context, iconOnly: false),
+                  const SizedBox(width: 4),
+                  ..._actionIconButtons(context),
+                  syncIt,
+                ],
+              );
+            }
+
+            final actions = useOverflowMenu
+                ? [_overflowMenu(context)]
+                : _actionIconButtons(context);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    _navCluster(context),
+                    const Spacer(),
+                    syncIt,
+                  ],
                 ),
-                Padding(
-                  padding: const EdgeInsets.only(left: 8, right: 4),
-                  child: SyncItLaunchButton(
-                    isOpen: aiChatOpen,
-                    onPressed: onToggleAiChat,
+                const SizedBox(height: 4),
+                Text(
+                  title,
+                  style: textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    height: 1.25,
                   ),
+                  maxLines: 2,
+                  softWrap: true,
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    _viewModeControl(context, iconOnly: true),
+                    const Spacer(),
+                    ...actions,
+                  ],
                 ),
               ],
             );
@@ -1101,6 +1273,8 @@ class _CalendarToolbar extends StatelessWidget {
     );
   }
 }
+
+enum _ToolbarMenuAction { schedule, ical, course, settings }
 
 // ── Month + upcoming planner (desktop column or mobile sheet) ───────────────
 
@@ -1500,6 +1674,18 @@ class _WeekDayHeaderRow extends StatelessWidget {
   }
 }
 
+/// Max side-by-side columns when many events overlap (avoids 1px-wide chips).
+const _kMaxOverlapCols = 3;
+
+/// Split "CSE 331 · Quiz 4" into course + assignment for clearer chips.
+(String title, String? course) _chipTitleParts(String raw) {
+  final parts = raw.split(' · ');
+  if (parts.length >= 2) {
+    return (parts.sublist(1).join(' · ').trim(), parts.first.trim());
+  }
+  return (raw.trim(), null);
+}
+
 /// One timed segment for column packing (events + study blocks).
 class _SegLay {
   _SegLay({
@@ -1812,14 +1998,37 @@ class _AllDayEventChip extends StatelessWidget {
               ),
               const SizedBox(width: 5),
               Expanded(
-                child: Text(
-                  event.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: color,
-                        fontWeight: FontWeight.w600,
-                      ),
+                child: Builder(
+                  builder: (context) {
+                    final (title, course) = _chipTitleParts(event.title);
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (course != null)
+                          Text(
+                            course,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                  color: color.withValues(alpha: 0.85),
+                                  fontSize: 10,
+                                  height: 1.1,
+                                ),
+                          ),
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                color: color,
+                                fontWeight: FontWeight.w600,
+                                height: 1.15,
+                              ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
             ],
@@ -1985,6 +2194,7 @@ class _DayTimeColumn extends StatelessWidget {
     final maxCols = segs.isEmpty
         ? 1
         : segs.map((s) => s.col).reduce((a, b) => a > b ? a : b) + 1;
+    final layoutCols = math.max(1, math.min(maxCols, _kMaxOverlapCols));
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -2003,7 +2213,7 @@ class _DayTimeColumn extends StatelessWidget {
           final w = constraints.maxWidth;
           const pad = 4.0;
           final inner = (w - pad * 2).clamp(4.0, w);
-          final colW = inner / maxCols;
+          final colW = inner / layoutCols;
 
           return Stack(
             clipBehavior: Clip.hardEdge,
@@ -2026,6 +2236,7 @@ class _DayTimeColumn extends StatelessWidget {
                   gridHeight: gridHeight,
                   pad: pad,
                   colW: colW,
+                  layoutCols: layoutCols,
                   totalMins: totalMins,
                   dayStart: dayStart,
                 ),
@@ -2064,6 +2275,7 @@ class _DayTimeColumn extends StatelessWidget {
     required double gridHeight,
     required double pad,
     required double colW,
+    required int layoutCols,
     required int totalMins,
     required DateTime dayStart,
   }) {
@@ -2072,8 +2284,10 @@ class _DayTimeColumn extends StatelessWidget {
     if (h <= 0 || top >= gridHeight) return const SizedBox.shrink();
     final topVis = top.clamp(0.0, gridHeight);
     final maxH = (gridHeight - topVis).clamp(0.0, gridHeight);
-    final left = pad + s.col * colW;
-    final width = (colW - 2).clamp(8.0, colW);
+    final colIndex = s.col % layoutCols;
+    final left = pad + colIndex * colW;
+    // Never clamp(min > max): narrow columns use whatever width is available.
+    final width = math.max(1.0, colW - 2);
 
     double chipHeight(double minH) {
       if (maxH <= 0) return 0;
@@ -2185,20 +2399,24 @@ class _DragTimeChipShellState extends State<_DragTimeChipShell> {
     if (!widget.enabled) {
       return SizedBox(height: widget.heightPx, child: widget.child);
     }
-    return SizedBox(
-      height: widget.heightPx,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: Transform.translate(
-                offset: Offset(0, _dy),
-                child: widget.child,
-              ),
-            ),
-            GestureDetector(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final showGrip = constraints.maxWidth >= 48;
+        return SizedBox(
+          height: widget.heightPx,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: Transform.translate(
+                    offset: Offset(0, _dy),
+                    child: widget.child,
+                  ),
+                ),
+                if (showGrip)
+                  GestureDetector(
               behavior: HitTestBehavior.opaque,
               onVerticalDragUpdate: (d) => setState(() => _dy += d.delta.dy),
               onVerticalDragEnd: (_) {
@@ -2218,22 +2436,24 @@ class _DragTimeChipShellState extends State<_DragTimeChipShell> {
                 if (ne - ns < 15) return;
                 widget.onCommitMinutes(ns, ne);
               },
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.2),
-                ),
-                child: const SizedBox(
-                  width: 11,
-                  child: Center(
-                    child: Icon(Icons.drag_indicator,
-                        size: 10, color: Colors.white70),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.2),
+                      ),
+                      child: const SizedBox(
+                        width: 11,
+                        child: Center(
+                          child: Icon(Icons.drag_indicator,
+                              size: 10, color: Colors.white70),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }
@@ -2285,47 +2505,78 @@ class _TimedEventChip extends StatelessWidget {
     final durLabel = dur.inHours >= 1
         ? '${dur.inHours}h ${dur.inMinutes % 60}m'
         : '${dur.inMinutes}m';
+    final (title, course) = _chipTitleParts(event.title);
+    final timeLabel =
+        '${DateFormat('h:mm a').format(event.startTime)} – ${DateFormat('h:mm a').format(event.endTime)}';
     return Material(
       color: color.withValues(alpha: 0.94),
-      borderRadius: BorderRadius.circular(10),
-      elevation: 2,
-      shadowColor: Colors.black.withValues(alpha: 0.18),
+      borderRadius: BorderRadius.circular(8),
+      elevation: 1,
+      shadowColor: Colors.black.withValues(alpha: 0.12),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         child: LayoutBuilder(
           builder: (context, constraints) {
             final h = constraints.maxHeight;
-            final showDuration = h >= 40;
-            final maxTitleLines = h >= 48 ? 2 : 1;
+            final w = constraints.maxWidth;
+            final compact = h < 36 || w < 56;
+            final showCourse = course != null && h >= 44 && w >= 72;
+            final showDuration = !compact && h >= 52;
+            final showTime = !compact && h >= 36 && !showDuration;
             return Padding(
               padding: EdgeInsets.symmetric(
-                horizontal: 6,
-                vertical: showDuration ? 5 : 3,
+                horizontal: compact ? 4 : 6,
+                vertical: compact ? 2 : 4,
               ),
               child: Column(
-                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.start,
+                mainAxisSize: MainAxisSize.max,
                 children: [
-                  Flexible(
-                    child: Text(
-                      event.title,
-                      maxLines: maxTitleLines,
+                  if (showCourse)
+                    Text(
+                      course,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            height: 1.2,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.9),
+                            fontWeight: FontWeight.w500,
+                            height: 1.1,
                           ),
                     ),
+                  Text(
+                    title,
+                    maxLines: compact ? 1 : 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                          height: 1.15,
+                          fontSize: compact ? 11 : null,
+                        ),
                   ),
+                  if (showTime)
+                    Text(
+                      timeLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.88),
+                            height: 1.1,
+                            fontSize: 10,
+                          ),
+                    ),
                   if (showDuration)
                     Text(
                       durLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
                             color: Colors.white.withValues(alpha: 0.92),
                             fontWeight: FontWeight.w500,
+                            height: 1.1,
                           ),
                     ),
                 ],
@@ -2354,58 +2605,62 @@ class _StudyBlockChip extends StatelessWidget {
         : '${dur.inMinutes}m';
     return Material(
       color: color.withValues(alpha: 0.94),
-      borderRadius: BorderRadius.circular(10),
-      elevation: 2,
-      shadowColor: Colors.black.withValues(alpha: 0.2),
+      borderRadius: BorderRadius.circular(8),
+      elevation: 1,
+      shadowColor: Colors.black.withValues(alpha: 0.12),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         child: LayoutBuilder(
           builder: (context, constraints) {
             final h = constraints.maxHeight;
-            final showDuration = h >= 40;
-            final maxTitleLines = h >= 48 ? 2 : 1;
+            final w = constraints.maxWidth;
+            final compact = h < 36 || w < 56;
+            final showDuration = !compact && h >= 48;
             return Padding(
               padding: EdgeInsets.symmetric(
-                horizontal: 6,
-                vertical: showDuration ? 5 : 3,
+                horizontal: compact ? 4 : 6,
+                vertical: compact ? 2 : 4,
               ),
               child: Column(
-                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.start,
+                mainAxisSize: MainAxisSize.max,
                 children: [
-                  Flexible(
-                    child: Row(
-                      children: [
-                        if (block.isAiGenerated)
-                          Padding(
-                            padding: const EdgeInsets.only(right: 4),
-                            child: Icon(Icons.auto_awesome,
-                                size: 12,
-                                color: Colors.white.withValues(alpha: 0.95)),
-                          ),
-                        Expanded(
-                          child: Text(
-                            block.taskTitle,
-                            maxLines: maxTitleLines,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.2,
-                                ),
-                          ),
+                  Row(
+                    children: [
+                      if (block.isAiGenerated && w >= 40)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 3),
+                          child: Icon(Icons.auto_awesome,
+                              size: compact ? 10 : 12,
+                              color: Colors.white.withValues(alpha: 0.95)),
                         ),
-                      ],
-                    ),
+                      Expanded(
+                        child: Text(
+                          block.taskTitle,
+                          maxLines: compact ? 1 : 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                                height: 1.15,
+                                fontSize: compact ? 11 : null,
+                              ),
+                        ),
+                      ),
+                    ],
                   ),
                   if (showDuration)
                     Text(
                       durLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
                             color: Colors.white.withValues(alpha: 0.92),
                             fontWeight: FontWeight.w500,
+                            height: 1.1,
                           ),
                     ),
                 ],

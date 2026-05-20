@@ -15,11 +15,14 @@ abstract final class SyncItBranding {
 class SyncItLaunchButton extends StatelessWidget {
   final bool isOpen;
   final VoidCallback onPressed;
+  /// Icon-only control for narrow toolbars (full label on wider layouts).
+  final bool compact;
 
   const SyncItLaunchButton({
     super.key,
     required this.isOpen,
     required this.onPressed,
+    this.compact = false,
   });
 
   @override
@@ -36,7 +39,10 @@ class SyncItLaunchButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 10 : 14,
+              vertical: compact ? 8 : 9,
+            ),
             decoration: BoxDecoration(
               color: isOpen ? blue.withValues(alpha: 0.14) : blue.withValues(alpha: 0.08),
               borderRadius: BorderRadius.circular(10),
@@ -57,18 +63,20 @@ class SyncItLaunchButton extends StatelessWidget {
               children: [
                 Icon(
                   isOpen ? Icons.close_rounded : Icons.auto_awesome,
-                  size: 18,
+                  size: compact ? 20 : 18,
                   color: blue,
                 ),
-                const SizedBox(width: 7),
-                Text(
-                  isOpen ? 'Close' : SyncItBranding.name,
-                  style: theme.labelLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: blue,
-                    letterSpacing: -0.2,
+                if (!compact) ...[
+                  const SizedBox(width: 7),
+                  Text(
+                    isOpen ? 'Close' : SyncItBranding.name,
+                    style: theme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: blue,
+                      letterSpacing: -0.2,
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
