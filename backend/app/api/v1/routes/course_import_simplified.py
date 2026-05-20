@@ -152,8 +152,8 @@ For LECTURES, LABS, SECTIONS, EXAMS, etc., provide:
 - event_name: e.g., "Lecture 1", "Lab A", "Midterm Exam"
 - event_type: lecture, lab, section, discussion, exam, office_hours
 - date: YYYY-MM-DD format (ACTUAL EVENT DATE, not URL date)
-- start_time: HH:MM format (24h), or null if not specified
-- end_time: HH:MM format (24h), or null if not specified
+- start_time: HH:MM format (24h), or null if no start time is shown
+- end_time: HH:MM format (24h), or null if no end time is shown
 - location: room/building or "Online" or null
 - description: brief description
 
@@ -161,7 +161,7 @@ For HOMEWORK, ASSIGNMENTS, PROJECTS, etc., provide:
 - assignment_name: e.g., "HW1", "Project 2", "Midterm"
 - assignment_type: homework, project, exam, quiz, lab, reading
 - due_date: YYYY-MM-DD format (ACTUAL DUE DATE)
-- due_time: HH:MM format (24h), or null if not specified
+- due_time: HH:MM format (24h), or null if no due time is shown
 - points: integer or null
 - description: brief description or empty string if not specified
 - submission_method: Canvas, email, in-person, etc. or null
@@ -169,6 +169,9 @@ For HOMEWORK, ASSIGNMENTS, PROJECTS, etc., provide:
 - is_individual: true/false
 - is_group: true/false
 - late_policy: description or null
+
+Do not invent midnight or 00:00 for missing times. Use null for missing times.
+When a lecture/lab/section row includes both a start and an end time, include both times exactly.
 
 Course: {course_name}
 Text:

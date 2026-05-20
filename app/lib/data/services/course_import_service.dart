@@ -41,6 +41,16 @@ class CourseImportService {
 
   String get _userId => _db.auth.currentUser!.id;
 
+  List<Map<String, dynamic>> _rowsFrom(dynamic value) {
+    if (value is List) {
+      return value
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+    }
+    return const [];
+  }
+
   // ── Queries ──────────────────────────────────────────────────────────────
 
   Future<List<CourseImportRecord>> loadImports() async {
@@ -49,7 +59,7 @@ class CourseImportService {
         .select()
         .eq('user_id', _userId)
         .order('created_at');
-    return rows.map(CourseImportRecord.fromSupabase).toList();
+    return _rowsFrom(rows).map(CourseImportRecord.fromSupabase).toList();
   }
 
   Future<List<EventModel>> loadEventsForImport(String importId) async {
@@ -58,7 +68,7 @@ class CourseImportService {
         .select()
         .eq('course_import_id', importId)
         .order('start_time');
-    return rows.map((row) => EventModel.fromSupabase(row)).toList();
+    return _rowsFrom(rows).map(EventModel.fromSupabase).toList();
   }
 
   // ── Mutations ─────────────────────────────────────────────────────────────
@@ -130,12 +140,14 @@ class CourseImportService {
         final idx = entry.key;
         final ev = entry.value as Map<String, dynamic>;
         final title = ev['event_name'] as String;
-        final rawStartTime = ev['start_time'] as String?;
-        final hasTime = rawStartTime != null && rawStartTime.trim().isNotEmpty;
-        final startTime = hasTime ? rawStartTime : '00:00';
-        final endTime =
-            hasTime ? ((ev['end_time'] as String?) ?? startTime) : startTime;
-        final startIso = '${ev['date']}T$startTime';
+        final startTime =
+            _normalizedClassStartTime(ev['start_time'] as String?);
+        final hasTime = startTime != null;
+        final storedStartTime = startTime ?? '00:00';
+        final endTime = hasTime
+            ? _normalizedEndTime(storedStartTime, ev['end_time'] as String?)
+            : storedStartTime;
+        final startIso = '${ev['date']}T$storedStartTime';
         final endIso = '${ev['date']}T$endTime';
 
         return {
@@ -164,8 +176,7 @@ class CourseImportService {
         final assignment = entry.value as Map<String, dynamic>;
         final title = assignment['assignment_name'] as String;
         final rawDueTime = assignment['due_time'] as String?;
-        final dueTime =
-            rawDueTime == null || rawDueTime.trim().isEmpty ? null : rawDueTime;
+        final dueTime = _normalizedDueTime(rawDueTime);
         final dueIso = '${assignment['due_date']}T${dueTime ?? '00:00'}';
 
         return {
@@ -211,6 +222,55 @@ class CourseImportService {
       return segments.last;
     }
     return url;
+  }
+
+  String? _normalizedDueTime(String? rawDueTime) {
+    final dueTime = rawDueTime?.trim();
+    if (dueTime == null || dueTime.isEmpty || dueTime.startsWith('00:00')) {
+      return null;
+    }
+    return dueTime;
+  }
+
+  String? _normalizedClassStartTime(String? rawStartTime) {
+    final startTime = rawStartTime?.trim();
+    if (startTime == null ||
+        startTime.isEmpty ||
+        startTime.startsWith('00:00')) {
+      return null;
+    }
+    return startTime;
+  }
+
+  String _normalizedEndTime(String startTime, String? rawEndTime) {
+    final endTime = rawEndTime?.trim();
+    final startMinutes = _minutesFromTime(startTime);
+    final endMinutes = _minutesFromTime(endTime);
+    if (startMinutes == null) {
+      return endTime == null || endTime.isEmpty ? startTime : endTime;
+    }
+    if (endMinutes == null || endMinutes <= startMinutes) {
+      return _timeFromMinutes(startMinutes + 50);
+    }
+    return endTime!;
+  }
+
+  int? _minutesFromTime(String? time) {
+    if (time == null || time.trim().isEmpty) return null;
+    final parts = time.trim().split(':');
+    if (parts.length < 2) return null;
+    final hour = int.tryParse(parts[0]);
+    final minute = int.tryParse(parts[1]);
+    if (hour == null || minute == null) return null;
+    return hour * 60 + minute;
+  }
+
+  String _timeFromMinutes(int totalMinutes) {
+    final minutesInDay = const Duration(days: 1).inMinutes;
+    final normalized = totalMinutes.clamp(0, minutesInDay - 1);
+    final hour = normalized ~/ 60;
+    final minute = normalized % 60;
+    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
   }
 
   String _sourceEventId({

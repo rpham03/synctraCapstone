@@ -7,9 +7,10 @@ class EventModel {
   // 'google_calendar' | 'canvas' | 'manual' | 'ical' | 'course'
   final String source;
   final bool isFixed;
-  /// Optional notes (manual entry, or cached from feed).
-  final String? description;
   final String? sourceEventId;
+
+  /// Optional notes (manual entry, or cached from feed).
+  final String description;
 
   const EventModel({
     required this.id,
@@ -18,35 +19,51 @@ class EventModel {
     required this.endTime,
     required this.source,
     this.isFixed = true,
-    this.description,
     this.sourceEventId,
+    this.description = '',
   });
 
   bool get isDateOnlyCourseEvent =>
-      source == 'course' && (sourceEventId?.contains('_date_only_') ?? false);
+      source == 'course' &&
+      ((sourceEventId?.contains('assignment_date_only') ?? false) ||
+          (_startsAtMidnight &&
+              (sourceEventId?.contains('class_date_only') ?? false)) ||
+          (_startsAtMidnight && !endTime.isAfter(startTime)) ||
+          _isShortMidnightClassEvent);
+
+  bool get _startsAtMidnight => startTime.hour == 0 && startTime.minute == 0;
+
+  bool get _isShortMidnightClassEvent {
+    if (!_startsAtMidnight) return false;
+    final durationMinutes = endTime.difference(startTime).inMinutes;
+    if (durationMinutes < 0 || durationMinutes > 60) return false;
+    return RegExp(
+      r'^(lecture|section|lab|discussion)\b',
+      caseSensitive: false,
+    ).hasMatch(title.trim());
+  }
 
   // From backend scraper JSON response
   factory EventModel.fromJson(Map<String, dynamic> json) => EventModel(
         id: json['id'] as String? ?? '',
-        title: json['title'] as String,
+        title: json['title'] as String? ?? '',
         startTime: DateTime.parse(json['start_time'] as String),
         endTime: DateTime.parse(json['end_time'] as String),
         source: json['source'] as String? ?? 'manual',
         isFixed: json['is_fixed'] as bool? ?? true,
-        description: json['description'] as String?,
         sourceEventId: json['source_event_id'] as String?,
+        description: json['description'] as String? ?? '',
       );
 
-  // From Supabase row
   factory EventModel.fromSupabase(Map<String, dynamic> row) => EventModel(
         id: row['id'] as String,
-        title: row['title'] as String,
+        title: row['title'] as String? ?? '',
         startTime: DateTime.parse(row['start_time'] as String),
         endTime: DateTime.parse(row['end_time'] as String),
-        source: row['source'] as String,
+        source: row['source'] as String? ?? 'course',
         isFixed: row['is_fixed'] as bool? ?? true,
-        description: row['description'] as String?,
         sourceEventId: row['source_event_id'] as String?,
+        description: row['description'] as String? ?? '',
       );
 
   EventModel copyWith({
@@ -56,8 +73,8 @@ class EventModel {
     DateTime? endTime,
     String? source,
     bool? isFixed,
-    String? description,
     String? sourceEventId,
+    String? description,
   }) =>
       EventModel(
         id: id ?? this.id,
@@ -66,8 +83,8 @@ class EventModel {
         endTime: endTime ?? this.endTime,
         source: source ?? this.source,
         isFixed: isFixed ?? this.isFixed,
-        description: description ?? this.description,
         sourceEventId: sourceEventId ?? this.sourceEventId,
+        description: description ?? this.description,
       );
 
   // For upserting into Supabase events table

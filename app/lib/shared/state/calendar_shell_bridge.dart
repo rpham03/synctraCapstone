@@ -1,5 +1,6 @@
 // Lets [CalendarScreen] inject the month/upcoming planner into [MainShell]'s sidebar.
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 class CalendarShellBridge extends ChangeNotifier {
   CalendarShellBridge._();
@@ -12,13 +13,24 @@ class CalendarShellBridge extends ChangeNotifier {
 
   Widget? buildPlanner() => _plannerBuilder?.call();
 
+  void _notifySafely() {
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.idle ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      notifyListeners();
+      return;
+    }
+
+    SchedulerBinding.instance.addPostFrameCallback((_) => notifyListeners());
+  }
+
   void setPlannerBuilder(Widget Function()? builder) {
     _plannerBuilder = builder;
-    notifyListeners();
+    _notifySafely();
   }
 
   /// Rebuild sidebar planner without replacing the builder reference.
-  void refreshPlanner() => notifyListeners();
+  void refreshPlanner() => _notifySafely();
 
   void clearPlanner() => setPlannerBuilder(null);
 
