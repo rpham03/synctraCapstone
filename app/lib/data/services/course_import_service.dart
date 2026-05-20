@@ -58,7 +58,7 @@ class CourseImportService {
         .select()
         .eq('course_import_id', importId)
         .order('start_time');
-    return rows.map(EventModel.fromSupabase).toList();
+    return rows.map((row) => EventModel.fromSupabase(row)).toList();
   }
 
   // ── Mutations ─────────────────────────────────────────────────────────────
