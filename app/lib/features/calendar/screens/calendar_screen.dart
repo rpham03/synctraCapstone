@@ -1173,8 +1173,8 @@ void _showTimedEventPeek(BuildContext context, EventModel e) {
             const SizedBox(height: 16),
             Text('Description', style: Theme.of(ctx).textTheme.labelLarge),
             const SizedBox(height: 6),
-            if (e.description.trim().isNotEmpty)
-              Text(e.description.trim(), style: Theme.of(ctx).textTheme.bodyMedium)
+            if ((e.description ?? '').trim().isNotEmpty)
+              Text((e.description ?? '').trim(), style: Theme.of(ctx).textTheme.bodyMedium)
             else
               Text(
                 'No notes for this event.',
@@ -2168,9 +2168,13 @@ class _AssignmentDetailSheet extends StatelessWidget {
               border: Border.all(color: scheme.outlineVariant),
             ),
             child: Text(
-              event.description.trim().isEmpty ? 'No description.' : event.description.trim(),
+              (event.description ?? '').trim().isEmpty
+                  ? 'No description.'
+                  : (event.description ?? '').trim(),
               style: textTheme.bodyMedium?.copyWith(
-                color: event.description.trim().isEmpty ? scheme.onSurfaceVariant : null,
+                color: (event.description ?? '').trim().isEmpty
+                    ? scheme.onSurfaceVariant
+                    : null,
                 height: 1.35,
               ),
             ),
