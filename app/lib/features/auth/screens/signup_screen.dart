@@ -85,7 +85,8 @@ class _SignupScreenState extends State<SignupScreen> {
                   style: Theme.of(context)
                       .textTheme
                       .bodyMedium
-                      ?.copyWith(color: Colors.grey),
+                      ?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant),
                 ),
                 const SizedBox(height: 32),
 

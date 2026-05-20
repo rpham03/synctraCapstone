@@ -1,204 +1,195 @@
-// Main app shell — sidebar nav on desktop/web, bottom nav on mobile.
+// Main app shell — combined sidebar (nav + calendar planner) / bottom nav on phone.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/theme/app_theme.dart';
-import '../../core/utils/responsive.dart';
-
-// Navigation items shared by both layouts (order must match StatefulShellRoute branches).
-const _tabs = [
-  _TabItem(icon: Icons.calendar_month_outlined, activeIcon: Icons.calendar_month, label: 'Calendar', path: '/calendar'),
-  _TabItem(icon: Icons.checklist_outlined,       activeIcon: Icons.checklist,       label: 'Tasks',    path: '/tasks'),
-  _TabItem(icon: Icons.chat_bubble_outline,      activeIcon: Icons.chat_bubble,     label: 'Chat',     path: '/chat'),
-  _TabItem(icon: Icons.group_outlined,           activeIcon: Icons.group,           label: 'Collab',   path: '/collab'),
-];
+import '../state/calendar_shell_bridge.dart';
+import '../services/auth_service.dart';
+import 'synctra_combined_sidebar.dart';
 
 class MainShell extends StatelessWidget {
   final StatefulNavigationShell navigationShell;
   const MainShell({super.key, required this.navigationShell});
 
+  static const _sidebarWidth = 300.0;
+  static const _desktopBreakpoint = 1000.0;
+
   @override
   Widget build(BuildContext context) {
     final selectedIndex = navigationShell.currentIndex;
-    return Responsive.isDesktop(context)
-        ? _DesktopShell(
-            navigationShell: navigationShell,
-            selectedIndex: selectedIndex,
-          )
-        : _MobileShell(
-            navigationShell: navigationShell,
-            selectedIndex: selectedIndex,
-          );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final useSidebarLayout = constraints.maxWidth >= _desktopBreakpoint;
+        return useSidebarLayout
+            ? _SidebarLayoutShell(
+                navigationShell: navigationShell,
+                selectedIndex: selectedIndex,
+              )
+            : _DrawerLayoutShell(
+                navigationShell: navigationShell,
+                selectedIndex: selectedIndex,
+              );
+      },
+    );
   }
 }
 
-// ── Desktop layout — left sidebar ─────────────────────────────────────────
-
-class _DesktopShell extends StatelessWidget {
+/// Wide screens: one fixed column (nav + planner) beside the active tab.
+class _SidebarLayoutShell extends StatefulWidget {
   final StatefulNavigationShell navigationShell;
   final int selectedIndex;
-  const _DesktopShell({
+
+  const _SidebarLayoutShell({
     required this.navigationShell,
     required this.selectedIndex,
   });
 
   @override
+  State<_SidebarLayoutShell> createState() => _SidebarLayoutShellState();
+}
+
+class _SidebarLayoutShellState extends State<_SidebarLayoutShell> {
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild sidebar after CalendarScreen registers its planner (build order fix).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
     return Scaffold(
+      backgroundColor: scheme.surfaceContainerLowest,
       body: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            width: 240,
-            color: Colors.white,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 32, 20, 8),
-                  child: Row(children: [
-                    Icon(Icons.calendar_month_rounded,
-                        color: AppColors.primary, size: 28),
-                    const SizedBox(width: 10),
-                    Text(
-                      'Synctra',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.primary,
-                      ),
-                    ),
-                  ]),
-                ),
-                const SizedBox(height: 8),
-                const Divider(indent: 16, endIndent: 16),
-                const SizedBox(height: 8),
-                for (int i = 0; i < _tabs.length; i++)
-                  _SidebarItem(
-                    tab: _tabs[i],
-                    selected: i == selectedIndex,
-                    onTap: () => navigationShell.goBranch(i),
-                  ),
-                const Spacer(),
-                const Divider(indent: 16, endIndent: 16),
-                _SidebarItem(
-                  tab: const _TabItem(
-                    icon: Icons.settings_outlined,
-                    activeIcon: Icons.settings,
-                    label: 'Settings',
-                    path: '/settings',
-                  ),
-                  selected: false,
-                  onTap: () {/* TODO: settings */},
-                ),
-                _SidebarItem(
-                  tab: const _TabItem(
-                    icon: Icons.logout,
-                    activeIcon: Icons.logout,
-                    label: 'Sign Out',
-                    path: '',
-                  ),
-                  selected: false,
-                  onTap: () {/* TODO: sign out */},
-                ),
-                const SizedBox(height: 20),
-              ],
+          SizedBox(
+            width: MainShell._sidebarWidth,
+            child: SynctraCombinedSidebar(
+              navigationShell: widget.navigationShell,
+              selectedIndex: widget.selectedIndex,
+              onSignOut: () => _signOut(context),
             ),
           ),
-          const VerticalDivider(width: 1),
-          Expanded(child: navigationShell),
+          Expanded(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: scheme.surface,
+                border: Border(
+                  left: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.75)),
+                ),
+              ),
+              child: ClipRect(child: widget.navigationShell),
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _SidebarItem extends StatelessWidget {
-  final _TabItem tab;
-  final bool selected;
-  final VoidCallback onTap;
-  const _SidebarItem({
-    required this.tab,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-      child: Material(
-        color: selected ? AppColors.primary.withAlpha(20) : Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: Row(children: [
-              Icon(
-                selected ? tab.activeIcon : tab.icon,
-                color: selected ? AppColors.primary : Colors.grey[600],
-                size: 20,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                tab.label,
-                style: TextStyle(
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-                  color: selected ? AppColors.primary : Colors.grey[800],
-                  fontSize: 14,
-                ),
-              ),
-            ]),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Mobile layout — bottom nav bar ───────────────────────────────────────────
-
-class _MobileShell extends StatelessWidget {
+/// Narrow screens: same combined column in a drawer; bottom nav for quick switching.
+class _DrawerLayoutShell extends StatefulWidget {
   final StatefulNavigationShell navigationShell;
   final int selectedIndex;
-  const _MobileShell({
+
+  const _DrawerLayoutShell({
     required this.navigationShell,
     required this.selectedIndex,
   });
 
   @override
+  State<_DrawerLayoutShell> createState() => _DrawerLayoutShellState();
+}
+
+class _DrawerLayoutShellState extends State<_DrawerLayoutShell> {
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  @override
+  void initState() {
+    super.initState();
+    CalendarShellBridge.instance.registerOpenDrawer(_openDrawer);
+  }
+
+  @override
+  void dispose() {
+    CalendarShellBridge.instance.registerOpenDrawer(null);
+    super.dispose();
+  }
+
+  void _openDrawer() => _scaffoldKey.currentState?.openDrawer();
+
+  @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
     return Scaffold(
-      body: navigationShell,
+      key: _scaffoldKey,
+      backgroundColor: scheme.surface,
+      drawer: Drawer(
+        width: MainShell._sidebarWidth,
+        child: SynctraCombinedSidebar(
+          navigationShell: widget.navigationShell,
+          selectedIndex: widget.selectedIndex,
+          onSignOut: () => _signOut(context),
+        ),
+      ),
+      body: widget.navigationShell,
       bottomNavigationBar: NavigationBar(
-        selectedIndex: selectedIndex,
-        onDestinationSelected: navigationShell.goBranch,
-        backgroundColor: Colors.white,
-        indicatorColor: AppColors.primary.withAlpha(30),
-        destinations: _tabs
-            .map((t) => NavigationDestination(
-                  icon: Icon(t.icon),
-                  selectedIcon: Icon(t.activeIcon, color: AppColors.primary),
-                  label: t.label,
-                ))
-            .toList(),
+        selectedIndex: widget.selectedIndex,
+        onDestinationSelected: widget.navigationShell.goBranch,
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.calendar_month_outlined),
+            selectedIcon: Icon(Icons.calendar_month),
+            label: 'Calendar',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.checklist_outlined),
+            selectedIcon: Icon(Icons.checklist),
+            label: 'Tasks',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.chat_bubble_outline),
+            selectedIcon: Icon(Icons.chat_bubble),
+            label: 'Chat',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.group_outlined),
+            selectedIcon: Icon(Icons.group),
+            label: 'Collab',
+          ),
+        ],
       ),
     );
   }
 }
 
-// ── Shared data class ─────────────────────────────────────────────────────────
-
-class _TabItem {
-  final IconData icon;
-  final IconData activeIcon;
-  final String label;
-  final String path;
-  const _TabItem({
-    required this.icon,
-    required this.activeIcon,
-    required this.label,
-    required this.path,
-  });
+Future<void> _signOut(BuildContext context) async {
+  final session = Supabase.instance.client.auth.currentSession;
+  if (session == null) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You are not signed in.')),
+      );
+    }
+    return;
+  }
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Sign out?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Sign out')),
+      ],
+    ),
+  );
+  if (ok != true || !context.mounted) return;
+  await AuthService().signOut();
+  if (context.mounted) context.go('/login');
 }
