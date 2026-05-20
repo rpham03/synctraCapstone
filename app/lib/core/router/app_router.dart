@@ -21,7 +21,7 @@ const bool _previewNoAuth =
 class AppRouter {
   static final _rootNavigatorKey = GlobalKey<NavigatorState>();
 
-  static GoRouter get router => GoRouter(
+  static final GoRouter router = GoRouter(
         navigatorKey: _rootNavigatorKey,
         initialLocation: '/calendar',
         // Redirect to login if user is not authenticated

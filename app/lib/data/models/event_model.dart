@@ -1,10 +1,11 @@
-// Represents a fixed calendar event (class, meeting, exam)
+// Represents a fixed calendar event (class, meeting, exam, or course assignment).
 class EventModel {
   final String id;
   final String title;
   final DateTime startTime;
   final DateTime endTime;
-  final String source; // 'google_calendar' | 'canvas' | 'manual'
+  // 'google_calendar' | 'canvas' | 'manual' | 'ical' | 'course'
+  final String source;
   final bool isFixed;
   /// Optional notes (manual entry, or cached from feed).
   final String description;
@@ -19,6 +20,10 @@ class EventModel {
     this.description = '',
   });
 
+  bool get isDateOnlyCourseEvent =>
+      source == 'course' && (sourceEventId?.contains('_date_only_') ?? false);
+
+  // From backend scraper JSON response
   factory EventModel.fromJson(Map<String, dynamic> json) => EventModel(
         id: json['id'],
         title: json['title'],
@@ -47,4 +52,22 @@ class EventModel {
         isFixed: isFixed ?? this.isFixed,
         description: description ?? this.description,
       );
+
+  // For upserting into Supabase events table
+  Map<String, dynamic> toSupabaseMap({
+    required String userId,
+    required String importId,
+    required String sourceEventId,
+  }) =>
+      {
+        'user_id': userId,
+        'title': title,
+        'description': description,
+        'start_time': startTime.toUtc().toIso8601String(),
+        'end_time': endTime.toUtc().toIso8601String(),
+        'source': 'course',
+        'source_event_id': sourceEventId,
+        'course_import_id': importId,
+        'is_fixed': true,
+      };
 }
