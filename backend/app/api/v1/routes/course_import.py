@@ -1129,8 +1129,8 @@ For class_events (lectures, labs, sections, exams, etc.):
   "event_name": "Lecture 1" or "Lab A" or "Midterm Exam",
   "event_type": "lecture|lab|section|discussion|exam|office_hours",
   "date": "YYYY-MM-DD",
-  "start_time": "HH:MM" (24h format) or null,
-  "end_time": "HH:MM" (24h format) or null,
+  "start_time": "HH:MM" (24h format) or null when no start time is shown,
+  "end_time": "HH:MM" (24h format) or null when no end time is shown,
   "location": "room name" or "Online" or null,
   "description": "brief description" or null,
   "course_name": "{course_name}",
@@ -1142,7 +1142,7 @@ For assignments (homework, projects, quizzes, etc.):
   "assignment_name": "HW1" or "Project 2",
   "assignment_type": "homework|project|exam|quiz|lab|reading",
   "due_date": "YYYY-MM-DD",
-  "due_time": "HH:MM" (24h format) or null,
+  "due_time": "HH:MM" (24h format) or null when no due time is shown,
   "points": integer or null,
   "description": "full description",
   "submission_method": "Canvas|email|in-person" or null,
@@ -1156,6 +1156,8 @@ For assignments (homework, projects, quizzes, etc.):
 
 Return JSON with arrays of actual extracted items. Use empty arrays when no items are found.
 Do not include placeholders, ellipses, comments, or trailing commas.
+Do not invent midnight or 00:00 for missing times. Use null for missing times.
+When a lecture/lab/section row includes both a start and an end time, include both times exactly.
 {{
   "course_name": "{course_name}",
   "class_events": [],

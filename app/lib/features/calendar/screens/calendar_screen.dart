@@ -18,6 +18,7 @@ import '../../../core/constants/api_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/event_model.dart';
 import '../../../data/models/schedule_block_model.dart';
+import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/services/llm_service.dart';
 import '../../../shared/services/schedule_chat_coordinator.dart';
@@ -47,10 +48,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
   final List<EventModel> _canvasEvents = [];
   late final SuggestedScheduleStore _scheduleStore;
   late final CanvasTasksService _canvasTasks;
+  late final CourseImportService _courseImportService;
   static const _manualEventsKey = 'synctra_manual_events_v1';
 
   final Map<String, List<EventModel>> _feedEvents = {};
   final List<Map<String, String>> _icalFeeds = [];
+  final List<CourseImportRecord> _courseImports = [];
 
   final ScrollController _timeScrollController = ScrollController();
   Timer? _nowTicker;
@@ -64,15 +67,18 @@ class _CalendarScreenState extends State<CalendarScreen> {
     super.initState();
     _scheduleStore = GetIt.instance<SuggestedScheduleStore>();
     _canvasTasks = GetIt.instance<CanvasTasksService>();
+    _courseImportService = CourseImportService();
     _canvasTasks.addListener(_reloadCanvasEvents);
     _scheduleStore.addListener(_onScheduleStoreChanged);
     _loadSavedFeeds();
     _loadManualEvents();
+    _loadCourseImports();
     _reloadCanvasEvents();
     _nowTicker = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted) setState(() {});
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _publishPlannerToShell());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _publishPlannerToShell());
   }
 
   void _publishPlannerToShell() {
@@ -109,6 +115,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onDaySelected: _onDaySelected,
       onPageChanged: (d) => setState(() => _focusedDay = d),
       onOpenIcal: _openIcalFeedsSheet,
+      onOpenCourseImport: _openCourseImportSheet,
     );
   }
 
@@ -187,6 +194,26 @@ class _CalendarScreenState extends State<CalendarScreen> {
     if (mounted) _pushExternalBusyToStore();
   }
 
+  Future<void> _loadCourseImports() async {
+    try {
+      final imports = await _courseImportService.loadImports();
+      final events = <EventModel>[];
+      for (final import in imports) {
+        events
+            .addAll(await _courseImportService.loadEventsForImport(import.id));
+      }
+      if (!mounted) return;
+      setState(() {
+        _courseImports
+          ..clear()
+          ..addAll(imports);
+        _fixedEvents.removeWhere((e) => e.source == 'course');
+        _fixedEvents.addAll(events);
+      });
+      _pushExternalBusyToStore();
+    } catch (_) {}
+  }
+
   Future<void> _syncFeed(String feedId, String name, String url) async {
     final resp = await Dio().post(
       '${ApiConstants.baseUrl}/events/ical-feeds/preview',
@@ -220,8 +247,23 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _pushExternalBusyToStore();
   }
 
-  List<EventModel> _canvasOnDay(DateTime day) =>
-      _allEvents().where((e) => e.source == 'canvas' && isSameDay(e.startTime, day)).toList();
+  Future<void> _addCourseImport(String url, String name) async {
+    await _courseImportService.addImport(url, name);
+    await _loadCourseImports();
+  }
+
+  Future<void> _removeCourseImport(String importId) async {
+    await _courseImportService.removeImport(importId);
+    await _loadCourseImports();
+  }
+
+  List<EventModel> _canvasOnDay(DateTime day) => _allEvents()
+      .where((e) => e.source == 'canvas' && isSameDay(e.startTime, day))
+      .toList();
+
+  List<EventModel> _courseAllDayOnDay(DateTime day) => _allEvents()
+      .where((e) => e.isDateOnlyCourseEvent && isSameDay(e.startTime, day))
+      .toList();
 
   /// Canvas items that also occupy the time grid (vs due-date-only chips in the all-day row).
   static bool _canvasShowsInTimeGrid(EventModel e) {
@@ -235,6 +277,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   List<EventModel> _timedEventsOnDay(DateTime day) => _allEvents()
       .where((e) => isSameDay(e.startTime, day))
+      .where((e) => !e.isDateOnlyCourseEvent)
       .where((e) => e.source != 'canvas' || _canvasShowsInTimeGrid(e))
       .toList();
 
@@ -246,8 +289,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final timed = _timedEventsOnDay(day);
     final canvasChipsOnly =
         _canvasOnDay(day).where((c) => !_canvasShowsInTimeGrid(c)).toList();
+    final courseAllDay = _courseAllDayOnDay(day);
     final blocks = _blocksOnDay(day);
-    return [...timed, ...canvasChipsOnly, ...blocks];
+    return [...timed, ...canvasChipsOnly, ...courseAllDay, ...blocks];
   }
 
   DateTime _startOfWeek(DateTime d) {
@@ -280,7 +324,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
         case _CalendarViewMode.week:
           _focusedDay = _focusedDay.add(Duration(days: 7 * delta));
         case _CalendarViewMode.month:
-          _focusedDay = DateTime(_focusedDay.year, _focusedDay.month + delta, 1);
+          _focusedDay =
+              DateTime(_focusedDay.year, _focusedDay.month + delta, 1);
       }
     });
   }
@@ -321,7 +366,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
       ),
       builder: (_) => _IcalFeedsSheet(
         feeds: List.from(_icalFeeds),
-        feedEventCounts: {for (final e in _feedEvents.entries) e.key: e.value.length},
+        feedEventCounts: {
+          for (final e in _feedEvents.entries) e.key: e.value.length
+        },
         onAdd: (url, name) async {
           await _addFeed(url, name);
         },
@@ -335,6 +382,22 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
   }
 
+  void _openCourseImportSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _CourseImportSheet(
+        imports: List.from(_courseImports),
+        onImport: _addCourseImport,
+        onRemove: _removeCourseImport,
+      ),
+    );
+  }
+
   void _openAssignmentSheet(EventModel assignment) {
     showModalBottomSheet(
       context: context,
@@ -344,16 +407,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
         event: assignment,
         onScheduleStudy: () {
           Navigator.pop(sheetCtx);
-          final mins = assignment.endTime.difference(assignment.startTime).inMinutes;
+          final mins =
+              assignment.endTime.difference(assignment.startTime).inMinutes;
           final hours = (mins / 60.0).clamp(0.5, 4.0);
-          final msg = GetIt.instance<ScheduleChatCoordinator>().scheduleStudyForDueItem(
+          final msg =
+              GetIt.instance<ScheduleChatCoordinator>().scheduleStudyForDueItem(
             taskId: 'cv-${assignment.id}',
             title: assignment.title,
             dueDate: assignment.startTime,
             hours: hours < 0.5 ? 1.5 : hours,
           );
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+            ScaffoldMessenger.of(context)
+                .showSnackBar(SnackBar(content: Text(msg)));
           }
         },
       ),
@@ -377,7 +443,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
     if (e.source == 'manual') {
       final i = _fixedEvents.indexWhere((x) => x.id == e.id);
       if (i >= 0) {
-        setState(() => _fixedEvents[i] = e.copyWith(startTime: start, endTime: end));
+        setState(
+            () => _fixedEvents[i] = e.copyWith(startTime: start, endTime: end));
         _persistManualEvents();
       }
     } else {
@@ -394,8 +461,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _pushExternalBusyToStore();
   }
 
-  void _onGridBlockTimeChanged(ScheduleBlockModel b, DateTime start, DateTime end) {
-    GetIt.instance<SuggestedScheduleStore>().updateBlockTimes(id: b.id, start: start, end: end);
+  void _onGridBlockTimeChanged(
+      ScheduleBlockModel b, DateTime start, DateTime end) {
+    GetIt.instance<SuggestedScheduleStore>()
+        .updateBlockTimes(id: b.id, start: start, end: end);
   }
 
   void _runSuggestSchedule() {
@@ -468,7 +537,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
     for (final s in blocks) {
       titles.putIfAbsent(s.taskId, () => s.taskId);
     }
-    store.applySynctraPreview(scheduled: blocks, taskTitles: titles, fixed: fixed);
+    store.applySynctraPreview(
+        scheduled: blocks, taskTitles: titles, fixed: fixed);
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -486,7 +556,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Future<void> _openQuickAddSheet() async {
     final titleCtrl = TextEditingController();
     final descCtrl = TextEditingController();
-    DateTime day = DateTime(_focusedDay.year, _focusedDay.month, _focusedDay.day);
+    DateTime day =
+        DateTime(_focusedDay.year, _focusedDay.month, _focusedDay.day);
     var startT = const TimeOfDay(hour: 14, minute: 0);
     var endT = const TimeOfDay(hour: 15, minute: 0);
     final clock = DateTime.now();
@@ -516,7 +587,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
               }
 
               Future<void> pickStart() async {
-                final t = await showTimePicker(context: ctx, initialTime: startT);
+                final t =
+                    await showTimePicker(context: ctx, initialTime: startT);
                 if (t != null) setModal(() => startT = t);
               }
 
@@ -529,7 +601,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text('Quick event', style: Theme.of(ctx).textTheme.titleLarge),
+                  Text('Quick event',
+                      style: Theme.of(ctx).textTheme.titleLarge),
                   const SizedBox(height: 12),
                   TextField(
                     controller: titleCtrl,
@@ -596,9 +669,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
       return;
     }
 
-    final start = DateTime(day.year, day.month, day.day, startT.hour, startT.minute);
+    final start =
+        DateTime(day.year, day.month, day.day, startT.hour, startT.minute);
     var end = DateTime(day.year, day.month, day.day, endT.hour, endT.minute);
-    final endResolved = end.isAfter(start) ? end : start.add(const Duration(hours: 1));
+    final endResolved =
+        end.isAfter(start) ? end : start.add(const Duration(hours: 1));
 
     setState(() {
       _fixedEvents.add(
@@ -637,6 +712,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onNext: () => _shiftPeriod(1),
       onToday: _goToday,
       onOpenIcal: _openIcalFeedsSheet,
+      onOpenCourseImport: _openCourseImportSheet,
       onSuggestSchedule: _runSuggestSchedule,
       focusedDay: _focusedDay,
       selectedDay: _selectedDay,
@@ -646,6 +722,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onPageChanged: (d) => setState(() => _focusedDay = d),
       timedEventsOnDay: _timedEventsOnDay,
       canvasOnDay: _canvasOnDay,
+      courseAllDayOnDay: _courseAllDayOnDay,
       blocksOnDay: _blocksOnDay,
       visibleDays: _visibleDays(),
       viewModeEnum: _viewMode,
@@ -707,8 +784,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   @override
   Widget build(BuildContext context) {
-    _publishPlannerToShell();
-
     final useDrawerLayout = MediaQuery.sizeOf(context).width < 1000;
 
     return Scaffold(
@@ -743,6 +818,7 @@ class _CalendarMainPanel extends StatelessWidget {
   final VoidCallback onNext;
   final VoidCallback onToday;
   final VoidCallback onOpenIcal;
+  final VoidCallback onOpenCourseImport;
   final VoidCallback onSuggestSchedule;
   final DateTime focusedDay;
   final DateTime selectedDay;
@@ -752,6 +828,7 @@ class _CalendarMainPanel extends StatelessWidget {
   final void Function(DateTime) onPageChanged;
   final List<EventModel> Function(DateTime) timedEventsOnDay;
   final List<EventModel> Function(DateTime) canvasOnDay;
+  final List<EventModel> Function(DateTime) courseAllDayOnDay;
   final List<ScheduleBlockModel> Function(DateTime) blocksOnDay;
   final List<DateTime> visibleDays;
   final _CalendarViewMode viewModeEnum;
@@ -761,8 +838,10 @@ class _CalendarMainPanel extends StatelessWidget {
   final ScrollController timeScrollController;
   final void Function(EventModel) onTapCanvas;
   final void Function(ScheduleBlockModel) onTapBlock;
-  final void Function(EventModel event, DateTime start, DateTime end) onEventTimeChanged;
-  final void Function(ScheduleBlockModel block, DateTime start, DateTime end) onBlockTimeChanged;
+  final void Function(EventModel event, DateTime start, DateTime end)
+      onEventTimeChanged;
+  final void Function(ScheduleBlockModel block, DateTime start, DateTime end)
+      onBlockTimeChanged;
 
   const _CalendarMainPanel({
     required this.toolbarTitle,
@@ -776,6 +855,7 @@ class _CalendarMainPanel extends StatelessWidget {
     required this.onNext,
     required this.onToday,
     required this.onOpenIcal,
+    required this.onOpenCourseImport,
     required this.onSuggestSchedule,
     required this.focusedDay,
     required this.selectedDay,
@@ -785,6 +865,7 @@ class _CalendarMainPanel extends StatelessWidget {
     required this.onPageChanged,
     required this.timedEventsOnDay,
     required this.canvasOnDay,
+    required this.courseAllDayOnDay,
     required this.blocksOnDay,
     required this.visibleDays,
     required this.viewModeEnum,
@@ -817,6 +898,7 @@ class _CalendarMainPanel extends StatelessWidget {
           onNext: onNext,
           onToday: onToday,
           onOpenIcal: onOpenIcal,
+          onOpenCourseImport: onOpenCourseImport,
           onSuggestSchedule: onSuggestSchedule,
         ),
         Expanded(
@@ -831,8 +913,9 @@ class _CalendarMainPanel extends StatelessWidget {
                   eventLoader: (d) {
                     final t = timedEventsOnDay(d);
                     final c = canvasOnDay(d);
+                    final a = courseAllDayOnDay(d);
                     final b = blocksOnDay(d);
-                    return [...t, ...c, ...b];
+                    return [...t, ...c, ...a, ...b];
                   },
                 )
               : DecoratedBox(
@@ -858,6 +941,7 @@ class _CalendarMainPanel extends StatelessWidget {
                     scrollController: timeScrollController,
                     timedEventsOnDay: timedEventsOnDay,
                     canvasOnDay: canvasOnDay,
+                    courseAllDayOnDay: courseAllDayOnDay,
                     blocksOnDay: blocksOnDay,
                     onTapCanvas: onTapCanvas,
                     onTapBlock: onTapBlock,
@@ -885,6 +969,7 @@ class _CalendarToolbar extends StatelessWidget {
   final VoidCallback onNext;
   final VoidCallback onToday;
   final VoidCallback onOpenIcal;
+  final VoidCallback onOpenCourseImport;
   final VoidCallback onSuggestSchedule;
 
   const _CalendarToolbar({
@@ -899,6 +984,7 @@ class _CalendarToolbar extends StatelessWidget {
     required this.onNext,
     required this.onToday,
     required this.onOpenIcal,
+    required this.onOpenCourseImport,
     required this.onSuggestSchedule,
   });
 
@@ -915,7 +1001,9 @@ class _CalendarToolbar extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.6))),
+          border: Border(
+              bottom: BorderSide(
+                  color: scheme.outlineVariant.withValues(alpha: 0.6))),
         ),
         child: LayoutBuilder(
           builder: (context, constraints) {
@@ -937,24 +1025,33 @@ class _CalendarToolbar extends StatelessWidget {
                           onPressed: onNext,
                           icon: const Icon(Icons.chevron_right),
                         ),
-                        TextButton(onPressed: onToday, child: const Text('Today')),
+                        TextButton(
+                            onPressed: onToday, child: const Text('Today')),
                         const SizedBox(width: 8),
                         ConstrainedBox(
                           constraints: BoxConstraints(
-                            maxWidth: (constraints.maxWidth * 0.35).clamp(120, 360),
+                            maxWidth:
+                                (constraints.maxWidth * 0.35).clamp(120, 360),
                           ),
                           child: Text(
                             title,
-                            style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w500),
+                            style: textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w500),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         const SizedBox(width: 8),
                         SegmentedButton<_CalendarViewMode>(
                           segments: const [
-                            ButtonSegment(value: _CalendarViewMode.day, label: Text('Day')),
-                            ButtonSegment(value: _CalendarViewMode.week, label: Text('Week')),
-                            ButtonSegment(value: _CalendarViewMode.month, label: Text('Month')),
+                            ButtonSegment(
+                                value: _CalendarViewMode.day,
+                                label: Text('Day')),
+                            ButtonSegment(
+                                value: _CalendarViewMode.week,
+                                label: Text('Week')),
+                            ButtonSegment(
+                                value: _CalendarViewMode.month,
+                                label: Text('Month')),
                           ],
                           selected: {viewMode},
                           onSelectionChanged: (s) => onViewModeChanged(s.first),
@@ -974,6 +1071,11 @@ class _CalendarToolbar extends StatelessWidget {
                           tooltip: 'iCal Feeds',
                           onPressed: onOpenIcal,
                           icon: const Icon(Icons.link_outlined),
+                        ),
+                        IconButton(
+                          tooltip: 'Course Import',
+                          onPressed: onOpenCourseImport,
+                          icon: const Icon(Icons.school_outlined),
                         ),
                         IconButton(
                           tooltip: 'Account & settings',
@@ -1009,6 +1111,9 @@ class _CalendarPlannerPanel extends StatelessWidget {
   final void Function(DateTime, DateTime) onDaySelected;
   final void Function(DateTime) onPageChanged;
   final VoidCallback onOpenIcal;
+  final VoidCallback onOpenCourseImport;
+  // Kept to preserve hot-reload shape for existing dev sessions.
+  // These are intentionally unused by the current sidebar planner.
   final ScrollController? scrollController;
   final bool showHeader;
 
@@ -1019,7 +1124,10 @@ class _CalendarPlannerPanel extends StatelessWidget {
     required this.onDaySelected,
     required this.onPageChanged,
     required this.onOpenIcal,
+    required this.onOpenCourseImport,
+    // ignore: unused_element_parameter
     this.scrollController,
+    // ignore: unused_element_parameter
     this.showHeader = false,
   });
 
@@ -1031,12 +1139,27 @@ class _CalendarPlannerPanel extends StatelessWidget {
     final upcoming = <_UpcomingItem>[];
     final today = DateTime.now();
     for (var i = 0; i < 14; i++) {
-      final d = DateTime(today.year, today.month, today.day).add(Duration(days: i));
+      final d =
+          DateTime(today.year, today.month, today.day).add(Duration(days: i));
       for (final raw in eventsForDay(d)) {
         if (raw is EventModel) {
-          upcoming.add(_UpcomingItem(date: d, label: raw.title, time: raw.startTime));
+          upcoming.add(
+            _UpcomingItem(
+              date: d,
+              label: raw.title,
+              time: raw.startTime,
+              endTime: raw.endTime,
+              showTime: !raw.isDateOnlyCourseEvent,
+            ),
+          );
         } else if (raw is ScheduleBlockModel) {
-          upcoming.add(_UpcomingItem(date: d, label: raw.taskTitle, time: raw.startTime));
+          upcoming.add(
+            _UpcomingItem(
+              date: d,
+              label: raw.taskTitle,
+              time: raw.startTime,
+            ),
+          );
         }
       }
     }
@@ -1046,11 +1169,6 @@ class _CalendarPlannerPanel extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (showHeader)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
-            child: Text('Planner', style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
-          ),
         Padding(
           padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
           child: TableCalendar<dynamic>(
@@ -1076,8 +1194,10 @@ class _CalendarPlannerPanel extends StatelessWidget {
             calendarStyle: CalendarStyle(
               cellMargin: const EdgeInsets.all(1),
               outsideDaysVisible: true,
-              weekendTextStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
-              defaultTextStyle: TextStyle(color: scheme.onSurface, fontSize: 12),
+              weekendTextStyle:
+                  TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
+              defaultTextStyle:
+                  TextStyle(color: scheme.onSurface, fontSize: 12),
               todayDecoration: BoxDecoration(
                 color: scheme.primary.withValues(alpha: 0.16),
                 shape: BoxShape.circle,
@@ -1086,8 +1206,12 @@ class _CalendarPlannerPanel extends StatelessWidget {
                 color: scheme.primary,
                 shape: BoxShape.circle,
               ),
-              selectedTextStyle: TextStyle(color: scheme.onPrimary, fontSize: 12),
-              todayTextStyle: TextStyle(color: scheme.primary, fontWeight: FontWeight.w600, fontSize: 12),
+              selectedTextStyle:
+                  TextStyle(color: scheme.onPrimary, fontSize: 12),
+              todayTextStyle: TextStyle(
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12),
               markersMaxCount: 3,
               markerDecoration: BoxDecoration(
                 color: scheme.secondary,
@@ -1114,7 +1238,6 @@ class _CalendarPlannerPanel extends StatelessWidget {
                   ),
                 )
               : ListView.separated(
-                  controller: scrollController,
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   itemCount: slice.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 4),
@@ -1122,10 +1245,14 @@ class _CalendarPlannerPanel extends StatelessWidget {
                     final u = slice[i];
                     return ListTile(
                       dense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                      title: Text(u.label, maxLines: 2, overflow: TextOverflow.ellipsis),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 0),
+                      title: Text(u.label,
+                          maxLines: 2, overflow: TextOverflow.ellipsis),
                       subtitle: Text(
-                        '${DateFormat('EEE M/d').format(u.date)} · ${DateFormat('jm').format(u.time)}',
+                        u.showTime
+                            ? '${DateFormat('EEE M/d').format(u.date)} · ${DateFormat('jm').format(u.time)}${u.endTime != null && u.endTime!.isAfter(u.time) ? ' - ${DateFormat('jm').format(u.endTime!)}' : ''}'
+                            : DateFormat('EEE M/d').format(u.date),
                         style: textTheme.bodySmall,
                       ),
                     );
@@ -1134,10 +1261,21 @@ class _CalendarPlannerPanel extends StatelessWidget {
         ),
         Padding(
           padding: const EdgeInsets.all(12),
-          child: OutlinedButton.icon(
-            onPressed: onOpenIcal,
-            icon: const Icon(Icons.link, size: 18),
-            label: const Text('iCal feeds'),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              FilledButton.icon(
+                onPressed: onOpenCourseImport,
+                icon: const Icon(Icons.school_outlined, size: 18),
+                label: const Text('Course import'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: onOpenIcal,
+                icon: const Icon(Icons.link, size: 18),
+                label: const Text('iCal feeds'),
+              ),
+            ],
           ),
         ),
       ],
@@ -1149,7 +1287,15 @@ class _UpcomingItem {
   final DateTime date;
   final String label;
   final DateTime time;
-  _UpcomingItem({required this.date, required this.label, required this.time});
+  final DateTime? endTime;
+  final bool showTime;
+  _UpcomingItem({
+    required this.date,
+    required this.label,
+    required this.time,
+    this.endTime,
+    this.showTime = true,
+  });
 }
 
 void _showTimedEventPeek(BuildContext context, EventModel e) {
@@ -1158,7 +1304,8 @@ void _showTimedEventPeek(BuildContext context, EventModel e) {
     showDragHandle: true,
     builder: (ctx) {
       return Padding(
-        padding: EdgeInsets.fromLTRB(24, 8, 24, MediaQuery.paddingOf(ctx).bottom + 24),
+        padding: EdgeInsets.fromLTRB(
+            24, 8, 24, MediaQuery.paddingOf(ctx).bottom + 24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1166,15 +1313,18 @@ void _showTimedEventPeek(BuildContext context, EventModel e) {
             Text(e.title, style: Theme.of(ctx).textTheme.titleMedium),
             const SizedBox(height: 8),
             Text(
-              '${DateFormat('EEE, MMM d').format(e.startTime)} · '
-              '${DateFormat('jm').format(e.startTime)} – ${DateFormat('jm').format(e.endTime)}',
+              e.isDateOnlyCourseEvent
+                  ? DateFormat('EEE, MMM d').format(e.startTime)
+                  : '${DateFormat('EEE, MMM d').format(e.startTime)} · '
+                      '${DateFormat('jm').format(e.startTime)} – ${DateFormat('jm').format(e.endTime)}',
               style: Theme.of(ctx).textTheme.bodyMedium,
             ),
             const SizedBox(height: 16),
             Text('Description', style: Theme.of(ctx).textTheme.labelLarge),
             const SizedBox(height: 6),
             if (e.description.trim().isNotEmpty)
-              Text(e.description.trim(), style: Theme.of(ctx).textTheme.bodyMedium)
+              Text(e.description.trim(),
+                  style: Theme.of(ctx).textTheme.bodyMedium)
             else
               Text(
                 'No notes for this event.',
@@ -1236,10 +1386,13 @@ class _MonthTableCalendar extends StatelessWidget {
           shape: BoxShape.circle,
         ),
         selectedTextStyle: TextStyle(color: scheme.onPrimary),
-        todayTextStyle: TextStyle(color: scheme.primary, fontWeight: FontWeight.w600),
-        markerDecoration: BoxDecoration(color: scheme.secondary, shape: BoxShape.circle),
+        todayTextStyle:
+            TextStyle(color: scheme.primary, fontWeight: FontWeight.w600),
+        markerDecoration:
+            BoxDecoration(color: scheme.secondary, shape: BoxShape.circle),
       ),
-      headerStyle: const HeaderStyle(titleCentered: true, formatButtonVisible: true),
+      headerStyle:
+          const HeaderStyle(titleCentered: true, formatButtonVisible: true),
     );
   }
 }
@@ -1287,12 +1440,14 @@ class _WeekDayHeaderRow extends StatelessWidget {
             Expanded(
               child: Container(
                 decoration: BoxDecoration(
-                  border: Border(left: BorderSide(color: scheme.outlineVariant)),
+                  border:
+                      Border(left: BorderSide(color: scheme.outlineVariant)),
                   color: isSameDay(d, selectedDay)
                       ? scheme.primary.withValues(alpha: 0.06)
                       : null,
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -1311,7 +1466,9 @@ class _WeekDayHeaderRow extends StatelessWidget {
                       style: theme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w600,
                         height: 1,
-                        color: isSameDay(d, now) ? scheme.primary : scheme.onSurface,
+                        color: isSameDay(d, now)
+                            ? scheme.primary
+                            : scheme.onSurface,
                       ),
                     ),
                     if (multiDay)
@@ -1370,11 +1527,14 @@ class _WeekDayTimeGrid extends StatefulWidget {
   final ScrollController scrollController;
   final List<EventModel> Function(DateTime) timedEventsOnDay;
   final List<EventModel> Function(DateTime) canvasOnDay;
+  final List<EventModel> Function(DateTime) courseAllDayOnDay;
   final List<ScheduleBlockModel> Function(DateTime) blocksOnDay;
   final void Function(EventModel) onTapCanvas;
   final void Function(ScheduleBlockModel) onTapBlock;
-  final void Function(EventModel event, DateTime start, DateTime end) onEventTimeChanged;
-  final void Function(ScheduleBlockModel block, DateTime start, DateTime end) onBlockTimeChanged;
+  final void Function(EventModel event, DateTime start, DateTime end)
+      onEventTimeChanged;
+  final void Function(ScheduleBlockModel block, DateTime start, DateTime end)
+      onBlockTimeChanged;
 
   const _WeekDayTimeGrid({
     super.key,
@@ -1386,6 +1546,7 @@ class _WeekDayTimeGrid extends StatefulWidget {
     required this.scrollController,
     required this.timedEventsOnDay,
     required this.canvasOnDay,
+    required this.courseAllDayOnDay,
     required this.blocksOnDay,
     required this.onTapCanvas,
     required this.onTapBlock,
@@ -1398,30 +1559,67 @@ class _WeekDayTimeGrid extends StatefulWidget {
 }
 
 class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
-  double get _gridHeight => (widget.lastHour - widget.firstHour + 1) * widget.hourHeight;
+  double get _gridHeight =>
+      (widget.lastHour - widget.firstHour + 1) * widget.hourHeight;
 
-  /// Scroll so ~7:00 is near the top of the viewport (same anchor as [_CalendarScreenState._firstHour]).
-  void _scrollToWorkdayStart() {
+  /// Scroll to the first visible timed event, falling back to ~7:00.
+  void _scrollToRelevantTime() {
     final c = widget.scrollController;
     if (!c.hasClients) return;
-    const targetHour = 7;
-    final raw = (targetHour - widget.firstHour) * widget.hourHeight;
+    final firstEventMinute = _firstTimedEventMinute();
+    final raw = firstEventMinute == null
+        ? (7 - widget.firstHour) * widget.hourHeight
+        : ((firstEventMinute - widget.firstHour * 60 - 45) / 60.0) *
+            widget.hourHeight;
     final max = c.position.maxScrollExtent;
     c.jumpTo(raw.clamp(0.0, max));
+  }
+
+  int? _firstTimedEventMinute() {
+    int? earliest;
+    for (final day in widget.days) {
+      for (final event in widget.timedEventsOnDay(day)) {
+        if (event.isDateOnlyCourseEvent) continue;
+        if (!isSameDay(event.startTime, day)) continue;
+        final minute = event.startTime.hour * 60 + event.startTime.minute;
+        final minVisible = widget.firstHour * 60;
+        final maxVisible = (widget.lastHour + 1) * 60;
+        if (minute < minVisible || minute >= maxVisible) continue;
+        earliest = earliest == null || minute < earliest ? minute : earliest;
+      }
+    }
+    return earliest;
+  }
+
+  static String _timedEventSignature(_WeekDayTimeGrid widget) {
+    return widget.days
+        .map(
+          (day) => widget
+              .timedEventsOnDay(day)
+              .map(
+                (event) =>
+                    '${event.id}:${event.startTime.toIso8601String()}:${event.endTime.toIso8601String()}',
+              )
+              .join(','),
+        )
+        .join('|');
   }
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToWorkdayStart());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _scrollToRelevantTime());
   }
 
   @override
   void didUpdateWidget(covariant _WeekDayTimeGrid oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.days.first != widget.days.first ||
-        oldWidget.days.length != widget.days.length) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToWorkdayStart());
+        oldWidget.days.length != widget.days.length ||
+        _timedEventSignature(oldWidget) != _timedEventSignature(widget)) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _scrollToRelevantTime());
     }
   }
 
@@ -1439,6 +1637,9 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
           days: widget.days,
           canvasOnDay: widget.canvasOnDay,
           onTap: widget.onTapCanvas,
+          courseAllDayOnDay: widget.courseAllDayOnDay,
+          onTapCanvas: widget.onTapCanvas,
+          onTapCourse: (event) => _showTimedEventPeek(context, event),
         ),
         Expanded(
           child: Scrollbar(
@@ -1494,18 +1695,27 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
 class _AllDayAssignmentStrip extends StatelessWidget {
   final List<DateTime> days;
   final List<EventModel> Function(DateTime) canvasOnDay;
+  // Kept to preserve hot-reload shape for existing dev sessions.
   final void Function(EventModel) onTap;
+  final List<EventModel> Function(DateTime) courseAllDayOnDay;
+  final void Function(EventModel) onTapCanvas;
+  final void Function(EventModel) onTapCourse;
 
   const _AllDayAssignmentStrip({
     required this.days,
     required this.canvasOnDay,
     required this.onTap,
+    required this.courseAllDayOnDay,
+    required this.onTapCanvas,
+    required this.onTapCourse,
   });
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final maxChips = days.map((d) => canvasOnDay(d).length).fold<int>(0, (a, b) => a > b ? a : b);
+    final maxChips = days
+        .map((d) => canvasOnDay(d).length + courseAllDayOnDay(d).length)
+        .fold<int>(0, (a, b) => a > b ? a : b);
     final rowHeight = maxChips == 0 ? 36.0 : 28.0 + maxChips * 26.0;
 
     return Container(
@@ -1531,37 +1741,30 @@ class _AllDayAssignmentStrip extends StatelessWidget {
             Expanded(
               child: Container(
                 decoration: BoxDecoration(
-                  border: Border(left: BorderSide(color: scheme.outlineVariant)),
+                  border:
+                      Border(left: BorderSide(color: scheme.outlineVariant)),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    for (final a in courseAllDayOnDay(d))
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: _AllDayEventChip(
+                          event: a,
+                          color: AppColors.deadline,
+                          onTap: () => onTapCourse(a),
+                        ),
+                      ),
                     for (final a in canvasOnDay(d))
                       Padding(
                         padding: const EdgeInsets.only(bottom: 2),
-                        child: Material(
-                          color: AppColors.canvasAssignmentContainer,
-                          borderRadius: BorderRadius.circular(8),
-                          elevation: 1,
-                          shadowColor: Colors.black.withValues(alpha: 0.06),
-                          clipBehavior: Clip.antiAlias,
-                          child: InkWell(
-                            onTap: () => onTap(a),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                              child: Text(
-                                a.title,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                                      color: AppColors.canvasAssignment,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                              ),
-                            ),
-                          ),
+                        child: _AllDayEventChip(
+                          event: a,
+                          color: AppColors.canvasAssignment,
+                          onTap: () => onTapCanvas(a),
                         ),
                       ),
                   ],
@@ -1569,6 +1772,59 @@ class _AllDayAssignmentStrip extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _AllDayEventChip extends StatelessWidget {
+  final EventModel event;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _AllDayEventChip({
+    required this.event,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: color.withValues(alpha: 0.14),
+      borderRadius: BorderRadius.circular(8),
+      elevation: 1,
+      shadowColor: Colors.black.withValues(alpha: 0.06),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          child: Row(
+            children: [
+              Container(
+                width: 3,
+                height: 14,
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  event.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1627,8 +1883,10 @@ class _DayTimeColumn extends StatelessWidget {
   final DateTime now;
   final void Function(EventModel) onTapCanvas;
   final void Function(ScheduleBlockModel) onTapBlock;
-  final void Function(EventModel event, DateTime start, DateTime end) onEventTimeChanged;
-  final void Function(ScheduleBlockModel block, DateTime start, DateTime end) onBlockTimeChanged;
+  final void Function(EventModel event, DateTime start, DateTime end)
+      onEventTimeChanged;
+  final void Function(ScheduleBlockModel block, DateTime start, DateTime end)
+      onBlockTimeChanged;
 
   const _DayTimeColumn({
     required this.day,
@@ -1649,6 +1907,10 @@ class _DayTimeColumn extends StatelessWidget {
   double _minutesFromStart(DateTime dt) {
     final start = DateTime(dt.year, dt.month, dt.day, firstHour);
     return dt.difference(start).inMinutes.toDouble();
+  }
+
+  int _wallClockMinutesFromGridStart(DateTime dt) {
+    return dt.hour * 60 + dt.minute - firstHour * 60;
   }
 
   /// Greedy column assignment: overlapping items split column width evenly.
@@ -1683,7 +1945,8 @@ class _DayTimeColumn extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final gridHeight = (lastHour - firstHour + 1) * hourHeight;
     final dayStart = DateTime(day.year, day.month, day.day, firstHour);
-    final dayEndExclusive = DateTime(day.year, day.month, day.day, lastHour + 1);
+    final dayEndExclusive =
+        DateTime(day.year, day.month, day.day, lastHour + 1);
     final totalMins = (lastHour - firstHour + 1) * 60;
 
     double? nowY;
@@ -1696,8 +1959,13 @@ class _DayTimeColumn extends StatelessWidget {
 
     final segs = <_SegLay>[];
     for (final e in timedEvents) {
-      var sm = e.startTime.difference(dayStart).inMinutes;
-      var em = e.endTime.difference(dayStart).inMinutes;
+      var sm = _wallClockMinutesFromGridStart(e.startTime);
+      var em = isSameDay(e.endTime, day)
+          ? _wallClockMinutesFromGridStart(e.endTime)
+          : totalMins;
+      if (em <= sm && e.source == 'course') {
+        em = sm + 15;
+      }
       if (em <= sm) continue;
       sm = sm.clamp(0, totalMins);
       em = em.clamp(0, totalMins);
@@ -1714,11 +1982,14 @@ class _DayTimeColumn extends StatelessWidget {
       segs.add(_SegLay(startMin: sm, endMin: em, id: 'b_${b.id}', block: b));
     }
     _packSegments(segs);
-    final maxCols = segs.isEmpty ? 1 : segs.map((s) => s.col).reduce((a, b) => a > b ? a : b) + 1;
+    final maxCols = segs.isEmpty
+        ? 1
+        : segs.map((s) => s.col).reduce((a, b) => a > b ? a : b) + 1;
 
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: isToday ? scheme.primary.withValues(alpha: 0.04) : scheme.surface,
+        color:
+            isToday ? scheme.primary.withValues(alpha: 0.04) : scheme.surface,
         border: Border(
           left: BorderSide(color: scheme.outlineVariant),
           right: BorderSide(
@@ -1774,7 +2045,9 @@ class _DayTimeColumn extends StatelessWidget {
                           shape: BoxShape.circle,
                         ),
                       ),
-                      Expanded(child: Container(height: 2, color: AppColors.currentTimeLine)),
+                      Expanded(
+                          child: Container(
+                              height: 2, color: AppColors.currentTimeLine)),
                     ],
                   ),
                 ),
@@ -1844,10 +2117,13 @@ class _DayTimeColumn extends StatelessWidget {
     }
     if (s.block != null) {
       final b = s.block!;
-      final bg = b.isAiGenerated ? AppColors.aiStudyBlock : AppColors.confirmedStudyBlock;
+      final bg = b.isAiGenerated
+          ? AppColors.aiStudyBlock
+          : AppColors.confirmedStudyBlock;
       final ht = chipHeight(24);
       if (ht <= 0) return const SizedBox.shrink();
-      final chip = _StudyBlockChip(block: b, color: bg, onTap: () => onTapBlock(b));
+      final chip =
+          _StudyBlockChip(block: b, color: bg, onTap: () => onTapBlock(b));
       return Positioned(
         top: topVis,
         left: left,
@@ -1931,7 +2207,9 @@ class _DragTimeChipShellState extends State<_DragTimeChipShell> {
                 setState(() => _dy = 0);
                 var ns = _snap(widget.startMin + dm);
                 if (ns < 0) ns = 0;
-                if (ns > widget.totalMins - 15) ns = (widget.totalMins - 15).clamp(0, widget.totalMins);
+                if (ns > widget.totalMins - 15) {
+                  ns = (widget.totalMins - 15).clamp(0, widget.totalMins);
+                }
                 var ne = ns + dur;
                 if (ne > widget.totalMins) {
                   ne = widget.totalMins;
@@ -1947,7 +2225,8 @@ class _DragTimeChipShellState extends State<_DragTimeChipShell> {
                 child: const SizedBox(
                   width: 11,
                   child: Center(
-                    child: Icon(Icons.drag_indicator, size: 10, color: Colors.white70),
+                    child: Icon(Icons.drag_indicator,
+                        size: 10, color: Colors.white70),
                   ),
                 ),
               ),
@@ -1985,7 +2264,8 @@ class _HourGridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _HourGridPainter oldDelegate) =>
-      oldDelegate.lineColor != lineColor || oldDelegate.hourHeight != hourHeight;
+      oldDelegate.lineColor != lineColor ||
+      oldDelegate.hourHeight != hourHeight;
 }
 
 class _TimedEventChip extends StatelessWidget {
@@ -2014,30 +2294,44 @@ class _TimedEventChip extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(10),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                event.title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                      height: 1.2,
-                    ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final h = constraints.maxHeight;
+            final showDuration = h >= 40;
+            final maxTitleLines = h >= 48 ? 2 : 1;
+            return Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 6,
+                vertical: showDuration ? 5 : 3,
               ),
-              Text(
-                durLabel,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Colors.white.withValues(alpha: 0.92),
-                      fontWeight: FontWeight.w500,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Flexible(
+                    child: Text(
+                      event.title,
+                      maxLines: maxTitleLines,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            height: 1.2,
+                          ),
                     ),
+                  ),
+                  if (showDuration)
+                    Text(
+                      durLabel,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.92),
+                            fontWeight: FontWeight.w500,
+                          ),
+                    ),
+                ],
               ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
@@ -2049,7 +2343,8 @@ class _StudyBlockChip extends StatelessWidget {
   final Color color;
   final VoidCallback onTap;
 
-  const _StudyBlockChip({required this.block, required this.color, required this.onTap});
+  const _StudyBlockChip(
+      {required this.block, required this.color, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -2066,41 +2361,57 @@ class _StudyBlockChip extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(10),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final h = constraints.maxHeight;
+            final showDuration = h >= 40;
+            final maxTitleLines = h >= 48 ? 2 : 1;
+            return Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: 6,
+                vertical: showDuration ? 5 : 3,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (block.isAiGenerated)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Icon(Icons.auto_awesome, size: 12, color: Colors.white.withValues(alpha: 0.95)),
-                    ),
-                  Expanded(
-                    child: Text(
-                      block.taskTitle,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            height: 1.2,
+                  Flexible(
+                    child: Row(
+                      children: [
+                        if (block.isAiGenerated)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: Icon(Icons.auto_awesome,
+                                size: 12,
+                                color: Colors.white.withValues(alpha: 0.95)),
                           ),
+                        Expanded(
+                          child: Text(
+                            block.taskTitle,
+                            maxLines: maxTitleLines,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.2,
+                                ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
+                  if (showDuration)
+                    Text(
+                      durLabel,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Colors.white.withValues(alpha: 0.92),
+                            fontWeight: FontWeight.w500,
+                          ),
+                    ),
                 ],
               ),
-              Text(
-                durLabel,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Colors.white.withValues(alpha: 0.92),
-                      fontWeight: FontWeight.w500,
-                    ),
-              ),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );
@@ -2145,7 +2456,8 @@ class _AssignmentDetailSheet extends StatelessWidget {
         children: [
           Text(parts.$2, style: textTheme.titleMedium),
           const SizedBox(height: 8),
-          _SheetRow(icon: Icons.school_outlined, label: 'Course', value: parts.$1),
+          _SheetRow(
+              icon: Icons.school_outlined, label: 'Course', value: parts.$1),
           _SheetRow(
             icon: Icons.event_outlined,
             label: 'Due',
@@ -2154,7 +2466,8 @@ class _AssignmentDetailSheet extends StatelessWidget {
           _SheetRow(
             icon: Icons.timer_outlined,
             label: 'Estimated duration',
-            value: '${event.endTime.difference(event.startTime).inMinutes.clamp(1, 9999)} min',
+            value:
+                '${event.endTime.difference(event.startTime).inMinutes.clamp(1, 9999)} min',
           ),
           const SizedBox(height: 16),
           Text('Description', style: textTheme.labelLarge),
@@ -2168,9 +2481,13 @@ class _AssignmentDetailSheet extends StatelessWidget {
               border: Border.all(color: scheme.outlineVariant),
             ),
             child: Text(
-              event.description.trim().isEmpty ? 'No description.' : event.description.trim(),
+              event.description.trim().isEmpty
+                  ? 'No description.'
+                  : event.description.trim(),
               style: textTheme.bodyMedium?.copyWith(
-                color: event.description.trim().isEmpty ? scheme.onSurfaceVariant : null,
+                color: event.description.trim().isEmpty
+                    ? scheme.onSurfaceVariant
+                    : null,
                 height: 1.35,
               ),
             ),
@@ -2240,7 +2557,8 @@ class _BlockDetailSheetState extends State<_BlockDetailSheet> {
       initialTime: TimeOfDay.fromDateTime(widget.block.startTime),
     );
     if (time == null || !widget.parentContext.mounted) return;
-    final newStart = DateTime(day.year, day.month, day.day, time.hour, time.minute);
+    final newStart =
+        DateTime(day.year, day.month, day.day, time.hour, time.minute);
     final dur = widget.block.endTime.difference(widget.block.startTime);
     GetIt.instance<SuggestedScheduleStore>().updateBlockTimes(
       id: widget.block.id,
@@ -2334,7 +2652,8 @@ class _BlockDetailSheetState extends State<_BlockDetailSheet> {
               hintText: 'Add context for this study block…',
               filled: true,
               fillColor: scheme.surfaceContainerHighest,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              border:
+                  OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             ),
           ),
           const SizedBox(height: 8),
@@ -2373,7 +2692,8 @@ class _SheetRow extends StatelessWidget {
   final String label;
   final String value;
 
-  const _SheetRow({required this.icon, required this.label, required this.value});
+  const _SheetRow(
+      {required this.icon, required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
@@ -2382,7 +2702,8 @@ class _SheetRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 20, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          Icon(icon,
+              size: 20, color: Theme.of(context).colorScheme.onSurfaceVariant),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -2393,6 +2714,225 @@ class _SheetRow extends StatelessWidget {
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Course import bottom sheet ────────────────────────────────────────────────
+
+class _CourseImportSheet extends StatefulWidget {
+  final List<CourseImportRecord> imports;
+  final Future<void> Function(String url, String name) onImport;
+  final Future<void> Function(String importId) onRemove;
+
+  const _CourseImportSheet({
+    required this.imports,
+    required this.onImport,
+    required this.onRemove,
+  });
+
+  @override
+  State<_CourseImportSheet> createState() => _CourseImportSheetState();
+}
+
+class _CourseImportSheetState extends State<_CourseImportSheet> {
+  final _urlCtrl = TextEditingController();
+  final _nameCtrl = TextEditingController();
+  bool _isLoading = false;
+  String? _deletingCourseId;
+  String? _error;
+
+  @override
+  void dispose() {
+    _urlCtrl.dispose();
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final url = _urlCtrl.text.trim();
+    if (url.isEmpty) {
+      setState(() => _error = 'Please enter a course page URL.');
+      return;
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      setState(() => _error = 'URL must start with http:// or https://');
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+    try {
+      await widget.onImport(url, _nameCtrl.text.trim());
+      if (mounted) Navigator.of(context).pop();
+    } on DioException catch (e) {
+      if (!mounted) return;
+      final detail = e.response?.data?['detail']?.toString() ??
+          e.message ??
+          'Unknown error';
+      setState(() {
+        _isLoading = false;
+        _error = detail;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  Future<void> _deleteCourse(CourseImportRecord course) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete course import?'),
+        content: Text(
+          'Remove ${course.courseName} and its ${course.eventCount} calendar events?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() {
+      _deletingCourseId = course.id;
+      _error = null;
+    });
+    try {
+      await widget.onRemove(course.id);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _deletingCourseId = null;
+        _error = e.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        4,
+        16,
+        MediaQuery.of(context).viewInsets.bottom + 24,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.school_outlined),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Course Import',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              TextButton(
+                onPressed:
+                    _isLoading ? null : () => Navigator.of(context).pop(),
+                child: const Text('Cancel'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _urlCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Course Page URL',
+              hintText:
+                  'https://courses.cs.washington.edu/courses/cse333/26sp/',
+              border: OutlineInputBorder(),
+            ),
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            autofocus: true,
+            onSubmitted: (_) => _isLoading ? null : _submit(),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _nameCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Course Name (optional)',
+              hintText: 'e.g. CSE 333',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _isLoading ? null : _submit(),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Use this for UW course websites. Use iCal feeds only for .ics or webcal calendar links.',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(_error!, style: TextStyle(color: scheme.error, fontSize: 13)),
+          ],
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _isLoading ? null : _submit,
+            icon: _isLoading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.auto_awesome),
+            label: Text(_isLoading ? 'Importing…' : 'Import'),
+          ),
+          if (widget.imports.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            Text('Imported courses',
+                style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 6),
+            ...widget.imports.map((course) {
+              final isDeleting = _deletingCourseId == course.id;
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.school_outlined, size: 20),
+                title: Text(course.courseName),
+                subtitle:
+                    Text('${course.eventCount} events · ${course.courseUrl}'),
+                trailing: IconButton(
+                  tooltip: 'Delete course import',
+                  onPressed: _isLoading || isDeleting
+                      ? null
+                      : () => _deleteCourse(course),
+                  icon: isDeleting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.delete_outline),
+                ),
+              );
+            }),
+          ],
         ],
       ),
     );
@@ -2443,7 +2983,23 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
     if (!url.startsWith('http://') &&
         !url.startsWith('https://') &&
         !url.startsWith('webcal://')) {
-      setState(() => _error = 'URL must start with http://, https://, or webcal://');
+      setState(
+          () => _error = 'URL must start with http://, https://, or webcal://');
+      return;
+    }
+    final parsedUrl = Uri.tryParse(url);
+    final isUwCoursePage = parsedUrl != null &&
+        parsedUrl.host == 'courses.cs.washington.edu' &&
+        parsedUrl.pathSegments.contains('courses') &&
+        parsedUrl.pathSegments
+            .any((segment) => segment.toLowerCase().startsWith('cse'));
+    final looksLikeIcal = url.startsWith('webcal://') ||
+        parsedUrl?.path.toLowerCase().endsWith('.ics') == true;
+    if (isUwCoursePage && !looksLikeIcal) {
+      setState(() {
+        _error =
+            'This is a course website, not an iCal feed. Use Course Import for UW course pages, or paste a .ics / webcal calendar URL here.';
+      });
       return;
     }
 
@@ -2456,7 +3012,9 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
       if (mounted) Navigator.of(context).pop();
     } on DioException catch (e) {
       if (mounted) {
-        final detail = e.response?.data?['detail']?.toString() ?? e.message ?? 'Unknown error';
+        final detail = e.response?.data?['detail']?.toString() ??
+            e.message ??
+            'Unknown error';
         setState(() {
           _isLoading = false;
           _error = detail;
@@ -2498,7 +3056,8 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('iCal Feeds', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const Text('iCal Feeds',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               TextButton.icon(
                 onPressed: () => setState(() {
                   _showForm = !_showForm;
@@ -2540,7 +3099,9 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
                     ),
                     if (_error != null) ...[
                       const SizedBox(height: 8),
-                      Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 13)),
+                      Text(_error!,
+                          style:
+                              const TextStyle(color: Colors.red, fontSize: 13)),
                     ],
                     const SizedBox(height: 12),
                     FilledButton(
@@ -2549,7 +3110,8 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
                           ? const SizedBox(
                               width: 20,
                               height: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white),
                             )
                           : const Text('Import'),
                     ),
@@ -2559,14 +3121,17 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
                     Center(
                       child: Column(
                         children: [
-                          Icon(Icons.link_off, size: 44, color: Colors.grey[300]),
+                          Icon(Icons.link_off,
+                              size: 44, color: Colors.grey[300]),
                           const SizedBox(height: 8),
-                          Text('No iCal feeds yet.', style: TextStyle(color: Colors.grey[500])),
+                          Text('No iCal feeds yet.',
+                              style: TextStyle(color: Colors.grey[500])),
                           const SizedBox(height: 4),
                           Text(
                             'Paste a link from Google Calendar, Outlook,\nApple Calendar, or any .ics URL.',
                             textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey[400]),
                           ),
                         ],
                       ),
@@ -2577,10 +3142,12 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
                     const SizedBox(height: 12),
                     ...widget.feeds.map((feed) {
                       final count = widget.feedEventCounts[feed['id']] ?? -1;
-                      final countLabel = count < 0 ? 'not synced' : '$count events';
+                      final countLabel =
+                          count < 0 ? 'not synced' : '$count events';
                       return ListTile(
                         contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.calendar_today_outlined, size: 20),
+                        leading:
+                            const Icon(Icons.calendar_today_outlined, size: 20),
                         title: Text(feed['name'] ?? 'Unnamed Feed'),
                         subtitle: Text(
                           '$countLabel\n${feed['url'] ?? ''}',
@@ -2597,22 +3164,30 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
                               tooltip: 'Re-sync',
                               onPressed: () async {
                                 try {
-                                  await widget.onSync(feed['id']!, feed['name']!, feed['url']!);
-                                  if (context.mounted) Navigator.of(context).pop();
+                                  await widget.onSync(
+                                      feed['id']!, feed['name']!, feed['url']!);
+                                  if (context.mounted) {
+                                    Navigator.of(context).pop();
+                                  }
                                 } catch (e) {
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(content: Text('Sync failed: $e'), backgroundColor: Colors.red),
+                                      SnackBar(
+                                          content: Text('Sync failed: $e'),
+                                          backgroundColor: Colors.red),
                                     );
                                   }
                                 }
                               },
                             ),
                             IconButton(
-                              icon: Icon(Icons.delete_outline, size: 20, color: Colors.red[300]),
+                              icon: Icon(Icons.delete_outline,
+                                  size: 20, color: Colors.red[300]),
                               onPressed: () async {
                                 await widget.onRemove(feed['id']!);
-                                if (context.mounted) Navigator.of(context).pop();
+                                if (context.mounted) {
+                                  Navigator.of(context).pop();
+                                }
                               },
                             ),
                           ],
