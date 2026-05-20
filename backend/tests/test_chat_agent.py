@@ -28,21 +28,20 @@ def test_find_free_slots_returns_workday_windows():
 def test_find_free_slots_respects_busy_calendar_events():
     from app.services.chat_calendar_context import set_calendar_events
 
-    # Busy 2:30–3:20pm on May 18, 2026
+    # Use today so sanitize_free_slot_range does not rewrite to Mon–Fri (which
+    # would leave other days as one long slot and break the assertion below).
+    day = chat_agent_tools.today_local().isoformat()
     set_calendar_events(
         [
             {
-                "start_time": "2026-05-18T14:30:00",
-                "end_time": "2026-05-18T15:20:00",
+                "start_time": f"{day}T14:30:00",
+                "end_time": f"{day}T15:20:00",
                 "title": "Lecture",
             }
         ]
     )
     try:
-        result = chat_agent_tools.find_free_slots_in_calendar(
-            "2026-05-18",
-            "2026-05-18",
-        )
+        result = chat_agent_tools.find_free_slots_in_calendar(day, day)
     finally:
         set_calendar_events(None)
     assert result["calendar_events_used"] == 1
