@@ -1,6 +1,8 @@
 # synctra
 
-A new Flutter project.
+Flutter app for **Synctra** (mobile-first: iOS/Android; Flutter web for secondary access).
+
+**Tasks** opens on a **Week** board (Mon–Sun, drag to reschedule, inline add) with an optional **List** view. Calendar and chat live on their own tabs.
 
 ## Getting Started
 

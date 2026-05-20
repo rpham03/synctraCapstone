@@ -37,6 +37,7 @@ dependencies:
   uuid: ^4.4.0                   # Generate local IDs before sync
 
   # UI helpers
+  google_fonts: ^6.2.1           # Notion-like Inter typography
   flutter_svg: ^2.0.10
   gap: ^3.0.1                    # Spacing widget
   shimmer: ^3.0.0                # Loading skeleton effect

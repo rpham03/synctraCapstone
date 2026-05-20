@@ -6,6 +6,7 @@ class ScheduleBlockModel {
   final DateTime startTime;
   final DateTime endTime;
   final bool isAiGenerated;
+  final String description;
 
   const ScheduleBlockModel({
     required this.id,
@@ -14,5 +15,25 @@ class ScheduleBlockModel {
     required this.startTime,
     required this.endTime,
     this.isAiGenerated = true,
+    this.description = '',
   });
+
+  ScheduleBlockModel copyWith({
+    String? id,
+    String? taskId,
+    String? taskTitle,
+    DateTime? startTime,
+    DateTime? endTime,
+    bool? isAiGenerated,
+    String? description,
+  }) =>
+      ScheduleBlockModel(
+        id: id ?? this.id,
+        taskId: taskId ?? this.taskId,
+        taskTitle: taskTitle ?? this.taskTitle,
+        startTime: startTime ?? this.startTime,
+        endTime: endTime ?? this.endTime,
+        isAiGenerated: isAiGenerated ?? this.isAiGenerated,
+        description: description ?? this.description,
+      );
 }

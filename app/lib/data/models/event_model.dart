@@ -7,8 +7,8 @@ class EventModel {
   // 'google_calendar' | 'canvas' | 'manual' | 'ical' | 'course'
   final String source;
   final bool isFixed;
-  final String? description;
-  final String? sourceEventId;
+  /// Optional notes (manual entry, or cached from feed).
+  final String description;
 
   const EventModel({
     required this.id,
@@ -17,8 +17,7 @@ class EventModel {
     required this.endTime,
     required this.source,
     this.isFixed = true,
-    this.description,
-    this.sourceEventId,
+    this.description = '',
   });
 
   bool get isDateOnlyCourseEvent =>
@@ -26,26 +25,32 @@ class EventModel {
 
   // From backend scraper JSON response
   factory EventModel.fromJson(Map<String, dynamic> json) => EventModel(
-        id: json['id'] as String? ?? '',
-        title: json['title'] as String,
-        startTime: DateTime.parse(json['start_time'] as String),
-        endTime: DateTime.parse(json['end_time'] as String),
-        source: json['source'] as String? ?? 'manual',
-        isFixed: json['is_fixed'] as bool? ?? true,
-        description: json['description'] as String?,
-        sourceEventId: json['source_event_id'] as String?,
+        id: json['id'],
+        title: json['title'],
+        startTime: DateTime.parse(json['start_time']),
+        endTime: DateTime.parse(json['end_time']),
+        source: json['source'],
+        isFixed: json['is_fixed'] ?? true,
+        description: json['description'] as String? ?? '',
       );
 
-  // From Supabase row
-  factory EventModel.fromSupabase(Map<String, dynamic> row) => EventModel(
-        id: row['id'] as String,
-        title: row['title'] as String,
-        startTime: DateTime.parse(row['start_time'] as String),
-        endTime: DateTime.parse(row['end_time'] as String),
-        source: row['source'] as String,
-        isFixed: row['is_fixed'] as bool? ?? true,
-        description: row['description'] as String?,
-        sourceEventId: row['source_event_id'] as String?,
+  EventModel copyWith({
+    String? id,
+    String? title,
+    DateTime? startTime,
+    DateTime? endTime,
+    String? source,
+    bool? isFixed,
+    String? description,
+  }) =>
+      EventModel(
+        id: id ?? this.id,
+        title: title ?? this.title,
+        startTime: startTime ?? this.startTime,
+        endTime: endTime ?? this.endTime,
+        source: source ?? this.source,
+        isFixed: isFixed ?? this.isFixed,
+        description: description ?? this.description,
       );
 
   // For upserting into Supabase events table
