@@ -2,7 +2,7 @@
 """Canvas LMS API client — fetches assignments, courses, and due dates."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 import httpx
 from app.core.config.settings import settings
@@ -15,6 +15,18 @@ def _estimate_minutes(assignment: dict) -> int:
     return 60
 
 
+def _course_display_name(course: dict) -> str:
+    """Short label students recognize (e.g. CSE 331), not just the Canvas course id."""
+    for key in ("course_code", "name", "original_name"):
+        raw = course.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    cid = course.get("id")
+    if cid is not None:
+        return f"Course {cid}"
+    return "Unknown course"
+
+
 def _submission_done(submission: dict | None) -> bool:
     if not submission:
         return False
@@ -22,8 +34,15 @@ def _submission_done(submission: dict | None) -> bool:
     return wf in ("submitted", "graded", "pending_review", "complete")
 
 
-def _due_at_in_view_window(due_at_iso: str, *, days_past: int = 7) -> bool:
-    """True if due is in [now - days_past, +infinity) — last week of history + all upcoming."""
+def _today_local() -> date:
+    """Calendar date used for the rolling window (midnight rollover drops yesterday)."""
+    return datetime.now().astimezone().date()
+
+
+def _due_on_or_after_today(due_at_iso: object) -> bool:
+    """True if the assignment due date is today or later (local calendar day)."""
+    if not isinstance(due_at_iso, str):
+        return False
     s = due_at_iso.strip()
     if not s:
         return False
@@ -32,9 +51,8 @@ def _due_at_in_view_window(due_at_iso: str, *, days_past: int = 7) -> bool:
     due = datetime.fromisoformat(s)
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=days_past)
-    return due >= cutoff
+    due_day = due.astimezone().date()
+    return due_day >= _today_local()
 
 
 class CanvasClient:
@@ -71,11 +89,15 @@ class CanvasClient:
             data = resp.json()
             return data if isinstance(data, list) else []
 
-    async def list_tasks_normalized(self) -> list[dict]:
-        """Synctra task JSON for assignments due in the last 7 days or anytime in the future.
+    async def list_tasks_normalized(
+        self,
+        *,
+        omit_completed: bool = False,
+    ) -> list[dict]:
+        """Synctra task JSON for assignments due today or later (local calendar day).
 
-        Older due dates (e.g. last term) are omitted so the list stays focused on
-        the past week + upcoming work.
+        Each new day, yesterday's dues drop out automatically. Set omit_completed
+        to hide submitted/graded work (chat "what's due?").
         """
         courses = await self.list_active_courses()
         out: list[dict] = []
@@ -84,6 +106,7 @@ class CanvasClient:
             if cid is None:
                 continue
             course_id_str = str(int(cid)) if isinstance(cid, (int, float)) else str(cid)
+            course_name = _course_display_name(c)
             try:
                 assigns = await self.get_assignments(
                     course_id_str, include_submission=True
@@ -98,17 +121,21 @@ class CanvasClient:
                 due = a.get("due_at")
                 if not due or not isinstance(due, str):
                     continue
-                if not _due_at_in_view_window(due, days_past=7):
+                if not _due_on_or_after_today(due):
                     continue
                 aid = a.get("id")
                 if aid is None:
                     continue
-                title = (a.get("name") or "Assignment").strip()
+                raw_name = a.get("name") or "Assignment"
+                title = raw_name.strip() if isinstance(raw_name, str) else "Assignment"
                 sub = a.get("submission")
                 if isinstance(sub, list):
                     sub = sub[0] if sub else None
                 if sub is not None and not isinstance(sub, dict):
                     sub = None
+                completed = _submission_done(sub)
+                if omit_completed and completed:
+                    continue
                 out.append(
                     {
                         "id": f"{course_id_str}_{aid}",
@@ -116,8 +143,9 @@ class CanvasClient:
                         "due_date": due,
                         "estimated_minutes": _estimate_minutes(a),
                         "course_id": course_id_str,
+                        "course_name": course_name,
                         "source": "canvas",
-                        "is_completed": _submission_done(sub),
+                        "is_completed": completed,
                     }
                 )
         out.sort(key=lambda t: t["due_date"])

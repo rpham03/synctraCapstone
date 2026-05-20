@@ -1,13 +1,12 @@
 // Embedded Synctra AI chat — used on Chat tab and beside the weekly task board.
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:get_it/get_it.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/constants/api_constants.dart';
 import '../../data/models/chat_message_model.dart';
-import '../services/schedule_chat_coordinator.dart';
+import '../../data/services/calendar_events_loader.dart';
 import 'sync_it_chrome.dart';
 
 class SynctraChatPanel extends StatefulWidget {
@@ -59,19 +58,29 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
     super.dispose();
   }
 
-  void _postChatToBackend(String userText) {
-    final uid = Supabase.instance.client.auth.currentUser?.id ?? 'preview';
-    Dio()
-        .post<Map<String, dynamic>>(
-          '${ApiConstants.baseUrl}/chat/message',
-          data: {'message': userText, 'user_id': uid},
-        )
-        .then((_) {}, onError: (_) {});
-  }
-
   Future<String> _resolveReply(String userText) async {
-    _postChatToBackend(userText);
-    return GetIt.instance<ScheduleChatCoordinator>().handleUserMessage(userText);
+    try {
+      final calendarEvents = await CalendarEventsLoader.loadForChat();
+      final uid = Supabase.instance.client.auth.currentUser?.id ?? 'app-user';
+      final response = await Dio().post<Map<String, dynamic>>(
+        '${ApiConstants.baseUrl}/chat/message',
+        data: {
+          'message': userText,
+          'user_id': uid,
+          'calendar_events': calendarEvents,
+        },
+      );
+      return response.data?['reply']?.toString() ??
+          'Sorry, I did not get a reply from the server.';
+    } on DioException catch (e) {
+      final data = e.response?.data;
+      if (data is Map && data['detail'] != null) {
+        return data['detail'].toString();
+      }
+      return e.message ?? 'Could not reach the chat API';
+    } catch (e) {
+      return '$e';
+    }
   }
 
   Future<void> _send() async {

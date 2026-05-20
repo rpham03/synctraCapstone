@@ -5,9 +5,24 @@ class TaskModel {
   final DateTime dueDate;
   final int estimatedMinutes;
   final String? courseId;
+  final String? courseName;
   final String source; // 'canvas' | 'manual'
   final bool isCompleted;
   final String description;
+
+  /// Canvas course label (e.g. CSE 331), when known.
+  String? get courseLabel {
+    final n = courseName?.trim();
+    return (n != null && n.isNotEmpty) ? n : null;
+  }
+
+  /// True when the due date is today or later (local calendar day).
+  bool get isDueTodayOrLater {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final due = DateTime(dueDate.year, dueDate.month, dueDate.day);
+    return !due.isBefore(today);
+  }
 
   const TaskModel({
     required this.id,
@@ -15,6 +30,7 @@ class TaskModel {
     required this.dueDate,
     required this.estimatedMinutes,
     this.courseId,
+    this.courseName,
     required this.source,
     this.isCompleted = false,
     this.description = '',
@@ -37,6 +53,7 @@ class TaskModel {
         'due_date': dueDate.toIso8601String(),
         'estimated_minutes': estimatedMinutes,
         'course_id': courseId,
+        if (courseName != null) 'course_name': courseName,
         'source': source,
         'is_completed': isCompleted,
         'description': description,
@@ -48,6 +65,7 @@ class TaskModel {
     DateTime? dueDate,
     int? estimatedMinutes,
     String? courseId,
+    String? courseName,
     String? source,
     bool? isCompleted,
     String? description,
@@ -58,6 +76,7 @@ class TaskModel {
         dueDate: dueDate ?? this.dueDate,
         estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
         courseId: courseId ?? this.courseId,
+        courseName: courseName ?? this.courseName,
         source: source ?? this.source,
         isCompleted: isCompleted ?? this.isCompleted,
         description: description ?? this.description,

@@ -22,7 +22,7 @@ class CanvasTasksService extends ChangeNotifier {
       return list
           .whereType<Map>()
           .map((m) => TaskModel.fromJson(Map<String, dynamic>.from(m)))
-          .where((t) => t.source == 'canvas')
+          .where((t) => t.source == 'canvas' && t.isDueTodayOrLater)
           .toList();
     } catch (_) {
       return [];
@@ -47,6 +47,7 @@ class CanvasTasksService extends ChangeNotifier {
     final incoming = raw
         .whereType<Map>()
         .map((m) => TaskModel.fromJson(Map<String, dynamic>.from(m)))
+        .where((t) => t.isDueTodayOrLater)
         .toList();
     await saveCache(incoming);
     notifyListeners();
@@ -61,9 +62,10 @@ class CanvasTasksService extends ChangeNotifier {
   List<EventModel> toCalendarEvents(Iterable<TaskModel> tasks) {
     return tasks.map((t) {
       final d = DateTime(t.dueDate.year, t.dueDate.month, t.dueDate.day);
+      final label = t.courseLabel;
       return EventModel(
         id: 'canvas-${t.id}',
-        title: t.title,
+        title: label != null ? '$label · ${t.title}' : t.title,
         startTime: d,
         endTime: d.add(const Duration(minutes: 15)),
         source: 'canvas',
