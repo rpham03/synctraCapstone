@@ -38,6 +38,7 @@ class WeeklyTasksBoard extends StatefulWidget {
   final void Function(TaskModel task, DateTime newDue) onTaskDueChanged;
   final void Function(String title, DateTime dueEndOfDay) onQuickAdd;
   final void Function(TaskModel task, bool done) onToggleDone;
+  final void Function(TaskModel task) onDeleteTask;
 
   const WeeklyTasksBoard({
     super.key,
@@ -46,6 +47,7 @@ class WeeklyTasksBoard extends StatefulWidget {
     required this.onTaskDueChanged,
     required this.onQuickAdd,
     required this.onToggleDone,
+    required this.onDeleteTask,
   });
 
   @override
@@ -129,6 +131,7 @@ class _WeeklyTasksBoardState extends State<WeeklyTasksBoard> {
             onSubmitAdd: () => _submitAdd(dayIndex),
             onTaskDueChanged: widget.onTaskDueChanged,
             onToggleDone: widget.onToggleDone,
+            onDeleteTask: widget.onDeleteTask,
             weekMonday: widget.weekMonday,
           );
         }
@@ -274,6 +277,7 @@ class _DayColumn extends StatelessWidget {
   final VoidCallback onSubmitAdd;
   final void Function(TaskModel task, DateTime newDue) onTaskDueChanged;
   final void Function(TaskModel task, bool done) onToggleDone;
+  final void Function(TaskModel task) onDeleteTask;
   final DateTime weekMonday;
 
   const _DayColumn({
@@ -289,6 +293,7 @@ class _DayColumn extends StatelessWidget {
     required this.onSubmitAdd,
     required this.onTaskDueChanged,
     required this.onToggleDone,
+    required this.onDeleteTask,
     required this.weekMonday,
   });
 
@@ -402,6 +407,7 @@ class _DayColumn extends StatelessWidget {
                                     task: t,
                                     dotColor: _priorityDotColor(t, theme),
                                     onToggleDone: onToggleDone,
+                                    onDelete: () => onDeleteTask(t),
                                   ),
                                 ),
                             ],
@@ -421,11 +427,13 @@ class _BoardTaskCard extends StatelessWidget {
   final TaskModel task;
   final Color dotColor;
   final void Function(TaskModel task, bool done) onToggleDone;
+  final VoidCallback onDelete;
 
   const _BoardTaskCard({
     required this.task,
     required this.dotColor,
     required this.onToggleDone,
+    required this.onDelete,
   });
 
   Widget _shell(BuildContext context, {required bool interactive}) {
@@ -494,6 +502,14 @@ class _BoardTaskCard extends StatelessWidget {
                 ],
               ],
             ),
+          ),
+          IconButton(
+            icon: Icon(Icons.close, size: 16, color: cs.onSurfaceVariant),
+            tooltip: 'Remove task',
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            onPressed: onDelete,
           ),
         ],
       ),

@@ -35,6 +35,13 @@ class CanvasTasksService extends ChangeNotifier {
     await prefs.setString(_cacheKey, jsonEncode(payload));
   }
 
+  /// Clears cached Canvas assignments so the next sync starts fresh.
+  Future<void> clearCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_cacheKey);
+    notifyListeners();
+  }
+
   /// Fetches from backend and updates cache. Throws on hard failure.
   Future<List<TaskModel>> syncFromApi() async {
     final response = await Dio().get<Map<String, dynamic>>(
