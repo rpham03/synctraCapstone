@@ -462,7 +462,18 @@ class _BoardTaskCard extends StatelessWidget {
                     color: done ? cs.onSurfaceVariant : cs.onSurface,
                   ),
                 ),
-                if (task.source == 'canvas') ...[
+                if (task.courseLabel != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    task.courseLabel!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.primary.withValues(alpha: 0.9),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ] else if (task.source == 'canvas') ...[
                   const SizedBox(height: 4),
                   Text(
                     'Canvas',

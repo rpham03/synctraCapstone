@@ -77,7 +77,7 @@ def _parse_date_bound(value: object, *, end_of_day: bool) -> datetime:
 
 
 async def get_assignments_from_canvas() -> dict:
-    """Canvas assignments in Synctra task shape (last 7 days + upcoming)."""
+    """Canvas assignments due today or later (local calendar day)."""
     token = (settings.canvas_api_token or "").strip()
     if not token:
         return {
@@ -86,14 +86,24 @@ async def get_assignments_from_canvas() -> dict:
         }
     client = CanvasClient(token)
     try:
-        tasks = await client.list_tasks_normalized()
+        tasks = await client.list_tasks_normalized(omit_completed=True)
     except httpx.HTTPStatusError as e:
         status = e.response.status_code if e.response is not None else "?"
         detail = (e.response.text or str(e))[:300] if e.response is not None else str(e)
         return {"assignments": [], "error": f"Canvas API {status}: {detail}"}
     except httpx.RequestError as e:
         return {"assignments": [], "error": f"Canvas request failed: {e}"}
-    return {"assignments": tasks, "count": len(tasks)}
+    enriched = [_assignment_with_display_label(t) for t in tasks]
+    return {"assignments": enriched, "count": len(enriched)}
+
+
+def _assignment_with_display_label(task: dict) -> dict:
+    """Add a human-readable label: course + assignment title."""
+    title = (task.get("title") or "Assignment").strip()
+    course = (task.get("course_name") or "").strip()
+    out = dict(task)
+    out["display_label"] = f"{course} — {title}" if course else title
+    return out
 
 
 def _parse_busy_event(raw: dict) -> tuple[datetime, datetime, str] | None:

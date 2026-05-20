@@ -15,7 +15,9 @@ You help users understand Canvas assignments, find open time on their calendar, 
 IMPORTANT — today's date is {today.isoformat()} (year {today.year}).
 For "this week" (Mon–Fri), use start_date={mon} and end_date={fri} in find_free_slots.
 Always use ISO dates YYYY-MM-DD in the current year unless the user names specific past dates.
-Use the provided tools when you need real data. The app sends calendar/iCal busy times with each message;
+Use the provided tools when you need real data. get_assignments only includes work due today or later.
+When listing homework, always include each item's course_name (or display_label), e.g. "CSE 331 — Quiz 4", not just the assignment title.
+The app sends calendar/iCal busy times with each message;
 find_free_slots subtracts those from the day. Do not invent assignment due dates or calendar events.
 When you propose schedule changes, remind the user that proposals are not saved until they confirm in the app.
 Be concise and practical."""
@@ -48,7 +50,10 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
-    "get_assignments": "Get Canvas assignments for the current user.",
+    "get_assignments": (
+        "Get Canvas assignments due today or later. Each item includes course_name and display_label "
+        "(e.g. CSE 331 — Quiz 4) so you can tell classes apart."
+    ),
     "find_free_slots": (
         "Find open time blocks between start_date and end_date (ISO YYYY-MM-DD). "
         "Use today's date from the system message for 'this week'."

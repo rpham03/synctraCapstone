@@ -32,9 +32,10 @@ class _TasksScreenState extends State<TasksScreen> {
 
   static const _manualTasksKey = 'synctra_manual_tasks_v1';
 
-  List<TaskModel> get _filtered =>
-      _tasks.where((t) => _activeFilters.contains(t.source)).toList()
-        ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+  List<TaskModel> get _filtered => _tasks
+      .where((t) => _activeFilters.contains(t.source) && t.isDueTodayOrLater)
+      .toList()
+    ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
 
   @override
   void initState() {
@@ -576,6 +577,16 @@ class _TaskTile extends StatelessWidget {
                       color: task.isCompleted ? scheme.onSurfaceVariant : scheme.onSurface,
                     ),
                   ),
+                  if (task.courseLabel != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      task.courseLabel!,
+                      style: theme.labelMedium?.copyWith(
+                        color: scheme.primary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 6),
                   Row(
                     children: [
@@ -586,7 +597,7 @@ class _TaskTile extends StatelessWidget {
                         style: theme.bodySmall,
                       ),
                       const SizedBox(width: 10),
-                      if (task.source == 'canvas')
+                      if (task.source == 'canvas' && task.courseLabel == null)
                         Icon(Icons.school_outlined, size: 14, color: scheme.primary),
                     ],
                   ),
