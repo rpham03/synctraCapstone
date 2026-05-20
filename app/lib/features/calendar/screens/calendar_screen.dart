@@ -757,8 +757,60 @@ class _CalendarScreenState extends State<CalendarScreen> {
     if (_calendarChatOpen) setState(() => _calendarChatOpen = false);
   }
 
-  /// Google Calendar–style docked side panel (calendar shrinks; panel does not overlap the grid).
+  /// Side panel on wide screens; bottom sheet on phones so the week grid stays readable.
+  static const double _chatSideBySideMinWidth = 900;
+
   Widget _wrapCalendarWithChat(BuildContext context, Widget calendarBody) {
+    if (!_calendarChatOpen) return calendarBody;
+
+    final size = MediaQuery.sizeOf(context);
+    final w = size.width;
+    final h = size.height;
+
+    // Narrow: full-width calendar + Sync It sheet from the bottom (no 300px side squeeze).
+    if (w < _chatSideBySideMinWidth) {
+      final sheetHeight = math.min(h * 0.55, math.max(300.0, h - 220));
+      final scheme = Theme.of(context).colorScheme;
+      return Stack(
+        fit: StackFit.expand,
+        clipBehavior: Clip.hardEdge,
+        children: [
+          calendarBody,
+          Positioned.fill(
+            child: Column(
+              children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: _closeAiChat,
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      color: Colors.black.withValues(alpha: 0.18),
+                    ),
+                  ),
+                ),
+                Material(
+                  elevation: 12,
+                  color: scheme.surface,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(16),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: SizedBox(
+                    height: sheetHeight,
+                    width: double.infinity,
+                    child: _CalendarChatSidePanel(
+                      onClose: _closeAiChat,
+                      suggestionChips: _calendarChatChips,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+
     final scheme = Theme.of(context).colorScheme;
     final divider = VerticalDivider(
       width: 1,
@@ -766,10 +818,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
       color: scheme.outlineVariant.withValues(alpha: 0.75),
     );
 
-    if (!_calendarChatOpen) return calendarBody;
-
-    final w = MediaQuery.sizeOf(context).width;
-    final panelW = w >= 1100 ? 360.0 : (w * 0.36).clamp(300.0, 400.0);
+    // Wide: docked column; cap panel width so the grid keeps at least ~520px.
+    const minCalendarWidth = 520.0;
+    var panelW = w >= 1100 ? 360.0 : (w * 0.36).clamp(280.0, 400.0);
+    if (w - panelW < minCalendarWidth) {
+      panelW = (w - minCalendarWidth).clamp(260.0, panelW);
+    }
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -799,12 +853,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
           _buildMainPanel(showMenuButton: useDrawerLayout),
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'synctra_add_event',
-        onPressed: _openQuickAddSheet,
-        tooltip: 'Add event',
-        child: const Icon(Icons.add),
-      ),
+      floatingActionButton: _calendarChatOpen &&
+              MediaQuery.sizeOf(context).width < _chatSideBySideMinWidth
+          ? null
+          : FloatingActionButton(
+              heroTag: 'synctra_add_event',
+              onPressed: _openQuickAddSheet,
+              tooltip: 'Add event',
+              child: const Icon(Icons.add),
+            ),
     );
   }
 }
@@ -1590,29 +1647,36 @@ class _WeekDayHeaderRow extends StatelessWidget {
     final now = DateTime.now();
     final multiDay = days.length > 1;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surface,
-        border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          SizedBox(
-            width: 56,
-            child: Center(
-              child: Text(
-                multiDay ? 'GMT' : '',
-                style: theme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  fontSize: 10,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final minDayCol = multiDay ? 44.0 : 56.0;
+        final gridW = constraints.maxWidth - 56;
+        final dayW = days.isEmpty ? gridW : gridW / days.length;
+        final compactHeader = multiDay && dayW < minDayCol;
+
+        return Container(
+          decoration: BoxDecoration(
+            color: scheme.surface,
+            border: Border(bottom: BorderSide(color: scheme.outlineVariant)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: 56,
+                child: Center(
+                  child: Text(
+                    multiDay ? 'GMT' : '',
+                    style: theme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 10,
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          for (final d in days)
-            Expanded(
-              child: Container(
+              for (final d in days)
+                Expanded(
+                  child: Container(
                 decoration: BoxDecoration(
                   border:
                       Border(left: BorderSide(color: scheme.outlineVariant)),
@@ -1626,18 +1690,25 @@ class _WeekDayHeaderRow extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      DateFormat('EEE').format(d).toUpperCase(),
+                      compactHeader
+                          ? DateFormat('E').format(d).substring(0, 1)
+                          : DateFormat('EEE').format(d).toUpperCase(),
+                      maxLines: 1,
+                      overflow: TextOverflow.clip,
                       style: theme.labelSmall?.copyWith(
                         color: scheme.onSurfaceVariant,
                         fontWeight: FontWeight.w600,
-                        letterSpacing: 0.6,
-                        fontSize: 11,
+                        letterSpacing: compactHeader ? 0 : 0.6,
+                        fontSize: compactHeader ? 10 : 11,
                       ),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       '${d.day}',
-                      style: theme.titleLarge?.copyWith(
+                      style: (compactHeader
+                              ? theme.titleMedium
+                              : theme.titleLarge)
+                          ?.copyWith(
                         fontWeight: FontWeight.w600,
                         height: 1,
                         color: isSameDay(d, now)
@@ -1645,15 +1716,17 @@ class _WeekDayHeaderRow extends StatelessWidget {
                             : scheme.onSurface,
                       ),
                     ),
-                    if (multiDay)
+                    if (multiDay && !compactHeader)
                       Text(
                         DateFormat('MMM').format(d),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: theme.labelSmall?.copyWith(
                           color: scheme.onSurfaceVariant,
                           fontSize: 11,
                         ),
                       ),
-                    if (isSameDay(d, now)) ...[
+                    if (isSameDay(d, now) && !compactHeader) ...[
                       const SizedBox(height: 4),
                       Text(
                         'Today',
@@ -1668,8 +1741,10 @@ class _WeekDayHeaderRow extends StatelessWidget {
                 ),
               ),
             ),
-        ],
-      ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
