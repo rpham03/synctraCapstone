@@ -20,5 +20,13 @@ class Settings(BaseSettings):
     chat_llm_provider: str = "ollama"
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
+    # Dedicated model for course HTML -> unified JSON extraction.
+    # hermes3 outperforms tool-calling models on strict structured output.
+    course_import_model: str = "hermes3"
+    course_import_ai_augment: bool = False
+    # Optional remote Colab course-import agent.
+    colab_course_import_host: str = ""
+    colab_course_import_model: str = "Qwen/Qwen2.5-3B-Instruct"
+    colab_course_import_timeout: float = 120.0
 
 settings = Settings()

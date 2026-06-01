@@ -23,6 +23,9 @@ class EventModel {
     this.description = '',
   });
 
+  static String _normalizeTitle(String title) =>
+      title.replaceAll(RegExp(r'(?:\s+[—–\-]){2,}\s+'), ' — ').trim();
+
   bool get isDateOnlyCourseEvent =>
       source == 'course' &&
       ((sourceEventId?.contains('assignment_date_only') ?? false) ||
@@ -30,6 +33,24 @@ class EventModel {
               (sourceEventId?.contains('class_date_only') ?? false)) ||
           (_startsAtMidnight && !endTime.isAfter(startTime)) ||
           _isShortMidnightClassEvent);
+
+  bool get isCourseAssignment =>
+      source == 'course' && (sourceEventId?.contains('assignment') ?? false);
+
+  int? get estimatedMinutes {
+    final match = RegExp(r'^Estimated time:\s*([^\n]+)', multiLine: true)
+        .firstMatch(description);
+    if (match == null) return null;
+    final raw = match.group(1)?.toLowerCase().trim() ?? '';
+    var total = 0;
+    final hours = RegExp(r'(\d+)\s*h').firstMatch(raw);
+    final minutes = RegExp(r'(\d+)\s*m').firstMatch(raw);
+    if (hours != null) total += (int.tryParse(hours.group(1) ?? '') ?? 0) * 60;
+    if (minutes != null) total += int.tryParse(minutes.group(1) ?? '') ?? 0;
+    if (total == 0) total = int.tryParse(raw) ?? 0;
+    if (total <= 0) return null;
+    return total.clamp(1, 9999).toInt();
+  }
 
   bool get _startsAtMidnight => startTime.hour == 0 && startTime.minute == 0;
 
@@ -46,7 +67,7 @@ class EventModel {
   // From backend scraper JSON response
   factory EventModel.fromJson(Map<String, dynamic> json) => EventModel(
         id: json['id'] as String? ?? '',
-        title: json['title'] as String? ?? '',
+        title: _normalizeTitle(json['title'] as String? ?? ''),
         startTime: DateTime.parse(json['start_time'] as String),
         endTime: DateTime.parse(json['end_time'] as String),
         source: json['source'] as String? ?? 'manual',
@@ -57,7 +78,7 @@ class EventModel {
 
   factory EventModel.fromSupabase(Map<String, dynamic> row) => EventModel(
         id: row['id'] as String,
-        title: row['title'] as String? ?? '',
+        title: _normalizeTitle(row['title'] as String? ?? ''),
         startTime: DateTime.parse(row['start_time'] as String),
         endTime: DateTime.parse(row['end_time'] as String),
         source: row['source'] as String? ?? 'course',

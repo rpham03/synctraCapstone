@@ -6,7 +6,7 @@ class TaskModel {
   final int estimatedMinutes;
   final String? courseId;
   final String? courseName;
-  final String source; // 'canvas' | 'manual'
+  final String source; // 'canvas' | 'manual' | 'course'
   final bool isCompleted;
   final String description;
 

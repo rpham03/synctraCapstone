@@ -9,7 +9,9 @@ import 'package:uuid/uuid.dart';
 
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/task_model.dart';
+import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
+import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/widgets/synctra_empty_state.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
 import '../widgets/weekly_tasks_board.dart';
@@ -22,18 +24,21 @@ class TasksScreen extends StatefulWidget {
 }
 
 class _TasksScreenState extends State<TasksScreen> {
-  final Set<String> _activeFilters = {'canvas', 'manual'};
+  final Set<String> _activeFilters = {'canvas', 'manual', 'course'};
 
   final List<TaskModel> _tasks = [];
   bool _syncing = false;
   bool _weekView = true;
   DateTime _weekMonday = weekMondayOf(DateTime.now());
   late final CanvasTasksService _canvasService;
+  late final CourseImportService _courseImportService;
 
   static const _manualTasksKey = 'synctra_manual_tasks_v1';
 
   List<TaskModel> get _filtered => _tasks
-      .where((t) => _activeFilters.contains(t.source) && t.isDueTodayOrLater)
+      .where((t) =>
+          _activeFilters.contains(t.source) &&
+          (!t.isCompleted || t.isDueTodayOrLater))
       .toList()
     ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
 
@@ -41,9 +46,22 @@ class _TasksScreenState extends State<TasksScreen> {
   void initState() {
     super.initState();
     _canvasService = GetIt.instance<CanvasTasksService>();
+    _courseImportService = CourseImportService();
+    CourseImportTasksBridge.instance.addListener(_handleCourseTasksRefresh);
     _loadManualTasks();
+    _loadCourseTasks();
     _loadCachedCanvas();
     _syncCanvas(silent: true);
+  }
+
+  @override
+  void dispose() {
+    CourseImportTasksBridge.instance.removeListener(_handleCourseTasksRefresh);
+    super.dispose();
+  }
+
+  void _handleCourseTasksRefresh() {
+    _loadCourseTasks();
   }
 
   Future<void> _loadCachedCanvas() async {
@@ -74,8 +92,20 @@ class _TasksScreenState extends State<TasksScreen> {
     } catch (_) {}
   }
 
+  Future<void> _loadCourseTasks() async {
+    final loaded = await _courseImportService.loadCachedTasks();
+    if (!mounted) return;
+    setState(() {
+      _tasks.removeWhere((task) => task.source == 'course');
+      _tasks.addAll(loaded);
+    });
+  }
+
   Future<void> _persistManualTasks() async {
-    final manual = _tasks.where((t) => t.source == 'manual').map((t) => t.toJson()).toList();
+    final manual = _tasks
+        .where((t) => t.source == 'manual')
+        .map((t) => t.toJson())
+        .toList();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_manualTasksKey, jsonEncode(manual));
   }
@@ -92,7 +122,8 @@ class _TasksScreenState extends State<TasksScreen> {
       });
       if (!silent && mounted && incoming.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Canvas: no dated assignments returned.')),
+          const SnackBar(
+              content: Text('Canvas: no dated assignments returned.')),
         );
       }
     } catch (e) {
@@ -104,6 +135,13 @@ class _TasksScreenState extends State<TasksScreen> {
         );
       }
     }
+  }
+
+  Future<void> _refreshTasks() async {
+    await Future.wait([
+      _syncCanvas(),
+      _loadCourseTasks(),
+    ]);
   }
 
   Future<void> _showAddTask() async {
@@ -141,8 +179,10 @@ class _TasksScreenState extends State<TasksScreen> {
                       final picked = await showDatePicker(
                         context: ctx,
                         initialDate: due,
-                        firstDate: DateTime.now().subtract(const Duration(days: 1)),
-                        lastDate: DateTime.now().add(const Duration(days: 365 * 2)),
+                        firstDate:
+                            DateTime.now().subtract(const Duration(days: 1)),
+                        lastDate:
+                            DateTime.now().add(const Duration(days: 365 * 2)),
                       );
                       if (picked != null) setModal(() => due = picked);
                     },
@@ -154,7 +194,8 @@ class _TasksScreenState extends State<TasksScreen> {
                       DropdownButton<int>(
                         value: est,
                         items: [15, 30, 45, 60, 90, 120, 180]
-                            .map((m) => DropdownMenuItem(value: m, child: Text('$m')))
+                            .map((m) =>
+                                DropdownMenuItem(value: m, child: Text('$m')))
                             .toList(),
                         onChanged: (v) => setModal(() => est = v ?? 60),
                       ),
@@ -176,8 +217,12 @@ class _TasksScreenState extends State<TasksScreen> {
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Add')),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text('Add')),
             ],
           );
         },
@@ -220,6 +265,9 @@ class _TasksScreenState extends State<TasksScreen> {
     if (i < 0) return;
     setState(() => _tasks[i] = task.copyWith(isCompleted: done));
     if (task.source == 'manual') await _persistManualTasks();
+    if (task.source == 'course') {
+      await _courseImportService.updateCachedTask(_tasks[i]);
+    }
   }
 
   Future<void> _applyDueChange(TaskModel task, DateTime newDue) async {
@@ -228,6 +276,8 @@ class _TasksScreenState extends State<TasksScreen> {
     setState(() => _tasks[i] = task.copyWith(dueDate: newDue));
     if (task.source == 'manual') {
       await _persistManualTasks();
+    } else if (task.source == 'course') {
+      await _courseImportService.updateCachedTask(_tasks[i]);
     } else if (task.source == 'canvas') {
       final cached = await _canvasService.loadCached();
       final updated = cached
@@ -457,7 +507,9 @@ class _TasksScreenState extends State<TasksScreen> {
       backgroundColor: scheme.surface,
       appBar: SynctraPageHeader(
         title: 'Tasks',
-        subtitle: _weekView ? 'Week review · drag tasks between days' : 'All tasks by due date',
+        subtitle: _weekView
+            ? 'Week review · drag tasks between days'
+            : 'All tasks by due date',
         showSettings: true,
         actions: [
           IconButton(
@@ -465,14 +517,16 @@ class _TasksScreenState extends State<TasksScreen> {
                 ? SizedBox(
                     width: 22,
                     height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: scheme.primary),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: scheme.primary),
                   )
                 : Icon(Icons.sync, color: scheme.onSurfaceVariant, size: 22),
-            tooltip: 'Sync Canvas',
-            onPressed: _syncing ? null : () => _syncCanvas(),
+            tooltip: 'Sync tasks',
+            onPressed: _syncing ? null : _refreshTasks,
           ),
           IconButton(
-            icon: Icon(Icons.filter_list, color: scheme.onSurfaceVariant, size: 22),
+            icon: Icon(Icons.filter_list,
+                color: scheme.onSurfaceVariant, size: 22),
             tooltip: 'Filter',
             onPressed: _showFilterSheet,
           ),
@@ -490,15 +544,22 @@ class _TasksScreenState extends State<TasksScreen> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
             child: SegmentedButton<bool>(
               segments: const [
-                ButtonSegment(value: true, label: Text('Week'), icon: Icon(Icons.view_week_outlined, size: 18)),
-                ButtonSegment(value: false, label: Text('List'), icon: Icon(Icons.view_list_outlined, size: 18)),
+                ButtonSegment(
+                    value: true,
+                    label: Text('Week'),
+                    icon: Icon(Icons.view_week_outlined, size: 18)),
+                ButtonSegment(
+                    value: false,
+                    label: Text('List'),
+                    icon: Icon(Icons.view_list_outlined, size: 18)),
               ],
               selected: {_weekView},
               onSelectionChanged: (s) => setState(() => _weekView = s.first),
               showSelectedIcon: false,
               style: ButtonStyle(
                 visualDensity: VisualDensity.compact,
-                padding: WidgetStateProperty.all(const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
+                padding: WidgetStateProperty.all(
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
               ),
             ),
           ),
@@ -511,7 +572,8 @@ class _TasksScreenState extends State<TasksScreen> {
                   IconButton(
                     tooltip: 'Previous week',
                     onPressed: () => _shiftWeek(-1),
-                    icon: Icon(Icons.chevron_left, color: scheme.onSurfaceVariant),
+                    icon: Icon(Icons.chevron_left,
+                        color: scheme.onSurfaceVariant),
                   ),
                   Expanded(
                     child: Text(
@@ -526,7 +588,8 @@ class _TasksScreenState extends State<TasksScreen> {
                   IconButton(
                     tooltip: 'Next week',
                     onPressed: () => _shiftWeek(1),
-                    icon: Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
+                    icon: Icon(Icons.chevron_right,
+                        color: scheme.onSurfaceVariant),
                   ),
                 ],
               ),
@@ -583,10 +646,10 @@ class _TasksScreenState extends State<TasksScreen> {
               const Text('Filter Sources',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               const SizedBox(height: 16),
-              for (final source in ['canvas', 'manual'])
+              for (final source in ['canvas', 'course', 'manual'])
                 CheckboxListTile(
                   value: _activeFilters.contains(source),
-                  title: Text(source == 'canvas' ? 'Canvas Assignments' : 'Manual Tasks'),
+                  title: Text(_sourceFilterLabel(source)),
                   activeColor: AppColors.primary,
                   onChanged: (v) {
                     setModal(() {
@@ -605,6 +668,17 @@ class _TasksScreenState extends State<TasksScreen> {
         ),
       ),
     );
+  }
+
+  String _sourceFilterLabel(String source) {
+    switch (source) {
+      case 'canvas':
+        return 'Canvas Assignments';
+      case 'course':
+        return 'Course Imports';
+      default:
+        return 'Manual Tasks';
+    }
   }
 }
 
@@ -711,7 +785,8 @@ class _TaskTile extends StatelessWidget {
     required this.onDelete,
   });
 
-  Color _urgencyColor(BuildContext context, DateTime due, {required bool completed}) {
+  Color _urgencyColor(BuildContext context, DateTime due,
+      {required bool completed}) {
     final scheme = Theme.of(context).colorScheme;
     if (completed) return scheme.onSurfaceVariant;
     final daysLeft = due.difference(DateTime.now()).inDays;
@@ -761,8 +836,11 @@ class _TaskTile extends StatelessWidget {
                   Text(
                     task.title,
                     style: theme.titleSmall?.copyWith(
-                      decoration: task.isCompleted ? TextDecoration.lineThrough : null,
-                      color: task.isCompleted ? scheme.onSurfaceVariant : scheme.onSurface,
+                      decoration:
+                          task.isCompleted ? TextDecoration.lineThrough : null,
+                      color: task.isCompleted
+                          ? scheme.onSurfaceVariant
+                          : scheme.onSurface,
                     ),
                   ),
                   if (task.courseLabel != null) ...[
@@ -778,7 +856,8 @@ class _TaskTile extends StatelessWidget {
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      Icon(Icons.schedule, size: 14, color: scheme.onSurfaceVariant),
+                      Icon(Icons.schedule,
+                          size: 14, color: scheme.onSurfaceVariant),
                       const SizedBox(width: 4),
                       Text(
                         '~${task.estimatedMinutes} min',
@@ -786,7 +865,8 @@ class _TaskTile extends StatelessWidget {
                       ),
                       const SizedBox(width: 10),
                       if (task.source == 'canvas' && task.courseLabel == null)
-                        Icon(Icons.school_outlined, size: 14, color: scheme.primary),
+                        Icon(Icons.school_outlined,
+                            size: 14, color: scheme.primary),
                     ],
                   ),
                   if (task.description.trim().isNotEmpty) ...[

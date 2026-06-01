@@ -2,11 +2,15 @@
 // Calls the FastAPI scraper to extract events, then persists everything in
 // Supabase (course_imports + events tables). CalendarScreen reads from here.
 
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/constants/api_constants.dart';
 import '../models/event_model.dart';
+import '../models/task_model.dart';
 
 class CourseImportRecord {
   final String id;
@@ -38,6 +42,8 @@ class CourseImportRecord {
 
 class CourseImportService {
   final _db = Supabase.instance.client;
+
+  static const _courseTasksKey = 'synctra_course_import_tasks_v1';
 
   String get _userId => _db.auth.currentUser!.id;
 
@@ -71,6 +77,130 @@ class CourseImportService {
     return _rowsFrom(rows).map(EventModel.fromSupabase).toList();
   }
 
+  Future<List<TaskModel>> loadCachedTasks() async {
+    final cached = await _loadLocalCachedTasks();
+    final imported = await _loadTasksFromImportedAssignmentEvents(cached);
+    return _mergeCourseTasks(cached: cached, imported: imported);
+  }
+
+  Future<List<TaskModel>> _loadLocalCachedTasks() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_courseTasksKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final list = jsonDecode(raw) as List<dynamic>;
+      return list
+          .whereType<Map>()
+          .map((row) => TaskModel.fromJson(Map<String, dynamic>.from(row)))
+          .where((task) => task.source == 'course')
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> saveCachedTasks(List<TaskModel> tasks) async {
+    final prefs = await SharedPreferences.getInstance();
+    final payload = tasks.where((task) => task.source == 'course').map((task) {
+      return task.toJson();
+    }).toList();
+    await prefs.setString(_courseTasksKey, jsonEncode(payload));
+  }
+
+  Future<void> updateCachedTask(TaskModel updated) async {
+    final tasks = await _loadLocalCachedTasks();
+    final index = tasks.indexWhere((task) => task.id == updated.id);
+    if (index >= 0) {
+      tasks[index] = updated;
+    } else {
+      tasks.add(updated);
+    }
+    await saveCachedTasks(tasks);
+  }
+
+  Future<List<TaskModel>> _loadTasksFromImportedAssignmentEvents(
+    List<TaskModel> cachedTasks,
+  ) async {
+    final user = _db.auth.currentUser;
+    if (user == null) return const [];
+
+    try {
+      final importRows = await _db
+          .from('course_imports')
+          .select('id,course_name')
+          .eq('user_id', user.id);
+      final courseNameById = <String, String>{
+        for (final row in _rowsFrom(importRows))
+          row['id'] as String: row['course_name'] as String? ?? '',
+      };
+
+      final eventRows = await _db
+          .from('events')
+          .select(
+            'id,title,description,start_time,source_event_id,course_import_id',
+          )
+          .eq('user_id', user.id)
+          .eq('source', 'course')
+          .order('start_time');
+
+      final cachedById = {for (final task in cachedTasks) task.id: task};
+      final tasks = <TaskModel>[];
+
+      for (final row in _rowsFrom(eventRows)) {
+        final sourceEventId = row['source_event_id'] as String? ?? '';
+        if (!sourceEventId.contains('assignment')) continue;
+
+        final title = row['title'] as String? ?? 'Assignment';
+        final rawStartTime = row['start_time'] as String?;
+        if (rawStartTime == null || rawStartTime.isEmpty) continue;
+
+        final courseImportId = row['course_import_id'] as String?;
+        final description = row['description'] as String? ?? '';
+        final taskId = _courseTaskIdFromSourceEventId(
+          sourceEventId.isNotEmpty ? sourceEventId : row['id'].toString(),
+        );
+        final existingTask = cachedById[taskId];
+        final start = DateTime.parse(rawStartTime);
+        final dueDate = sourceEventId.contains('assignment_date_only')
+            ? DateTime(start.year, start.month, start.day, 23, 59)
+            : start;
+
+        tasks.add(
+          TaskModel(
+            id: taskId,
+            title: title,
+            dueDate: dueDate,
+            estimatedMinutes: _estimatedMinutesFromDescription(description) ??
+                _defaultEstimateForAssignmentTitle(title),
+            courseId: courseImportId,
+            courseName: courseNameById[courseImportId],
+            source: 'course',
+            isCompleted: existingTask?.isCompleted ?? false,
+            description: _descriptionWithoutEstimate(description),
+          ),
+        );
+      }
+
+      return tasks;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  List<TaskModel> _mergeCourseTasks({
+    required List<TaskModel> cached,
+    required List<TaskModel> imported,
+  }) {
+    final byId = <String, TaskModel>{};
+    for (final task in imported) {
+      byId[task.id] = task;
+    }
+    for (final task in cached) {
+      byId[task.id] = task;
+    }
+    return byId.values.toList()..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+  }
+
   // ── Mutations ─────────────────────────────────────────────────────────────
 
   /// Scrape [url], save everything to Supabase, return the new record.
@@ -88,6 +218,7 @@ class CourseImportService {
   /// Delete a course import and all its events (cascade via FK).
   Future<void> removeImport(String importId) async {
     await _db.from('course_imports').delete().eq('id', importId);
+    await _removeCachedTasksForImport(importId);
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────
@@ -178,11 +309,16 @@ class CourseImportService {
         final rawDueTime = assignment['due_time'] as String?;
         final dueTime = _normalizedDueTime(rawDueTime);
         final dueIso = '${assignment['due_date']}T${dueTime ?? '00:00'}';
+        final estimatedMinutes =
+            _normalizedEstimatedMinutes(assignment['estimated_minutes']);
 
         return {
           'user_id': _userId,
           'title': title,
-          'description': assignment['description'] as String?,
+          'description': _descriptionWithEstimate(
+            assignment['description'] as String?,
+            estimatedMinutes,
+          ),
           'location': null,
           'start_time': dueIso,
           'end_time': dueIso,
@@ -202,13 +338,84 @@ class CourseImportService {
       }),
     ];
 
+    final taskRows = await _courseTasksFromAssignments(
+      importId: importId,
+      courseName: courseName,
+      assignments: assignments,
+    );
+
     // Delete old events first, then insert the current scrape.
     await _db.from('events').delete().eq('course_import_id', importId);
     if (rows.isNotEmpty) {
       await _db.from('events').insert(rows);
     }
+    await _replaceCachedTasksForImport(importId, taskRows);
 
     return CourseImportRecord.fromSupabase(importRow);
+  }
+
+  Future<List<TaskModel>> _courseTasksFromAssignments({
+    required String importId,
+    required String courseName,
+    required List<dynamic> assignments,
+  }) async {
+    final existing = await _loadLocalCachedTasks();
+    final existingById = {for (final task in existing) task.id: task};
+
+    return assignments.asMap().entries.where((entry) {
+      return entry.value is Map;
+    }).map((entry) {
+      final idx = entry.key;
+      final assignment = Map<String, dynamic>.from(entry.value as Map);
+      final title = assignment['assignment_name'] as String? ?? 'Assignment';
+      final rawDueTime = assignment['due_time'] as String?;
+      final dueTime = _normalizedDueTime(rawDueTime);
+      final eventDueIso = '${assignment['due_date']}T${dueTime ?? '00:00'}';
+      final taskDueIso = '${assignment['due_date']}T${dueTime ?? '23:59'}';
+      final estimatedMinutes =
+          _normalizedEstimatedMinutes(assignment['estimated_minutes']) ??
+              _defaultEstimateForAssignmentType(
+                assignment['assignment_type'] as String?,
+              );
+      final sourceEventId = _sourceEventId(
+        importId: importId,
+        kind: dueTime == null ? 'assignment_date_only' : 'assignment',
+        index: idx,
+        title: title,
+        startIso: eventDueIso,
+        endIso: eventDueIso,
+      );
+      final id = _courseTaskIdFromSourceEventId(sourceEventId);
+      final existingTask = existingById[id];
+
+      return TaskModel(
+        id: id,
+        title: title,
+        dueDate: DateTime.parse(taskDueIso),
+        estimatedMinutes: estimatedMinutes,
+        courseId: importId,
+        courseName: courseName,
+        source: 'course',
+        isCompleted: existingTask?.isCompleted ?? false,
+        description: assignment['description'] as String? ?? '',
+      );
+    }).toList();
+  }
+
+  Future<void> _replaceCachedTasksForImport(
+    String importId,
+    List<TaskModel> importedTasks,
+  ) async {
+    final existing = await _loadLocalCachedTasks();
+    final retained = existing.where((task) => task.courseId != importId);
+    await saveCachedTasks([...retained, ...importedTasks]);
+  }
+
+  Future<void> _removeCachedTasksForImport(String importId) async {
+    final existing = await _loadLocalCachedTasks();
+    await saveCachedTasks(
+      existing.where((task) => task.courseId != importId).toList(),
+    );
   }
 
   String _nameFromUrl(String url) {
@@ -230,6 +437,101 @@ class CourseImportService {
       return null;
     }
     return dueTime;
+  }
+
+  int? _normalizedEstimatedMinutes(dynamic rawMinutes) {
+    final minutes = rawMinutes is num
+        ? rawMinutes.round()
+        : int.tryParse(rawMinutes?.toString() ?? '');
+    if (minutes == null || minutes <= 0) return null;
+    return minutes.clamp(30, 720).toInt();
+  }
+
+  int _defaultEstimateForAssignmentType(String? rawType) {
+    switch (rawType?.trim().toLowerCase()) {
+      case 'project':
+        return 480;
+      case 'lab':
+        return 180;
+      case 'reading':
+      case 'quiz':
+        return 90;
+      case 'exam':
+        return 240;
+      case 'homework':
+      default:
+        return 240;
+    }
+  }
+
+  int _defaultEstimateForAssignmentTitle(String title) {
+    final lower = title.toLowerCase();
+    if (lower.contains('project')) {
+      return _defaultEstimateForAssignmentType('project');
+    }
+    if (lower.contains('lab')) {
+      return _defaultEstimateForAssignmentType('lab');
+    }
+    if (lower.contains('quiz')) {
+      return _defaultEstimateForAssignmentType('quiz');
+    }
+    if (lower.contains('exam') ||
+        lower.contains('midterm') ||
+        lower.contains('final')) {
+      return _defaultEstimateForAssignmentType('exam');
+    }
+    if (lower.contains('reading') || lower.contains('read ')) {
+      return _defaultEstimateForAssignmentType('reading');
+    }
+    return _defaultEstimateForAssignmentType('homework');
+  }
+
+  int? _estimatedMinutesFromDescription(String? rawDescription) {
+    final description = rawDescription?.trim();
+    if (description == null || description.isEmpty) return null;
+
+    final match = RegExp(
+      r'Estimated time:\s*(?:(\d+)\s*h)?(?:\s*(\d+)\s*m)?',
+      caseSensitive: false,
+    ).firstMatch(description);
+    if (match == null) return null;
+
+    final hours = int.tryParse(match.group(1) ?? '') ?? 0;
+    final minutes = int.tryParse(match.group(2) ?? '') ?? 0;
+    final total = hours * 60 + minutes;
+    if (total <= 0) return null;
+    return _normalizedEstimatedMinutes(total);
+  }
+
+  String _descriptionWithoutEstimate(String? rawDescription) {
+    final description = rawDescription?.trim() ?? '';
+    if (description.isEmpty) return '';
+    return description
+        .replaceFirst(
+          RegExp(r'^Estimated time:\s*[^\n\r]*(\r?\n){0,2}',
+              caseSensitive: false),
+          '',
+        )
+        .trim();
+  }
+
+  String _descriptionWithEstimate(String? rawDescription, int? minutes) {
+    final description = rawDescription?.trim() ?? '';
+    if (minutes == null) return description;
+    final estimateLine = 'Estimated time: ${_formatDuration(minutes)}';
+    if (description.contains(RegExp(r'^Estimated time:', multiLine: true))) {
+      return description;
+    }
+    if (description.isEmpty) return estimateLine;
+    return '$estimateLine\n\n$description';
+  }
+
+  String _formatDuration(int minutes) {
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    if (hours == 0) return '${mins}m';
+    if (mins == 0) return '${hours}h';
+    return '${hours}h ${mins}m';
   }
 
   String? _normalizedClassStartTime(String? rawStartTime) {
@@ -282,6 +584,15 @@ class CourseImportService {
     required String endIso,
   }) {
     final raw = '$importId|$kind|$startIso|$endIso|$title|$index';
+    return raw
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
+  }
+
+  String _courseTaskIdFromSourceEventId(String sourceEventId) {
+    final raw = 'course-task|$sourceEventId';
     return raw
         .toLowerCase()
         .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
