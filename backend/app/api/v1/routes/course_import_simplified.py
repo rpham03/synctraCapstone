@@ -12,6 +12,7 @@ from app.api.v1.routes.unified_course_format import (
     deduplicate_assignments,
     deduplicate_class_events,
 )
+from app.core.config.settings import settings
 
 router = APIRouter(tags=["course-import"])
 
@@ -187,9 +188,10 @@ Use empty arrays when no items are found. Do not include placeholders, ellipses,
 """
 
     try:
+        ollama_url = f"{settings.ollama_host.rstrip('/')}/api/generate"
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                "http://localhost:11434/api/generate",
+                ollama_url,
                 json={
                     "model": "mistral",
                     "prompt": prompt,

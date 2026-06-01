@@ -1,0 +1,7 @@
+# Colab-only deps for colab_course_import_agent_server.py
+# !pip -q install -r colab-requirements.txt
+fastapi
+uvicorn
+transformers
+accelerate
+torch

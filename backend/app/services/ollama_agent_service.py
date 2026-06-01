@@ -44,15 +44,19 @@ class OllamaAgentService:
             "tools": ollama_tools(),
             "stream": False,
         }
+        # Colab / remote tunnels need longer inference time than local Ollama.
+        timeout = 180.0 if not host.startswith("http://localhost") and not host.startswith("http://127.0.0.1") else 120.0
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(f"{host}/api/chat", json=payload)
                 resp.raise_for_status()
                 return resp.json()
         except httpx.ConnectError as e:
             raise RuntimeError(
-                "Cannot connect to Ollama. Install from https://ollama.ai, then run: "
-                f"ollama serve  and  ollama pull {model}"
+                "Cannot connect to the LLM server at "
+                f"{host}. For local: run `ollama serve`. "
+                "For Colab: run colab_course_import_agent_server.py with --tunnel cloudflared "
+                "and set OLLAMA_HOST to the tunnel URL in backend/.env."
             ) from e
         except httpx.HTTPStatusError as e:
             detail = e.response.text[:400] if e.response is not None else str(e)

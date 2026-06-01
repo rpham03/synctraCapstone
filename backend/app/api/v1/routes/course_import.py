@@ -21,6 +21,7 @@ from app.api.v1.routes.unified_course_format import (
     deduplicate_assignments,
     deduplicate_class_events,
 )
+from app.core.config.settings import settings
 
 router = APIRouter(tags=["course-import"])
 
@@ -1166,9 +1167,10 @@ When a lecture/lab/section row includes both a start and an end time, include bo
 """
 
     try:
+        ollama_url = f"{settings.ollama_host.rstrip('/')}/api/generate"
         async with httpx.AsyncClient(timeout=180) as client:
             response = await client.post(
-                "http://localhost:11434/api/generate",
+                ollama_url,
                 json={
                     "model": "mistral",
                     "prompt": prompt,
@@ -1188,7 +1190,11 @@ When a lecture/lab/section row includes both a start and an end time, include bo
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503,
-            detail="Ollama server not running. Start with: ollama serve",
+            detail=(
+                "Ollama server not reachable at "
+                f"{settings.ollama_host}. "
+                "Start local Ollama (ollama serve) or point OLLAMA_HOST to a Colab tunnel."
+            ),
         )
 
 

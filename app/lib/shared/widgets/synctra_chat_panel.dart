@@ -61,6 +61,7 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
   Future<String> _resolveReply(String userText) async {
     try {
       final calendarEvents = await CalendarEventsLoader.loadForChat();
+      final tasks = await CalendarEventsLoader.loadTasksForChat();
       final uid = Supabase.instance.client.auth.currentUser?.id ?? 'app-user';
       final response = await Dio().post<Map<String, dynamic>>(
         '${ApiConstants.baseUrl}/chat/message',
@@ -68,6 +69,7 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
           'message': userText,
           'user_id': uid,
           'calendar_events': calendarEvents,
+          'tasks': tasks,
         },
       );
       return response.data?['reply']?.toString() ??
@@ -76,6 +78,12 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
       final data = e.response?.data;
       if (data is Map && data['detail'] != null) {
         return data['detail'].toString();
+      }
+      if (e.type == DioExceptionType.connectionError ||
+          e.error?.toString().contains('Connection refused') == true) {
+        return 'Cannot reach the Synctra backend at ${ApiConstants.baseUrl}. '
+            'Start it on your Mac with:\n'
+            'cd backend && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000';
       }
       return e.message ?? 'Could not reach the chat API';
     } catch (e) {
