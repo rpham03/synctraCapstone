@@ -2142,6 +2142,10 @@ class _AllDayEventChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final estimate = event.estimatedMinutes;
+    final (title, course) = _chipTitleParts(event.title);
+    final compactLabel =
+        course != null ? '$course · $title' : title;
+
     return Material(
       color: color.withValues(alpha: 0.14),
       borderRadius: BorderRadius.circular(8),
@@ -2151,68 +2155,84 @@ class _AllDayEventChip extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-          child: Row(
-            children: [
-              Container(
-                width: 3,
-                height: 14,
-                decoration: BoxDecoration(
-                  color: color,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-              ),
-              const SizedBox(width: 5),
-              Expanded(
-                child: Builder(
-                  builder: (context) {
-                    final (title, course) = _chipTitleParts(event.title);
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (course != null)
-                          Text(
-                            course,
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final w = constraints.maxWidth;
+              final showBar = w >= 36;
+              final showEstimate = estimate != null && w >= 88;
+              final showStackedCourse = course != null && w >= 64 && !showEstimate;
+
+              final titleStyle =
+                  Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w600,
+                        height: 1.15,
+                      );
+              final courseStyle =
+                  Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: color.withValues(alpha: 0.85),
+                        fontSize: 10,
+                        height: 1.1,
+                      );
+
+              return Row(
+                children: [
+                  if (showBar) ...[
+                    Container(
+                      width: 3,
+                      height: 14,
+                      decoration: BoxDecoration(
+                        color: color,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                    SizedBox(width: showEstimate ? 5 : 3),
+                  ],
+                  Expanded(
+                    child: showStackedCourse
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                course,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: courseStyle,
+                              ),
+                              Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: titleStyle,
+                              ),
+                            ],
+                          )
+                        : Text(
+                            compactLabel,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
-                                ?.copyWith(
-                                  color: color.withValues(alpha: 0.85),
-                                  fontSize: 10,
-                                  height: 1.1,
-                                ),
+                            style: titleStyle,
                           ),
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style:
-                              Theme.of(context).textTheme.labelSmall?.copyWith(
-                                    color: color,
-                                    fontWeight: FontWeight.w600,
-                                    height: 1.15,
-                                  ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-              ),
-              if (estimate != null) ...[
-                const SizedBox(width: 6),
-                Text(
-                  _formatEstimate(estimate),
-                  maxLines: 1,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: color.withValues(alpha: 0.88),
-                        fontWeight: FontWeight.w700,
+                  ),
+                  if (showEstimate) ...[
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        _formatEstimate(estimate),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: color.withValues(alpha: 0.88),
+                              fontWeight: FontWeight.w700,
+                            ),
                       ),
-                ),
-              ],
-            ],
+                    ),
+                  ],
+                ],
+              );
+            },
           ),
         ),
       ),

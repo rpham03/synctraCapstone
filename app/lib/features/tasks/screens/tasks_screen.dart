@@ -12,8 +12,10 @@ import '../../../data/models/task_model.dart';
 import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
+import '../../../shared/utils/task_timeline_utils.dart';
 import '../../../shared/widgets/synctra_empty_state.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
+import '../widgets/task_timeline_list.dart';
 import '../widgets/weekly_tasks_board.dart';
 
 class TasksScreen extends StatefulWidget {
@@ -34,13 +36,68 @@ class _TasksScreenState extends State<TasksScreen> {
   late final CourseImportService _courseImportService;
 
   static const _manualTasksKey = 'synctra_manual_tasks_v1';
+  static const _pastLoadBatchSize = 5;
+  static const _timelineRetentionDays = 120;
 
-  List<TaskModel> get _filtered => _tasks
-      .where((t) =>
-          _activeFilters.contains(t.source) &&
-          (!t.isCompleted || t.isDueTodayOrLater))
-      .toList()
-    ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+  int _revealedPastCount = 0;
+  bool _loadingOlder = false;
+
+  /// Canvas/course imports may carry scraped page text; keep titles only in the UI.
+  TaskModel _taskForDisplay(TaskModel task) {
+    if (task.source == 'manual') return task;
+    if (task.description.isEmpty) return task;
+    return task.copyWith(description: '');
+  }
+
+  List<TaskModel> get _displayTasks {
+    final manual = _tasks.where((t) => t.source == 'manual').toList();
+    final canvas = _tasks.where((t) => t.source == 'canvas');
+    final course = _tasks.where((t) => t.source == 'course');
+    final merged = mergeCanvasAndCourseTasks(canvas, course)
+        .map(_taskForDisplay)
+        .toList();
+    return [...manual, ...merged];
+  }
+
+  List<TaskModel> get _filtered {
+    return _displayTasks
+        .where((t) => _activeFilters.contains(t.source))
+        .where(isTaskDueTodayOrLater)
+        .toList()
+      ..sort(compareTasksTimeline);
+  }
+
+  /// List timeline pool: today+ always; completed past kept for scroll-up history.
+  List<TaskModel> get _timelinePool {
+    final today = taskDateOnly(DateTime.now());
+    final pruneBefore =
+        today.subtract(const Duration(days: _timelineRetentionDays));
+    return _displayTasks
+        .where((t) => _activeFilters.contains(t.source))
+        .where((t) {
+          if (isTaskDueTodayOrLater(t)) return true;
+          if (!t.isCompleted) return false;
+          return !taskDateOnly(t.dueDate).isBefore(pruneBefore);
+        })
+        .toList()
+      ..sort(compareTasksTimeline);
+  }
+
+  TimelineVisibleTasks get _timelineVisible {
+    return buildTimelineVisibleTasks(
+      _timelinePool,
+      revealedPastCount: _revealedPastCount,
+    );
+  }
+
+  void _loadOlderTasks() {
+    if (_loadingOlder || !_timelineVisible.hasMorePast) return;
+    setState(() {
+      _loadingOlder = true;
+      _revealedPastCount += _pastLoadBatchSize;
+      _loadingOlder = false;
+    });
+  }
 
   @override
   void initState() {
@@ -507,9 +564,9 @@ class _TasksScreenState extends State<TasksScreen> {
       backgroundColor: scheme.surface,
       appBar: SynctraPageHeader(
         title: 'Tasks',
-        subtitle: _weekView
-            ? 'Week review · drag tasks between days'
-            : 'All tasks by due date',
+            subtitle: _weekView
+            ? 'Week review · use List view for today onward'
+            : 'Today and upcoming · scroll up for older work',
         showSettings: true,
         actions: [
           IconButton(
@@ -610,16 +667,15 @@ class _TasksScreenState extends State<TasksScreen> {
                     onAddTask: _showAddTask,
                     isEmpty: _filtered.isEmpty,
                   )
-                : _filtered.isEmpty
+                : _timelineVisible.tasks.isEmpty
                     ? _EmptyTasks(onAdd: _showAddTask)
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                        itemCount: _filtered.length,
-                        itemBuilder: (_, i) => _TaskTile(
-                          task: _filtered[i],
-                          onToggle: (done) => _setTaskDone(_filtered[i], done),
-                          onDelete: () => _deleteTask(_filtered[i]),
-                        ),
+                    : TaskTimelineList(
+                        tasks: _timelineVisible.tasks,
+                        loadingOlder: _loadingOlder,
+                        hasOlderOutsideWindow: _timelineVisible.hasMorePast,
+                        onLoadOlder: _loadOlderTasks,
+                        onToggleDone: _setTaskDone,
+                        onDeleteTask: _deleteTask,
                       ),
           ),
         ],
@@ -774,144 +830,6 @@ class _WeekBody extends StatelessWidget {
 }
 
 // ── Sub-widgets ────────────────────────────────────────────────────────────────
-
-class _TaskTile extends StatelessWidget {
-  final TaskModel task;
-  final ValueChanged<bool> onToggle;
-  final VoidCallback onDelete;
-  const _TaskTile({
-    required this.task,
-    required this.onToggle,
-    required this.onDelete,
-  });
-
-  Color _urgencyColor(BuildContext context, DateTime due,
-      {required bool completed}) {
-    final scheme = Theme.of(context).colorScheme;
-    if (completed) return scheme.onSurfaceVariant;
-    final daysLeft = due.difference(DateTime.now()).inDays;
-    if (daysLeft < 0) return AppColors.deadline;
-    if (daysLeft <= 1) return AppColors.deadline;
-    if (daysLeft <= 3) return AppColors.secondary;
-    return scheme.onSurfaceVariant;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final theme = Theme.of(context).textTheme;
-    final due = task.dueDate;
-    final daysLeft = due.difference(DateTime.now()).inDays;
-    final completed = task.isCompleted;
-    final urgency = _urgencyColor(context, due, completed: completed);
-    final statusLabel = completed
-        ? 'Done'
-        : (daysLeft < 0
-            ? 'Overdue'
-            : daysLeft == 0
-                ? 'Today'
-                : '$daysLeft days');
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8),
-        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.75)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(4, 8, 12, 10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Checkbox(
-              value: task.isCompleted,
-              onChanged: (v) => onToggle(v ?? false),
-            ),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    task.title,
-                    style: theme.titleSmall?.copyWith(
-                      decoration:
-                          task.isCompleted ? TextDecoration.lineThrough : null,
-                      color: task.isCompleted
-                          ? scheme.onSurfaceVariant
-                          : scheme.onSurface,
-                    ),
-                  ),
-                  if (task.courseLabel != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      task.courseLabel!,
-                      style: theme.labelMedium?.copyWith(
-                        color: scheme.primary,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Icon(Icons.schedule,
-                          size: 14, color: scheme.onSurfaceVariant),
-                      const SizedBox(width: 4),
-                      Text(
-                        '~${task.estimatedMinutes} min',
-                        style: theme.bodySmall,
-                      ),
-                      const SizedBox(width: 10),
-                      if (task.source == 'canvas' && task.courseLabel == null)
-                        Icon(Icons.school_outlined,
-                            size: 14, color: scheme.primary),
-                    ],
-                  ),
-                  if (task.description.trim().isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    Text(
-                      task.description.trim(),
-                      style: theme.bodySmall?.copyWith(
-                        height: 1.35,
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                IconButton(
-                  icon: Icon(Icons.close, size: 20, color: scheme.onSurfaceVariant),
-                  tooltip: 'Remove task',
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                  onPressed: onDelete,
-                ),
-                Text(
-                  DateFormat('MMM d').format(due),
-                  style: theme.labelLarge?.copyWith(
-                    color: urgency,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                Text(
-                  statusLabel,
-                  style: theme.labelSmall?.copyWith(color: urgency),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class _EmptyTasks extends StatelessWidget {
   final VoidCallback onAdd;
