@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException
 from icalendar import Calendar
 from pydantic import BaseModel
 
-from app.core.config.settings import settings
 from app.api.v1.routes.events import (
     _CALENDAR_CANDIDATES,
     _html_fallback,
@@ -24,6 +23,7 @@ from app.api.v1.routes.unified_course_format import (
     deduplicate_assignments,
     deduplicate_class_events,
 )
+from app.core.config.settings import settings
 
 router = APIRouter(tags=["course-import"])
 
@@ -2643,10 +2643,10 @@ Page content:
 
     try:
         host = (settings.ollama_host or "http://localhost:11434").rstrip("/")
-        # Course extraction needs strict JSON output, not tool calling — pin to
-        # hermes3 regardless of the chat-service default in settings.
+        # Course extraction needs strict JSON output, not tool calling, so use
+        # the course-import model instead of the chat-service default.
         model = (settings.course_import_model or "hermes3").strip()
-        async with httpx.AsyncClient(timeout=OLLAMA_COURSE_IMPORT_TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=180) as client:
             response = await client.post(
                 f"{host}/api/generate",
                 json={
@@ -2668,7 +2668,11 @@ Page content:
     except httpx.ConnectError:
         raise HTTPException(
             status_code=503,
-            detail="Ollama server not running. Start with: ollama serve",
+            detail=(
+                "Ollama server not reachable at "
+                f"{settings.ollama_host}. "
+                "Start local Ollama (ollama serve) or point OLLAMA_HOST to a Colab tunnel."
+            ),
         )
     except httpx.TimeoutException:
         raise HTTPException(

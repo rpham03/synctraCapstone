@@ -1,6 +1,7 @@
 # Shared prompts, tool schemas, and tool execution for chat agents (Ollama / OpenAI).
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.services import chat_agent_tools
@@ -10,15 +11,25 @@ def system_instructions() -> str:
     today = chat_agent_tools.today_local()
     mon, fri = chat_agent_tools.week_range_mon_fri(today)
     return f"""You are Synctra, a friendly AI schedule assistant for university students.
-You help users understand Canvas assignments, find open time on their calendar, and propose study blocks.
+You help users understand their calendar, Canvas assignments, tasks, find open time, and propose study blocks.
 
 IMPORTANT — today's date is {today.isoformat()} (year {today.year}).
-For "this week" (Mon–Fri), use start_date={mon} and end_date={fri} in find_free_slots.
+For "this week" (Mon–Fri), use start_date={mon} and end_date={fri} in find_free_slots, get_calendar_events, and get_tasks.
 Always use ISO dates YYYY-MM-DD in the current year unless the user names specific past dates.
-Use the provided tools when you need real data. get_assignments only includes work due today or later.
-When listing homework, always include each item's course_name (or display_label), e.g. "CSE 331 — Quiz 4", not just the assignment title.
-The app sends calendar/iCal busy times with each message;
-find_free_slots subtracts those from the day. Do not invent assignment due dates or calendar events.
+Use the provided tools when you need real data.
+
+Calendar vs tasks:
+- get_calendar_events — classes, meetings, iCal feeds, course imports, manual calendar events (what is ON the calendar).
+- get_tasks — due items from the Tasks tab (manual + cached Canvas), including estimated_minutes when set.
+- get_assignments — live Canvas API sync (due today or later); use for homework when Tasks may be stale.
+
+When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events.
+When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments.
+When listing homework, include course_name or display_label (e.g. "CSE 331 — Quiz 4").
+For study planning, use estimated_minutes from tasks when proposing blocks via propose_schedule_change.
+The app sends calendar busy times and tasks with each message; find_free_slots and propose_schedule_change use them.
+Do not invent assignment due dates or calendar events.
+Never print debug summaries, raw JSON, or empty lists like "Busy: []" or "Tasks: []" to the user — answer in natural language only.
 When you propose schedule changes, remind the user that proposals are not saved until they confirm in the app.
 Be concise and practical."""
 
@@ -37,12 +48,31 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": ["start_date", "end_date"],
         "additionalProperties": False,
     },
+    "get_calendar_events": {
+        "type": "object",
+        "properties": {
+            "start_date": {"type": "string"},
+            "end_date": {"type": "string"},
+        },
+        "required": ["start_date", "end_date"],
+        "additionalProperties": False,
+    },
+    "get_tasks": {
+        "type": "object",
+        "properties": {
+            "due_start": {"type": "string"},
+            "due_end": {"type": "string"},
+        },
+        "required": ["due_start", "due_end"],
+        "additionalProperties": False,
+    },
     "propose_schedule_change": {
         "type": "object",
         "properties": {
             "task_name": {"type": "string"},
             "hours": {"type": "number"},
             "deadline": {"type": "string"},
+            "estimated_minutes": {"type": "integer"},
         },
         "required": ["task_name", "hours", "deadline"],
         "additionalProperties": False,
@@ -58,10 +88,45 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Find open time blocks between start_date and end_date (ISO YYYY-MM-DD). "
         "Use today's date from the system message for 'this week'."
     ),
-    "propose_schedule_change": "Propose study blocks without writing to the calendar yet.",
+    "get_calendar_events": (
+        "List calendar events (classes, iCal, course imports, manual events) between "
+        "start_date and end_date. Use when the user asks what's on their calendar or schedule."
+    ),
+    "get_tasks": (
+        "List tasks due between due_start and due_end from the Tasks tab (manual + cached Canvas). "
+        "Each item may include estimated_minutes for study planning."
+    ),
+    "propose_schedule_change": (
+        "Propose proportional study blocks sized by hours or estimated_minutes, "
+        "split into sessions and avoiding calendar busy times. Not saved until confirmed."
+    ),
 }
 
 MAX_TOOL_ROUNDS = 8
+
+# LLMs sometimes echo empty tool/context dumps — strip before showing in the app.
+_DEBUG_LINE = re.compile(
+    r"^\s*(Busy|Tasks|Assignments):\s*(\[\])?\s*,?\s*$",
+    re.IGNORECASE,
+)
+_DEBUG_ONLY = re.compile(
+    r"^\s*Busy:\s*\[\]\s*,?\s*Tasks:\s*\[\]\s*,?\s*Assignments:\s*\[\]\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def sanitize_chat_reply(text: str) -> str:
+    """Remove debug-style context dumps from model replies."""
+    if not text or not text.strip():
+        return text
+    if _DEBUG_ONLY.match(text.strip()):
+        return (
+            "I don't see anything on your calendar or task list for that range yet. "
+            "Sync iCal or course imports in Calendar, and Canvas or manual tasks in Tasks, then ask again."
+        )
+    lines = [ln for ln in text.splitlines() if not _DEBUG_LINE.match(ln.strip())]
+    cleaned = "\n".join(lines).strip()
+    return cleaned if cleaned else text
 
 
 def coerce_text(value: Any, *, default: str = "") -> str:
@@ -93,7 +158,7 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
     """Coerce tool argument values to types our handlers expect."""
     out: dict[str, Any] = {}
     for key, val in args.items():
-        if key in ("start_date", "end_date", "deadline", "task_name"):
+        if key in ("start_date", "end_date", "deadline", "task_name", "due_start", "due_end"):
             out[key] = coerce_text(val, default="")
         elif key == "hours":
             if isinstance(val, (int, float)):
@@ -105,6 +170,16 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
                     out[key] = 1.0
             else:
                 out[key] = 1.0
+        elif key == "estimated_minutes":
+            if isinstance(val, (int, float)):
+                out[key] = int(val)
+            elif isinstance(val, str):
+                try:
+                    out[key] = int(float(val.strip()))
+                except ValueError:
+                    out[key] = None
+            else:
+                out[key] = None
         else:
             out[key] = val
     return out
@@ -151,10 +226,29 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
                 "slots": [],
             }
         return chat_agent_tools.find_free_slots_in_calendar(start, end)
+    if tool == "get_calendar_events":
+        start = params.get("start_date") or ""
+        end = params.get("end_date") or ""
+        if not start or not end:
+            return {
+                "error": "start_date and end_date are required (ISO date strings).",
+                "events": [],
+            }
+        return chat_agent_tools.list_calendar_events_for_range(start, end)
+    if tool == "get_tasks":
+        start = params.get("due_start") or ""
+        end = params.get("due_end") or ""
+        if not start or not end:
+            return {
+                "error": "due_start and due_end are required (ISO date strings).",
+                "tasks": [],
+            }
+        return chat_agent_tools.list_tasks_for_range(start, end)
     if tool == "propose_schedule_change":
         return chat_agent_tools.propose_schedule_change(
             params.get("task_name") or "Study block",
             params.get("hours", 1.0),
             params.get("deadline") or "",
+            estimated_minutes=params.get("estimated_minutes"),
         )
     return {"error": f"Unknown tool: {tool}"}

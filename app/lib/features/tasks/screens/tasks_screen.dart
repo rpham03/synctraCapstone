@@ -288,6 +288,179 @@ class _TasksScreenState extends State<TasksScreen> {
     }
   }
 
+  Future<bool> _confirm({
+    required String title,
+    required String message,
+    String confirmLabel = 'Remove',
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _persistCanvasFromState() async {
+    final canvas = _tasks.where((t) => t.source == 'canvas').toList();
+    await _canvasService.saveCache(canvas);
+    await _canvasService.reloadFromCache();
+  }
+
+  Future<void> _deleteTask(TaskModel task) async {
+    final sourceNote = task.source == 'canvas'
+        ? ' It stays on Canvas; use Sync to pull assignments again.'
+        : '';
+    final ok = await _confirm(
+      title: 'Remove task?',
+      message:
+          'Remove "${task.title}" from Synctra?$sourceNote',
+    );
+    if (!ok) return;
+
+    setState(() => _tasks.removeWhere((t) => t.id == task.id));
+    if (task.source == 'manual') {
+      await _persistManualTasks();
+    } else if (task.source == 'canvas') {
+      await _persistCanvasFromState();
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Task removed.')),
+    );
+  }
+
+  Future<void> _clearTasks({required String? source}) async {
+    final String title;
+    final String message;
+    if (source == 'canvas') {
+      title = 'Clear Canvas tasks?';
+      message =
+          'Remove all cached Canvas assignments from Synctra. Tap Sync to import fresh tasks from Canvas.';
+    } else if (source == 'manual') {
+      title = 'Clear manual tasks?';
+      message = 'Remove every task you added manually. This cannot be undone.';
+    } else {
+      title = 'Clear all tasks?';
+      message =
+          'Remove all Canvas and manual tasks from Synctra. Tap Sync to reload Canvas assignments.';
+    }
+
+    final ok = await _confirm(
+      title: title,
+      message: message,
+      confirmLabel: 'Clear',
+    );
+    if (!ok) return;
+
+    if (source == null || source == 'canvas') {
+      await _canvasService.clearCache();
+    }
+    if (source == null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_manualTasksKey);
+    }
+
+    setState(() {
+      if (source == null) {
+        _tasks.clear();
+      } else {
+        _tasks.removeWhere((t) => t.source == source);
+      }
+    });
+
+    if (source == 'manual' || source == null) {
+      await _persistManualTasks();
+    }
+
+    if (!mounted) return;
+    final label = source == 'canvas'
+        ? 'Canvas tasks cleared. Tap Sync to reload.'
+        : source == 'manual'
+            ? 'Manual tasks cleared.'
+            : 'All tasks cleared. Tap Sync to reload Canvas.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(label)),
+    );
+  }
+
+  void _showTasksMenu() {
+    final hasCanvas = _tasks.any((t) => t.source == 'canvas');
+    final hasManual = _tasks.any((t) => t.source == 'manual');
+    showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.sync),
+              title: const Text('Sync Canvas'),
+              subtitle: const Text('Pull latest assignments from Canvas'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _syncCanvas();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.school_outlined),
+              title: const Text('Clear Canvas tasks'),
+              subtitle: const Text('Then sync again for a fresh import'),
+              enabled: hasCanvas,
+              onTap: hasCanvas
+                  ? () {
+                      Navigator.pop(ctx);
+                      _clearTasks(source: 'canvas');
+                    }
+                  : null,
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_note_outlined),
+              title: const Text('Clear manual tasks'),
+              enabled: hasManual,
+              onTap: hasManual
+                  ? () {
+                      Navigator.pop(ctx);
+                      _clearTasks(source: 'manual');
+                    }
+                  : null,
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline, color: Theme.of(ctx).colorScheme.error),
+              title: Text(
+                'Clear all tasks',
+                style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+              ),
+              enabled: _tasks.isNotEmpty,
+              onTap: _tasks.isNotEmpty
+                  ? () {
+                      Navigator.pop(ctx);
+                      _clearTasks(source: null);
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _quickAddBoard(String title, DateTime dueEndOfDay) async {
     setState(() {
       _tasks.add(
@@ -356,6 +529,11 @@ class _TasksScreenState extends State<TasksScreen> {
                 color: scheme.onSurfaceVariant, size: 22),
             tooltip: 'Filter',
             onPressed: _showFilterSheet,
+          ),
+          IconButton(
+            icon: Icon(Icons.more_vert, color: scheme.onSurfaceVariant, size: 22),
+            tooltip: 'Task options',
+            onPressed: _showTasksMenu,
           ),
         ],
       ),
@@ -428,6 +606,7 @@ class _TasksScreenState extends State<TasksScreen> {
                     onTaskDueChanged: _applyDueChange,
                     onQuickAdd: _quickAddBoard,
                     onToggleDone: _setTaskDone,
+                    onDeleteTask: _deleteTask,
                     onAddTask: _showAddTask,
                     isEmpty: _filtered.isEmpty,
                   )
@@ -439,6 +618,7 @@ class _TasksScreenState extends State<TasksScreen> {
                         itemBuilder: (_, i) => _TaskTile(
                           task: _filtered[i],
                           onToggle: (done) => _setTaskDone(_filtered[i], done),
+                          onDelete: () => _deleteTask(_filtered[i]),
                         ),
                       ),
           ),
@@ -510,6 +690,7 @@ class _WeekBody extends StatelessWidget {
   final Future<void> Function(TaskModel task, DateTime newDue) onTaskDueChanged;
   final Future<void> Function(String title, DateTime dueEndOfDay) onQuickAdd;
   final Future<void> Function(TaskModel task, bool done) onToggleDone;
+  final Future<void> Function(TaskModel task) onDeleteTask;
   final VoidCallback onAddTask;
   final bool isEmpty;
 
@@ -521,6 +702,7 @@ class _WeekBody extends StatelessWidget {
     required this.onTaskDueChanged,
     required this.onQuickAdd,
     required this.onToggleDone,
+    required this.onDeleteTask,
     required this.onAddTask,
     required this.isEmpty,
   });
@@ -569,6 +751,7 @@ class _WeekBody extends StatelessWidget {
                 onTaskDueChanged: (t, d) => onTaskDueChanged(t, d),
                 onQuickAdd: (title, due) => onQuickAdd(title, due),
                 onToggleDone: (t, d) => onToggleDone(t, d),
+                onDeleteTask: onDeleteTask,
               ),
             ),
           )
@@ -595,7 +778,12 @@ class _WeekBody extends StatelessWidget {
 class _TaskTile extends StatelessWidget {
   final TaskModel task;
   final ValueChanged<bool> onToggle;
-  const _TaskTile({required this.task, required this.onToggle});
+  final VoidCallback onDelete;
+  const _TaskTile({
+    required this.task,
+    required this.onToggle,
+    required this.onDelete,
+  });
 
   Color _urgencyColor(BuildContext context, DateTime due,
       {required bool completed}) {
@@ -697,6 +885,14 @@ class _TaskTile extends StatelessWidget {
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
+                IconButton(
+                  icon: Icon(Icons.close, size: 20, color: scheme.onSurfaceVariant),
+                  tooltip: 'Remove task',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  onPressed: onDelete,
+                ),
                 Text(
                   DateFormat('MMM d').format(due),
                   style: theme.labelLarge?.copyWith(

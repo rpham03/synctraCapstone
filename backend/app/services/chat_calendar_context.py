@@ -1,20 +1,16 @@
-# Per-request calendar busy times for the chat agent (from the mobile app).
-from __future__ import annotations
-
-import contextvars
-from typing import Any
-
-_calendar_events: contextvars.ContextVar[list[dict[str, Any]] | None] = (
-    contextvars.ContextVar("chat_calendar_events", default=None)
+# Backward-compatible re-exports — use chat_client_context for new code.
+from app.services.chat_client_context import (
+    clear_client_context,
+    get_calendar_events,
+    get_tasks,
+    set_calendar_events,
+    set_tasks,
 )
 
-
-def set_calendar_events(events: list[dict[str, Any]] | None) -> None:
-    _calendar_events.set(events)
-
-
-def get_calendar_events() -> list[dict[str, Any]]:
-    raw = _calendar_events.get()
-    if not raw:
-        return []
-    return [e for e in raw if isinstance(e, dict)]
+__all__ = [
+    "clear_client_context",
+    "get_calendar_events",
+    "get_tasks",
+    "set_calendar_events",
+    "set_tasks",
+]

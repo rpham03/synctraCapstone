@@ -6,7 +6,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.config.settings import settings
-from app.services.chat_calendar_context import set_calendar_events
+from app.services.chat_agent_common import sanitize_chat_reply
+from app.services.chat_client_context import (
+    clear_client_context,
+    set_calendar_events,
+    set_tasks,
+)
 from app.services.ollama_agent_service import OllamaAgentService
 from app.services.openai_agent_service import OpenAIAgentService
 
@@ -46,16 +51,18 @@ class ChatService:
         user_id: str,
         *,
         calendar_events: list[dict[str, Any]] | None = None,
+        tasks: list[dict[str, Any]] | None = None,
     ) -> str:
         text = user_message.strip()
         if not text:
             return "Send me a message about your schedule or tasks."
 
         set_calendar_events(calendar_events)
+        set_tasks(tasks)
         try:
             return await self._process_message_inner(text, user_id)
         finally:
-            set_calendar_events(None)
+            clear_client_context()
 
     async def _process_message_inner(self, text: str, user_id: str) -> str:
         provider = self._provider()
@@ -70,6 +77,7 @@ class ChatService:
             try:
                 history = list(_history.get(user_id, []))
                 reply = await self._ollama_agent().run_turn(text, history=history)
+                reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)
                 return reply
@@ -86,6 +94,7 @@ class ChatService:
             try:
                 history = list(_history.get(user_id, []))
                 reply = await self._openai_agent().run_turn(text, history=history)
+                reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)
                 return reply

@@ -124,3 +124,72 @@ class SchedulerService:
             busy = _merge_intervals(busy)
 
         return blocks
+
+    def suggest_task_sessions(
+        self,
+        task: Task,
+        fixed_events: List[FixedEvent],
+        look_ahead_days: int = 7,
+        *,
+        window_start: datetime | None = None,
+        max_block_minutes: int = 90,
+    ) -> List[ScheduleBlock]:
+        """Place one task as proportional study sessions sized by estimated_minutes."""
+        window_start = window_start or datetime.now().replace(microsecond=0)
+        horizon_end = window_start + timedelta(days=look_ahead_days)
+        deadline = min(task.due_date, horizon_end)
+        if deadline <= window_start:
+            return []
+
+        total = max(15, task.estimated_minutes)
+        chunks = _split_work_minutes(total, max_block=max_block_minutes)
+        busy: List[Tuple[datetime, datetime]] = []
+        for fe in fixed_events:
+            s = max(fe.start, window_start)
+            e = min(fe.end, horizon_end)
+            if s < e:
+                busy.append((s, e))
+        busy = _merge_intervals(busy)
+
+        blocks: List[ScheduleBlock] = []
+        session_count = len(chunks)
+        for idx, minutes in enumerate(chunks):
+            duration = timedelta(minutes=minutes)
+            slot = _first_gap_slot(busy, duration, window_start, deadline)
+            if slot is None:
+                continue
+            start, end = slot
+            title = task.title
+            if session_count > 1:
+                title = f"{task.title} ({idx + 1}/{session_count})"
+            blocks.append(
+                ScheduleBlock(
+                    id=str(uuid.uuid4()),
+                    task_id=task.id,
+                    task_title=title,
+                    start=start,
+                    end=end,
+                )
+            )
+            busy.append((start, end))
+            busy = _merge_intervals(busy)
+        return blocks
+
+
+def _split_work_minutes(total: int, *, max_block: int = 90, min_block: int = 30) -> List[int]:
+    """Split total work into session lengths (e.g. 180 min → 90 + 90)."""
+    total = max(min_block, total)
+    if total <= max_block:
+        return [total]
+    chunks: List[int] = []
+    remaining = total
+    while remaining > 0:
+        if remaining <= max_block:
+            chunks.append(remaining)
+            break
+        chunk = max_block
+        if remaining - chunk < min_block:
+            chunk = remaining - min_block
+        chunks.append(chunk)
+        remaining -= chunk
+    return chunks or [min_block]

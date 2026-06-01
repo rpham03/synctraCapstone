@@ -40,7 +40,7 @@ class TaskModel {
         id: json['id'],
         title: json['title'],
         dueDate: DateTime.parse(json['due_date']),
-        estimatedMinutes: json['estimated_minutes'],
+        estimatedMinutes: json['estimated_minutes'] ?? 60,
         courseId: json['course_id'],
         courseName: json['course_name'] as String?,
         source: json['source'],
