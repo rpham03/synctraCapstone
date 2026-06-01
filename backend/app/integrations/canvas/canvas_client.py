@@ -6,13 +6,11 @@ from datetime import date, datetime, timezone
 
 import httpx
 from app.core.config.settings import settings
+from app.services.assignment_estimate import estimate_canvas_assignment_minutes
 
 
 def _estimate_minutes(assignment: dict) -> int:
-    pts = assignment.get("points_possible")
-    if isinstance(pts, (int, float)) and pts and pts > 0:
-        return min(int(pts * 3), 240)
-    return 60
+    return estimate_canvas_assignment_minutes(assignment)
 
 
 def _course_display_name(course: dict) -> str:

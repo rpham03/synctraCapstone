@@ -24,6 +24,13 @@ from app.api.v1.routes.unified_course_format import (
     deduplicate_class_events,
 )
 from app.core.config.settings import settings
+from app.services.assignment_estimate import (
+    ESTIMATE_AI_GUIDANCE,
+    coerce_estimated_minutes,
+    estimate_assignment_minutes,
+    infer_assignment_type,
+    round_estimate_minutes as _round_minutes,
+)
 
 router = APIRouter(tags=["course-import"])
 
@@ -295,93 +302,6 @@ def infer_event_type(title: str) -> str:
     if "office hour" in lower_title:
         return "office_hours"
     return "lecture"
-
-
-def infer_assignment_type(title: str) -> str:
-    """Infer assignment type from a calendar title."""
-    lower_title = title.lower()
-    if "project" in lower_title:
-        return "project"
-    if "quiz" in lower_title:
-        return "quiz"
-    if "lab" in lower_title:
-        return "lab"
-    if "reading" in lower_title:
-        return "reading"
-    if any(term in lower_title for term in ("exam", "midterm", "final")):
-        return "exam"
-    return "homework"
-
-
-def _round_minutes(minutes: int) -> int:
-    """Round estimates to student-friendly 30 minute blocks."""
-    return max(30, min(720, int(round(minutes / 30) * 30)))
-
-
-def coerce_estimated_minutes(value: object) -> int | None:
-    """Accept LLM/user estimate values when they are plausible."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        minutes = int(value)
-    elif isinstance(value, str) and value.strip().isdigit():
-        minutes = int(value.strip())
-    else:
-        return None
-    if minutes <= 0:
-        return None
-    return _round_minutes(minutes)
-
-
-def estimate_assignment_minutes(
-    assignment_name: str,
-    assignment_type: str | None = None,
-    description: str = "",
-    requirements: list[str] | None = None,
-    points: int | float | None = None,
-) -> int:
-    """Estimate focused work time for a typical student, not an expert."""
-    assignment_type = assignment_type or infer_assignment_type(assignment_name)
-    text = " ".join(
-        [
-            assignment_name,
-            assignment_type,
-            description or "",
-            " ".join(requirements or []),
-        ]
-    ).lower()
-
-    base_by_type = {
-        "project": 480,
-        "homework": 240,
-        "lab": 180,
-        "reading": 90,
-        "quiz": 90,
-        "exam": 240,
-    }
-    minutes = base_by_type.get(assignment_type, 240)
-
-    if isinstance(points, (int, float)) and points > 0:
-        minutes = max(minutes, min(720, int(points * 4)))
-
-    keyword_adjustments = [
-        (r"\b(final|capstone|milestone|portfolio)\b", 240),
-        (r"\b(project|programming|implementation|code|coding|build|debug)\b", 150),
-        (r"\b(report|paper|write[- ]?up|essay|reflection|revise|revision)\b", 120),
-        (r"\b(proof|problem set|pset|theory|analysis)\b", 120),
-        (r"\b(machine learning|dataset|model|experiment|evaluation)\b", 120),
-        (r"\b(checkpoint|proposal|survey)\b", -30),
-        (r"\b(extra credit|optional)\b", -60),
-    ]
-    for pattern, delta in keyword_adjustments:
-        if re.search(pattern, text):
-            minutes += delta
-
-    req_count = len(requirements or [])
-    if req_count > 1:
-        minutes += min(180, (req_count - 1) * 45)
-
-    return _round_minutes(minutes)
 
 
 def clean_calendar_text(text: str) -> str:
@@ -2111,7 +2031,11 @@ def merge_parsed_course_data(primary: dict, secondary: dict) -> dict:
             continue
         existing = merged["assignments"][existing_index]
         improved = {**existing}
-        ai_estimate = coerce_estimated_minutes(assignment.get("estimated_minutes"))
+        ai_estimate = coerce_estimated_minutes(
+            assignment.get("estimated_minutes"),
+            assignment_type=assignment.get("assignment_type")
+            or infer_assignment_type(str(assignment.get("assignment_name", ""))),
+        )
         if ai_estimate is not None:
             improved["estimated_minutes"] = ai_estimate
         if not improved.get("due_time") and assignment.get("due_time"):
@@ -2605,9 +2529,7 @@ Rules:
 - Use every Source URL section; schedule and assignment details may be on linked pages.
 - assignment_type must be one of: homework, project, exam, quiz, lab, reading.
 - event_type must be one of: lecture, lab, section, discussion, exam, office_hours.
-- For each assignment, estimate focused work time as estimated_minutes for an
-  average student, not an expert. Be conservative and include time for reading,
-  setup, debugging, review, and revision. Use 30 minute increments; do not exceed 720.
+{ESTIMATE_AI_GUIDANCE}
 
 Recurring schedules:
 - If the page only describes a recurring pattern like "MWF 10:30-11:20" or
@@ -2634,7 +2556,7 @@ Example correct extraction (abbreviated):
     {{"assignment_name":"HW1","assignment_type":"homework","due_date":"2026-04-10",
       "due_time":"23:59","points":null,"description":"HW1 due Friday 04/10/26 by 11:59pm",
       "submission_method":null,"requirements":[],"is_individual":true,"is_group":false,
-      "late_policy":null,"estimated_minutes":240}}
+      "late_policy":null,"estimated_minutes":300}}
   ]
 
 Page content:
@@ -2722,7 +2644,8 @@ def convert_to_unified_format(
             ) or infer_assignment_type(raw_assignment["assignment_name"])
             raw_assignment["requirements"] = raw_assignment.get("requirements") or []
             estimated_minutes = coerce_estimated_minutes(
-                raw_assignment.get("estimated_minutes")
+                raw_assignment.get("estimated_minutes"),
+                assignment_type=raw_assignment.get("assignment_type"),
             )
             raw_assignment["estimated_minutes"] = estimated_minutes or estimate_assignment_minutes(
                 raw_assignment["assignment_name"],

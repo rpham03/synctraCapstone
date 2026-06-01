@@ -28,6 +28,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
+from app.services.assignment_estimate import ESTIMATE_AI_GUIDANCE
 from app.api.v1.routes.course_import import (
     COURSE_REQUEST_HEADERS,
     CourseImportResponse,
@@ -135,9 +136,7 @@ Rules:
 - Use every Source URL section; schedule and assignment details may be on linked pages.
 - assignment_type must be one of: homework, project, exam, quiz, lab, reading.
 - event_type must be one of: lecture, lab, section, discussion, exam, office_hours.
-- For each assignment, estimate focused work time as estimated_minutes for an
-  average student, not an expert. Be conservative and include time for reading,
-  setup, debugging, review, and revision. Use 30 minute increments; do not exceed 720.
+{ESTIMATE_AI_GUIDANCE}
 
 Recurring schedules:
 - If the page only describes a recurring pattern like "MWF 10:30-11:20" or
@@ -164,7 +163,7 @@ Example correct extraction, abbreviated:
     {{"assignment_name":"HW1","assignment_type":"homework","due_date":"2026-04-10",
       "due_time":"23:59","points":null,"description":"HW1 due Friday 04/10/26 by 11:59pm",
       "submission_method":null,"requirements":[],"is_individual":true,"is_group":false,
-      "late_policy":null,"estimated_minutes":240}}
+      "late_policy":null,"estimated_minutes":300}}
   ]
 
 Page content:

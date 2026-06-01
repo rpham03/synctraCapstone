@@ -148,7 +148,7 @@ class _TasksScreenState extends State<TasksScreen> {
     final titleCtrl = TextEditingController();
     final descCtrl = TextEditingController();
     DateTime due = DateTime.now().add(const Duration(days: 1));
-    var est = 60;
+    var est = 180;
 
     final ok = await showDialog<bool>(
       context: context,
@@ -468,7 +468,7 @@ class _TasksScreenState extends State<TasksScreen> {
           id: const Uuid().v4(),
           title: title,
           dueDate: dueEndOfDay,
-          estimatedMinutes: 60,
+          estimatedMinutes: 180,
           source: 'manual',
           description: '',
         ),

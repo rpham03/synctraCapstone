@@ -444,23 +444,23 @@ class CourseImportService {
         ? rawMinutes.round()
         : int.tryParse(rawMinutes?.toString() ?? '');
     if (minutes == null || minutes <= 0) return null;
-    return minutes.clamp(30, 720).toInt();
+    return minutes.clamp(60, 960).toInt();
   }
 
   int _defaultEstimateForAssignmentType(String? rawType) {
     switch (rawType?.trim().toLowerCase()) {
       case 'project':
-        return 480;
+        return 600;
       case 'lab':
-        return 180;
+        return 240;
       case 'reading':
       case 'quiz':
-        return 90;
+        return 120;
       case 'exam':
-        return 240;
+        return 360;
       case 'homework':
       default:
-        return 240;
+        return 300;
     }
   }
 

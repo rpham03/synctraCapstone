@@ -18,7 +18,7 @@ class TaskIn(BaseModel):
     id: str = ""
     title: str = ""
     due_date: str
-    estimated_minutes: int = Field(default=60, ge=1)
+    estimated_minutes: int = Field(default=180, ge=1)
     course_name: str = ""
     source: str = ""
     is_completed: bool = False

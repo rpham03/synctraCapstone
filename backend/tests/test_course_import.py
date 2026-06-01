@@ -441,15 +441,15 @@ def test_deduplicate_course_import_class_events_collapses_duplicate_lectures():
 
 
 def test_estimate_assignment_minutes_uses_assignment_complexity():
-    assert estimate_assignment_minutes("Reading 4", "reading") == 90
-    assert estimate_assignment_minutes("HW3", "homework") == 240
-    assert estimate_assignment_minutes("Lab 2", "lab") == 180
+    assert estimate_assignment_minutes("Reading 4", "reading") == 120
+    assert estimate_assignment_minutes("HW3", "homework") == 300
+    assert estimate_assignment_minutes("Lab 2", "lab") == 240
     assert estimate_assignment_minutes(
         "Final Project Report",
         "project",
         "Implement model, run experiments, and write report.",
         ["code", "experiments", "writeup"],
-    ) == 720
+    ) == 960
 
 
 def test_merge_parsed_course_data_uses_ai_assignment_estimate():
@@ -481,7 +481,7 @@ def test_merge_parsed_course_data_uses_ai_assignment_estimate():
 
     merged = merge_parsed_course_data(primary, secondary)
 
-    assert merged["assignments"][0]["estimated_minutes"] == 240
+    assert merged["assignments"][0]["estimated_minutes"] == 300
     assert merged["assignments"][0]["due_time"] == "23:59"
     assert merged["assignments"][0]["description"] == "Problems 1-8 plus written reflection."
     assert merged["assignments"][0]["requirements"] == ["Problems 1-8", "reflection"]
