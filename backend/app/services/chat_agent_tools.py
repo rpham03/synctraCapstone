@@ -8,7 +8,7 @@ from dateutil import parser as date_parser
 
 from app.core.config.settings import settings
 from app.integrations.canvas.canvas_client import CanvasClient
-from app.services.chat_calendar_context import get_calendar_events
+from app.services.chat_client_context import get_calendar_events, get_tasks
 from app.services.scheduler_service import SchedulerService, Task
 
 # Default “calendar day” window when no iCal events are supplied yet.
@@ -251,8 +251,146 @@ def find_free_slots_in_calendar(start_date: str, end_date: str) -> dict:
     }
 
 
-def propose_schedule_change(task_name: object, hours: object, deadline: object) -> dict:
-    """Propose study blocks without writing to the calendar."""
+def _task_with_display_label(task: dict) -> dict:
+    """Add display_label for manual/Canvas tasks from the app."""
+    title = (task.get("title") or "Task").strip()
+    course = (task.get("course_name") or "").strip()
+    out = dict(task)
+    out["display_label"] = f"{course} — {title}" if course else title
+    return out
+
+
+def list_calendar_events_for_range(start_date: str, end_date: str) -> dict:
+    """List timed calendar events (iCal, course, manual) sent from the app."""
+    start_iso, end_iso, corrected = sanitize_free_slot_range(start_date, end_date)
+    start = _parse_date_bound(start_iso, end_of_day=False)
+    end = _parse_date_bound(end_iso, end_of_day=True)
+    if end < start:
+        return {"events": [], "error": "end_date must be on or after start_date"}
+
+    events_out: list[dict] = []
+    for raw in get_calendar_events():
+        if not isinstance(raw, dict):
+            continue
+        row = _parse_busy_event(raw)
+        if not row:
+            continue
+        bs, be, title = row
+        if bs >= end or be <= start:
+            continue
+        source = _as_str(raw.get("source")).strip() or "calendar"
+        events_out.append(
+            {
+                "title": title,
+                "start_time": bs.isoformat(),
+                "end_time": be.isoformat(),
+                "source": source,
+            }
+        )
+    events_out.sort(key=lambda e: e["start_time"])
+
+    today = today_local()
+    mon, fri = week_range_mon_fri(today)
+    if events_out:
+        note = (
+            f"{len(events_out)} calendar event(s) from the app "
+            "(iCal feeds, course imports, manual events, Canvas due chips)."
+        )
+    else:
+        note = (
+            "No calendar events in this range were sent from the app. "
+            "Open the Calendar tab to sync iCal feeds and course imports, then ask again."
+        )
+    if corrected:
+        note += (
+            f" Stale dates corrected to this week ({mon}–{fri}); "
+            f"today is {today.isoformat()}."
+        )
+    return {
+        "events": events_out,
+        "count": len(events_out),
+        "start_date": start_iso,
+        "end_date": end_iso,
+        "today": today.isoformat(),
+        "dates_corrected": corrected,
+        "note": note,
+    }
+
+
+def list_tasks_for_range(due_start: str, due_end: str) -> dict:
+    """List tasks from the Tasks tab (manual + cached Canvas) due in range."""
+    start_iso, end_iso, corrected = sanitize_free_slot_range(due_start, due_end)
+    start_d = _parse_date_bound(start_iso, end_of_day=False).date()
+    end_d = _parse_date_bound(end_iso, end_of_day=True).date()
+
+    tasks_out: list[dict] = []
+    for raw in get_tasks():
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("is_completed"):
+            continue
+        try:
+            due = _parse_iso_datetime(raw.get("due_date"))
+        except (ValueError, TypeError):
+            continue
+        due_d = due.date()
+        if due_d < start_d or due_d > end_d:
+            continue
+        t = _task_with_display_label(raw)
+        t["due_date"] = due.isoformat()
+        tasks_out.append(t)
+    tasks_out.sort(key=lambda t: t.get("due_date", ""))
+
+    today = today_local()
+    mon, fri = week_range_mon_fri(today)
+    if tasks_out:
+        note = (
+            f"{len(tasks_out)} task(s) from the Tasks tab (manual + cached Canvas). "
+            "Use get_assignments for a live Canvas sync."
+        )
+    else:
+        note = (
+            "No tasks due in this range were sent from the app. "
+            "Open Tasks to add items or sync Canvas, then ask again."
+        )
+    if corrected:
+        note += (
+            f" Stale dates corrected to this week ({mon}–{fri}); "
+            f"today is {today.isoformat()}."
+        )
+    return {
+        "tasks": tasks_out,
+        "count": len(tasks_out),
+        "due_start": start_iso,
+        "due_end": end_iso,
+        "today": today.isoformat(),
+        "dates_corrected": corrected,
+        "note": note,
+    }
+
+
+def _calendar_fixed_events() -> list:
+    from app.services.scheduler_service import FixedEvent
+
+    fixed: list[FixedEvent] = []
+    for raw in get_calendar_events():
+        if not isinstance(raw, dict):
+            continue
+        row = _parse_busy_event(raw)
+        if row:
+            bs, be, _ = row
+            fixed.append(FixedEvent(start=bs, end=be))
+    return fixed
+
+
+def propose_schedule_change(
+    task_name: object,
+    hours: object,
+    deadline: object,
+    *,
+    estimated_minutes: int | None = None,
+) -> dict:
+    """Propose proportional study blocks without writing to the calendar."""
     deadline_str = _as_str(deadline).strip()
     if not deadline_str:
         return {"proposal": [], "message": "A deadline date is required."}
@@ -260,11 +398,19 @@ def propose_schedule_change(task_name: object, hours: object, deadline: object) 
         due = _parse_iso_datetime(deadline_str)
     except (ValueError, TypeError) as e:
         return {"proposal": [], "message": f"Could not parse deadline: {e}"}
-    try:
-        hours_f = float(hours) if not isinstance(hours, str) else float(hours.strip())
-    except (TypeError, ValueError):
-        hours_f = 1.0
-    minutes = max(15, int(round(hours_f * 60)))
+
+    if estimated_minutes is not None:
+        try:
+            minutes = max(15, int(estimated_minutes))
+        except (TypeError, ValueError):
+            minutes = 60
+    else:
+        try:
+            hours_f = float(hours) if not isinstance(hours, str) else float(hours.strip())
+        except (TypeError, ValueError):
+            hours_f = 1.0
+        minutes = max(15, int(round(hours_f * 60)))
+
     task = Task(
         id="chat-proposal",
         title=_as_str(task_name).strip() or "Study block",
@@ -273,17 +419,18 @@ def propose_schedule_change(task_name: object, hours: object, deadline: object) 
     )
     service = SchedulerService()
     look_ahead = max(1, min(60, (due.date() - date.today()).days + 1))
-    blocks = service.suggest_blocks(
-        [task],
-        fixed_events=[],
+    fixed = _calendar_fixed_events()
+    blocks = service.suggest_task_sessions(
+        task,
+        fixed_events=fixed,
         look_ahead_days=look_ahead,
     )
     if not blocks:
         return {
             "proposal": [],
             "message": (
-                f"Could not place {hours}h for “{task_name}” before {deadline}. "
-                "Try a later deadline or shorter duration."
+                f"Could not place {minutes} min for “{task_name}” before {deadline}. "
+                "Try a later deadline, shorter duration, or fewer calendar conflicts."
             ),
         }
     proposal = [
@@ -291,12 +438,21 @@ def propose_schedule_change(task_name: object, hours: object, deadline: object) 
             "task_title": b.task_title,
             "start_time": b.start.isoformat(),
             "end_time": b.end.isoformat(),
+            "duration_minutes": int((b.end - b.start).total_seconds() // 60),
             "is_ai_generated": True,
             "written_to_calendar": False,
         }
         for b in blocks
     ]
+    session_note = (
+        f"Split into {len(blocks)} session(s) sized by estimated duration "
+        f"({minutes} min total), avoiding calendar busy times."
+        if len(blocks) > 1
+        else f"One {minutes}-minute block, avoiding calendar busy times."
+    )
     return {
         "proposal": proposal,
-        "message": "Proposal only — not saved to your calendar yet.",
+        "total_estimated_minutes": minutes,
+        "session_count": len(blocks),
+        "message": f"Proposal only — not saved to your calendar yet. {session_note}",
     }

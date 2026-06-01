@@ -56,3 +56,26 @@ def test_suggest_skips_slot_blocked_by_fixed_event():
     )
     assert len(blocks) == 1
     assert blocks[0].start >= window + timedelta(hours=8)
+
+
+def test_suggest_task_sessions_splits_proportional_blocks():
+    svc = SchedulerService()
+    window = datetime(2030, 1, 6, 9, 0, 0)
+    due = window + timedelta(days=5)
+    task = Task(
+        id="t1",
+        title="Long reading",
+        due_date=due,
+        estimated_minutes=180,
+    )
+    blocks = svc.suggest_task_sessions(
+        task,
+        [],
+        look_ahead_days=7,
+        window_start=window,
+    )
+    assert len(blocks) == 2
+    assert blocks[0].task_title.endswith("(1/2)")
+    assert blocks[1].task_title.endswith("(2/2)")
+    total_min = sum(int((b.end - b.start).total_seconds() // 60) for b in blocks)
+    assert total_min == 180
