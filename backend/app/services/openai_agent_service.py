@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from openai import OpenAI
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 from app.core.config.settings import settings
 from app.services.chat_agent_common import (
@@ -20,6 +21,14 @@ class OpenAIAgentService:
         self._client: OpenAI | None = None
 
     def _get_client(self) -> OpenAI:
+        try:
+            from openai import OpenAI
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "The optional OpenAI package is not installed. "
+                "Install backend requirements or set CHAT_LLM_PROVIDER=ollama."
+            ) from exc
+
         if self._client is None:
             api_key = (settings.openai_api_key or "").strip()
             if not api_key:

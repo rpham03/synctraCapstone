@@ -25,6 +25,7 @@ import '../../../shared/services/schedule_chat_coordinator.dart';
 import '../../../shared/services/scheduling_service.dart';
 import '../../../shared/services/suggested_schedule_store.dart';
 import '../../../shared/state/calendar_shell_bridge.dart';
+import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/widgets/synctra_chat_panel.dart';
 import '../../../shared/widgets/sync_it_chrome.dart';
 
@@ -250,20 +251,24 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Future<void> _addCourseImport(String url, String name) async {
     await _courseImportService.addImport(url, name);
     await _loadCourseImports();
+    CourseImportTasksBridge.instance.refresh();
   }
 
   Future<void> _removeCourseImport(String importId) async {
     await _courseImportService.removeImport(importId);
     await _loadCourseImports();
+    CourseImportTasksBridge.instance.refresh();
   }
 
   List<EventModel> _canvasOnDay(DateTime day) => _allEvents()
       .where((e) => e.source == 'canvas' && isSameDay(e.startTime, day))
       .toList();
 
-  List<EventModel> _courseAllDayOnDay(DateTime day) => _allEvents()
-      .where((e) => e.isDateOnlyCourseEvent && isSameDay(e.startTime, day))
-      .toList();
+  List<EventModel> _courseAllDayOnDay(DateTime day) => _dedupeCalendarEvents(
+        _allEvents().where((e) =>
+            (e.isDateOnlyCourseEvent || e.isCourseAssignment) &&
+            isSameDay(e.startTime, day)),
+      );
 
   /// Canvas items that also occupy the time grid (vs due-date-only chips in the all-day row).
   static bool _canvasShowsInTimeGrid(EventModel e) {
@@ -275,11 +280,89 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return false;
   }
 
-  List<EventModel> _timedEventsOnDay(DateTime day) => _allEvents()
-      .where((e) => isSameDay(e.startTime, day))
-      .where((e) => !e.isDateOnlyCourseEvent)
-      .where((e) => e.source != 'canvas' || _canvasShowsInTimeGrid(e))
-      .toList();
+  static List<EventModel> _dedupeCalendarEvents(Iterable<EventModel> events) {
+    final unique = <EventModel>[];
+    final indexByKey = <String, int>{};
+
+    for (final event in events) {
+      final key = _displayDedupeKey(event);
+      if (key == null) {
+        unique.add(event);
+        continue;
+      }
+
+      final existingIndex = indexByKey[key];
+      if (existingIndex == null) {
+        indexByKey[key] = unique.length;
+        unique.add(event);
+        continue;
+      }
+
+      final existing = unique[existingIndex];
+      if (_eventDisplayScore(event) > _eventDisplayScore(existing)) {
+        unique[existingIndex] = event;
+      }
+    }
+
+    return unique;
+  }
+
+  static String? _displayDedupeKey(EventModel event) {
+    if (event.source != 'course') return null;
+
+    final importKey = _courseImportKey(event);
+    final dateKey = DateFormat('yyyy-MM-dd').format(event.startTime);
+    if (event.isCourseAssignment) {
+      return [
+        'course-assignment',
+        importKey,
+        dateKey,
+        _normalizedEventTitle(event.title),
+      ].join('|');
+    }
+
+    final normalizedTitle = _normalizedEventTitle(event.title);
+    if (!normalizedTitle.startsWith('lecture')) return null;
+    return [
+      'course-lecture',
+      importKey,
+      dateKey,
+      _timeKey(event.startTime),
+      _timeKey(event.endTime),
+    ].join('|');
+  }
+
+  static String _courseImportKey(EventModel event) {
+    final sourceEventId = event.sourceEventId;
+    if (sourceEventId == null || sourceEventId.isEmpty) return 'unknown';
+    if (sourceEventId.length <= 36) return sourceEventId;
+    return sourceEventId.substring(0, 36);
+  }
+
+  static String _normalizedEventTitle(String title) =>
+      title.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
+
+  static String _timeKey(DateTime time) =>
+      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+
+  static int _eventDisplayScore(EventModel event) {
+    var score = 0;
+    final normalizedTitle = event.title.trim().toLowerCase();
+    final generic = RegExp(r'^(lecture|section|lab|discussion)(\s+[a-z])?$')
+        .hasMatch(normalizedTitle);
+    if (!generic) score += 100;
+    if (event.description.trim().isNotEmpty) score += 20;
+    score += event.title.length > 80 ? 80 : event.title.length;
+    return score;
+  }
+
+  List<EventModel> _timedEventsOnDay(DateTime day) => _dedupeCalendarEvents(
+        _allEvents()
+            .where((e) => isSameDay(e.startTime, day))
+            .where((e) => !e.isDateOnlyCourseEvent)
+            .where((e) => !e.isCourseAssignment)
+            .where((e) => e.source != 'canvas' || _canvasShowsInTimeGrid(e)),
+      );
 
   List<ScheduleBlockModel> _blocksOnDay(DateTime day) =>
       _scheduleStore.blocks.where((b) => isSameDay(b.startTime, day)).toList();
@@ -407,7 +490,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
         event: assignment,
         onScheduleStudy: () {
           Navigator.pop(sheetCtx);
-          final mins =
+          final mins = assignment.estimatedMinutes ??
               assignment.endTime.difference(assignment.startTime).inMinutes;
           final hours = (mins / 60.0).clamp(0.5, 4.0);
           final msg =
@@ -1788,8 +1871,17 @@ class _AllDayEventChip extends StatelessWidget {
     required this.onTap,
   });
 
+  String _formatEstimate(int minutes) {
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    if (hours == 0) return '${mins}m';
+    if (mins == 0) return '${hours}h';
+    return '${hours}h ${mins}m';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final estimate = event.estimatedMinutes;
     return Material(
       color: color.withValues(alpha: 0.14),
       borderRadius: BorderRadius.circular(8),
@@ -1822,6 +1914,17 @@ class _AllDayEventChip extends StatelessWidget {
                       ),
                 ),
               ),
+              if (estimate != null) ...[
+                const SizedBox(width: 6),
+                Text(
+                  _formatEstimate(estimate),
+                  maxLines: 1,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: color.withValues(alpha: 0.88),
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ],
             ],
           ),
         ),
@@ -2390,7 +2493,10 @@ class _StudyBlockChip extends StatelessWidget {
                             block.taskTitle,
                             maxLines: maxTitleLines,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelMedium
+                                ?.copyWith(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w600,
                                   height: 1.2,
@@ -2437,6 +2543,14 @@ class _AssignmentDetailSheet extends StatelessWidget {
     return ('—', t);
   }
 
+  String _formatEstimatedDuration(int minutes) {
+    final hours = minutes ~/ 60;
+    final mins = minutes % 60;
+    if (hours == 0) return '$mins min';
+    if (mins == 0) return '$hours hr';
+    return '$hours hr $mins min';
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -2466,8 +2580,14 @@ class _AssignmentDetailSheet extends StatelessWidget {
           _SheetRow(
             icon: Icons.timer_outlined,
             label: 'Estimated duration',
-            value:
-                '${event.endTime.difference(event.startTime).inMinutes.clamp(1, 9999)} min',
+            value: _formatEstimatedDuration(
+              event.estimatedMinutes ??
+                  event.endTime
+                      .difference(event.startTime)
+                      .inMinutes
+                      .clamp(1, 9999)
+                      .toInt(),
+            ),
           ),
           const SizedBox(height: 16),
           Text('Description', style: textTheme.labelLarge),

@@ -1,10 +1,27 @@
+from datetime import datetime
+
 from bs4 import BeautifulSoup
 
 from app.api.v1.routes.course_import import (
     calendar_event_to_unified,
+    clean_event_title,
+    deduplicate_course_import_class_events,
+    deduplicate_course_import_assignments,
+    estimate_assignment_minutes,
+    discover_related_course_links,
+    extract_meeting_patterns,
+    infer_current_uw_quarter,
+    merge_parsed_course_data,
+    normalize_course_url,
+    parse_ical_calendar_events,
+    parse_calendar_table_events,
     parse_course_assignments,
     parse_due_table_assignments,
+    parse_time_range,
+    should_augment_assignment_estimates_with_ai,
+    should_probe_common_course_paths,
 )
+from app.api.v1.routes.unified_course_format import UnifiedAssignment, UnifiedClassEvent
 
 
 def test_parse_due_table_assignments_uses_direct_row_date_for_today():
@@ -117,6 +134,26 @@ def test_parse_course_assignments_supports_assignment_tables():
     ]
 
 
+def test_parse_course_assignments_supports_assignment_due_date_headers():
+    soup = BeautifulSoup(
+        """
+        <table>
+          <tr><th>Assignment</th><th>Due Date</th></tr>
+          <tr><td>Homework 1</td><td>Wed Apr. 8 at 11:59 PM</td></tr>
+          <tr><td>Homework 2</td><td>Wed Apr. 15 at 11:59 PM</td></tr>
+        </table>
+        """,
+        "html.parser",
+    )
+
+    events = parse_course_assignments(soup, 2026)
+
+    assert [(event["title"], event["start_time"], event["all_day"]) for event in events] == [
+        ("Homework 1", "2026-04-08T23:59:00", False),
+        ("Homework 2", "2026-04-15T23:59:00", False),
+    ]
+
+
 def test_parse_course_assignments_supports_schedule_due_rows():
     soup = BeautifulSoup(
         """
@@ -209,3 +246,337 @@ def test_parse_course_assignments_supports_label_due_calendar():
         ("P1", "2026-04-07T23:00:00"),
         ("Artifact Pitch", "2026-05-16T23:00:00"),
     ]
+
+
+def test_clean_event_title_removes_tbd_placeholder():
+    assert clean_event_title("Lecture — TBD", "lecture") == "Lecture"
+    assert clean_event_title("TBD", "section") == "Section"
+    assert clean_event_title("Lecture", "lecture", "CSE 446") == "Lecture — CSE446"
+    assert clean_event_title("Lecture — TBD", "lecture", "CSE 333") == "Lecture — CSE333"
+    assert clean_event_title("Lecture — — TBD", "lecture", "CSE 446") == "Lecture — CSE446"
+    assert clean_event_title("Lecture — — CSE446", "lecture", "CSE 446") == "Lecture — CSE446"
+
+
+def test_calendar_event_to_unified_removes_tbd_placeholder():
+    assignment, class_event = calendar_event_to_unified(
+        {
+            "title": "Lecture — TBD",
+            "event_kind": "class_event",
+            "event_type": "lecture",
+            "start_time": "2026-05-20T11:30:00",
+            "end_time": "2026-05-20T12:20:00",
+            "all_day": False,
+        },
+        "CSE 333",
+        "https://courses.cs.washington.edu/courses/cse333/26sp/",
+    )
+
+    assert assignment is None
+    assert class_event["event_name"] == "Lecture — CSE333"
+
+
+def test_discover_related_course_links_scores_same_course_pages():
+    soup = BeautifulSoup(
+        """
+        <a href="calendar.html">Weekly Calendar</a>
+        <a href="assignments/">Assignments</a>
+        <a href="syllabus.html">Syllabus</a>
+        <a href="https://example.com/calendar.html">External calendar</a>
+        <a href="staff.html">Staff</a>
+        <a href="files/spec.pdf">Spec PDF</a>
+        """,
+        "html.parser",
+    )
+
+    links = discover_related_course_links(
+        soup,
+        "https://courses.cs.washington.edu/courses/cse333/26sp/",
+        max_links=10,
+    )
+
+    assert "https://courses.cs.washington.edu/courses/cse333/26sp/calendar.html" in links
+    assert "https://courses.cs.washington.edu/courses/cse333/26sp/assignments" in links
+    assert "https://courses.cs.washington.edu/courses/cse333/26sp/syllabus.html" in links
+    assert all("example.com" not in link for link in links)
+    assert all(not link.endswith(".pdf") for link in links)
+
+
+def test_should_probe_common_course_paths_when_nav_is_js_generated():
+    soup = BeautifulSoup(
+        """
+        <script src="site/js/config.js"></script>
+        <a href="./resources/syllabus.html">Syllabus</a>
+        <a href="./resources/styleguide.html">Style Guide</a>
+        """,
+        "html.parser",
+    )
+
+    assert should_probe_common_course_paths(
+        soup,
+        "https://courses.cs.washington.edu/courses/cse421/26sp/",
+    )
+
+
+def test_parse_ical_calendar_events_extracts_course_calendar_rows():
+    events = parse_ical_calendar_events(
+        b"""BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+SUMMARY:421 Lecture
+DESCRIPTION:Logistics\\, Stable Matching
+DTSTART:20260330T133000
+DTEND:20260330T142000
+LOCATION:CSE2 G20
+UID:test-lecture
+X-CREATECAL-EVENTTYPE:lecture
+END:VEVENT
+END:VCALENDAR
+""",
+        "https://courses.cs.washington.edu/courses/cse421/26sp/calendar/calendar-lecture-A.ics",
+    )
+
+    assert events == [{
+        "id": "test-lecture",
+        "title": "421 Lecture",
+        "start_time": "2026-03-30T13:30:00",
+        "end_time": "2026-03-30T14:20:00",
+        "source": "course",
+        "is_fixed": True,
+        "event_kind": "class_event",
+        "event_type": "lecture",
+        "description": "Logistics, Stable Matching",
+        "location": "CSE2 G20",
+        "all_day": False,
+    }]
+
+
+def test_deduplicate_course_import_assignments_collapses_hw_aliases():
+    base = {
+        "assignment_type": "homework",
+        "due_date": "2026-04-08",
+        "due_time": "23:59",
+        "points": None,
+        "description": "",
+        "submission_method": None,
+        "requirements": [],
+        "is_individual": True,
+        "is_group": False,
+        "late_policy": None,
+        "course_name": "cse421",
+        "source_url": "https://courses.cs.washington.edu/courses/cse421/26sp/",
+    }
+
+    assignments = [
+        UnifiedAssignment(**base, assignment_name="HW1"),
+        UnifiedAssignment(**base, assignment_name="Homework 1"),
+    ]
+
+    unique = deduplicate_course_import_assignments(assignments)
+
+    assert [assignment.assignment_name for assignment in unique] == ["HW1"]
+
+
+def test_deduplicate_course_import_assignments_collapses_lab_demo_variants():
+    base = {
+        "assignment_type": "lab",
+        "due_date": "2026-05-22",
+        "points": None,
+        "submission_method": None,
+        "requirements": [],
+        "is_individual": True,
+        "is_group": False,
+        "late_policy": None,
+        "course_name": "CSE 331",
+        "source_url": "https://courses.cs.washington.edu/courses/cse331/26sp/",
+    }
+
+    assignments = [
+        UnifiedAssignment(
+            **base,
+            assignment_name="Lab 7 Demo",
+            due_time=None,
+            description="",
+            estimated_minutes=120,
+        ),
+        UnifiedAssignment(
+            **base,
+            assignment_name="Lab 7 Demos",
+            due_time="23:59",
+            description="Demo Lab 7 functionality to course staff.",
+            estimated_minutes=240,
+        ),
+    ]
+
+    unique = deduplicate_course_import_assignments(assignments)
+
+    assert len(unique) == 1
+    assert unique[0].assignment_name == "Lab 7 Demos"
+    assert unique[0].estimated_minutes == 240
+    assert unique[0].due_time == "23:59"
+
+
+def test_deduplicate_course_import_class_events_collapses_duplicate_lectures():
+    base = {
+        "event_type": "lecture",
+        "date": "2026-05-18",
+        "start_time": "09:30",
+        "end_time": "10:20",
+        "location": None,
+        "description": None,
+        "course_name": "CSE 333",
+        "source_url": "https://courses.cs.washington.edu/courses/cse333/26sp/",
+    }
+
+    events = [
+        UnifiedClassEvent(**base, event_name="Lecture"),
+        UnifiedClassEvent(
+            **{**base, "description": "Virtual Memory"},
+            event_name="Lecture — Virtual Memory",
+        ),
+    ]
+
+    unique = deduplicate_course_import_class_events(events)
+
+    assert [event.event_name for event in unique] == ["Lecture — Virtual Memory"]
+
+
+def test_estimate_assignment_minutes_uses_assignment_complexity():
+    assert estimate_assignment_minutes("Reading 4", "reading") == 90
+    assert estimate_assignment_minutes("HW3", "homework") == 240
+    assert estimate_assignment_minutes("Lab 2", "lab") == 180
+    assert estimate_assignment_minutes(
+        "Final Project Report",
+        "project",
+        "Implement model, run experiments, and write report.",
+        ["code", "experiments", "writeup"],
+    ) == 720
+
+
+def test_merge_parsed_course_data_uses_ai_assignment_estimate():
+    primary = {
+        "course_name": "CSE 331",
+        "class_events": [],
+        "assignments": [{
+            "assignment_name": "HW1",
+            "assignment_type": "homework",
+            "due_date": "2026-04-10",
+            "due_time": None,
+            "description": "",
+            "estimated_minutes": 180,
+        }],
+    }
+    secondary = {
+        "course_name": "CSE 331",
+        "class_events": [],
+        "assignments": [{
+            "assignment_name": "Homework 1",
+            "assignment_type": "homework",
+            "due_date": "2026-04-10",
+            "due_time": "23:59",
+            "description": "Problems 1-8 plus written reflection.",
+            "requirements": ["Problems 1-8", "reflection"],
+            "estimated_minutes": 240,
+        }],
+    }
+
+    merged = merge_parsed_course_data(primary, secondary)
+
+    assert merged["assignments"][0]["estimated_minutes"] == 240
+    assert merged["assignments"][0]["due_time"] == "23:59"
+    assert merged["assignments"][0]["description"] == "Problems 1-8 plus written reflection."
+    assert merged["assignments"][0]["requirements"] == ["Problems 1-8", "reflection"]
+
+
+def test_should_augment_assignment_estimates_with_ai_for_homework_and_labs():
+    assert should_augment_assignment_estimates_with_ai({
+        "assignments": [
+            {"assignment_name": "Lab 2", "assignment_type": "lab", "due_date": "2026-04-10"}
+        ],
+        "class_events": [],
+    })
+    assert not should_augment_assignment_estimates_with_ai({
+        "assignments": [],
+        "class_events": [],
+    })
+
+
+def test_parse_calendar_table_events_applies_homepage_lecture_meeting_time():
+    home_soup = BeautifulSoup(
+        """
+        <main>
+          <h3>Lectures</h3>
+          <p>MWF 12:30 PM - 1:20 PM, AND 205</p>
+        </main>
+        """,
+        "html.parser",
+    )
+    calendar_soup = BeautifulSoup(
+        """
+        <table>
+          <tr><th>Week</th><th>Date</th><th>Type</th><th>Description</th></tr>
+          <tr><td rowspan="3">1</td><td>Mon, Mar 30</td><td>Lecture</td><td>Introduction</td></tr>
+          <tr><td>Wed, Apr 1</td><td>Lecture</td><td>SQL</td></tr>
+          <tr><td>Fri, Apr 18</td><td>Lecture</td><td>Typo weekday still gets lecture time</td></tr>
+        </table>
+        """,
+        "html.parser",
+    )
+
+    events = parse_calendar_table_events(
+        calendar_soup,
+        2026,
+        extract_meeting_patterns(home_soup),
+    )
+
+    assert [(event["title"], event["start_time"], event["end_time"], event["location"]) for event in events] == [
+        ("Lecture — Introduction", "2026-03-30T12:30:00", "2026-03-30T13:20:00", "AND 205"),
+        ("Lecture — SQL", "2026-04-01T12:30:00", "2026-04-01T13:20:00", "AND 205"),
+        (
+            "Lecture — Typo weekday still gets lecture time",
+            "2026-04-18T12:30:00",
+            "2026-04-18T13:20:00",
+            "AND 205",
+        ),
+    ]
+
+
+def test_extract_meeting_patterns_handles_generic_400_level_homepage_formats():
+    soup = BeautifulSoup(
+        """
+        <main>
+          <p>Lectures:</p>
+          <p>MWF 2:30-3:20 in CSE2 G10. Lectures will be recorded.</p>
+          <p>Class: Tue/Thu 11:30am-12:50pm, CSE2 G01</p>
+          <p>Course Time & Location</p>
+          <p>Tuesdays & Thursdays, 10:00-11:20.</p>
+          <p>Room G04.</p>
+          <p>Location: Gates G20</p>
+          <p>Time: Tu/Th 11:30-12:50</p>
+        </main>
+        """,
+        "html.parser",
+    )
+
+    patterns = extract_meeting_patterns(soup)
+
+    assert {
+        (tuple(sorted(pattern["weekdays"])), pattern["start_time"], pattern["end_time"], pattern["location"])
+        for pattern in patterns
+    } >= {
+        ((0, 2, 4), "14:30", "15:20", "CSE2 G10"),
+        ((1, 3), "11:30", "12:50", "CSE2 G01"),
+        ((1, 3), "10:00", "11:20", "Gates G20"),
+        ((1, 3), "11:30", "12:50", "Gates G20"),
+    }
+    assert parse_time_range("12:30-1:20") == ((12, 30), (13, 20))
+
+
+def test_normalize_course_url_adds_current_quarter_for_uw_course_root():
+    spring_2026 = datetime(2026, 5, 25)
+    assert infer_current_uw_quarter(spring_2026) == "26sp"
+    assert normalize_course_url("https://courses.cs.washington.edu/courses/cse391/", spring_2026) == (
+        "https://courses.cs.washington.edu/courses/cse391/26sp/"
+    )
+    assert normalize_course_url("https://courses.cs.washington.edu/courses/cse391/26sp/", spring_2026) == (
+        "https://courses.cs.washington.edu/courses/cse391/26sp/"
+    )

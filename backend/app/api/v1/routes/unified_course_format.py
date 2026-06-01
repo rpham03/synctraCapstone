@@ -30,6 +30,7 @@ class UnifiedAssignment(BaseModel):
     is_individual: bool  # Can submit individually?
     is_group: bool  # Can submit as group?
     late_policy: Optional[str]  # "10% per day", null if no policy
+    estimated_minutes: Optional[int] = None  # Estimated focused work time
     course_name: str  # Which course: "CSE 331"
     source_url: str  # Where it came from
 
@@ -82,6 +83,7 @@ def convert_to_unified_assignment(
         is_individual=raw_assignment.get("is_individual", True),
         is_group=raw_assignment.get("is_group", False),
         late_policy=raw_assignment.get("late_policy"),
+        estimated_minutes=raw_assignment.get("estimated_minutes"),
         course_name=course_name,
         source_url=source_url,
     )

@@ -6,7 +6,7 @@ class TaskModel {
   final int estimatedMinutes;
   final String? courseId;
   final String? courseName;
-  final String source; // 'canvas' | 'manual'
+  final String source; // 'canvas' | 'manual' | 'course'
   final bool isCompleted;
   final String description;
 
@@ -42,6 +42,7 @@ class TaskModel {
         dueDate: DateTime.parse(json['due_date']),
         estimatedMinutes: json['estimated_minutes'],
         courseId: json['course_id'],
+        courseName: json['course_name'] as String?,
         source: json['source'],
         isCompleted: json['is_completed'] ?? false,
         description: json['description'] as String? ?? '',
