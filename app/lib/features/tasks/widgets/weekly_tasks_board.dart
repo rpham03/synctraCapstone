@@ -481,22 +481,20 @@ class _BoardTaskCard extends StatelessWidget {
                       fontWeight: FontWeight.w500,
                     ),
                   ),
+                ] else if (task.source == 'course') ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Course import',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.primary.withValues(alpha: 0.85),
+                    ),
+                  ),
                 ] else if (task.source == 'canvas') ...[
                   const SizedBox(height: 4),
                   Text(
                     'Canvas',
-                    style: theme.textTheme.labelSmall?.copyWith(color: cs.primary.withValues(alpha: 0.85)),
-                  ),
-                ],
-                if (task.description.trim().isNotEmpty && !done) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    task.description.trim(),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: cs.onSurfaceVariant,
-                      height: 1.3,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.primary.withValues(alpha: 0.85),
                     ),
                   ),
                 ],

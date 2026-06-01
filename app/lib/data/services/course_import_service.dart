@@ -80,7 +80,14 @@ class CourseImportService {
   Future<List<TaskModel>> loadCachedTasks() async {
     final cached = await _loadLocalCachedTasks();
     final imported = await _loadTasksFromImportedAssignmentEvents(cached);
-    return _mergeCourseTasks(cached: cached, imported: imported);
+    return _mergeCourseTasks(cached: cached, imported: imported)
+        .map(_withoutImportedDescription)
+        .toList();
+  }
+
+  TaskModel _withoutImportedDescription(TaskModel task) {
+    if (task.source == 'manual' || task.description.isEmpty) return task;
+    return task.copyWith(description: '');
   }
 
   Future<List<TaskModel>> _loadLocalCachedTasks() async {
@@ -176,7 +183,7 @@ class CourseImportService {
             courseName: courseNameById[courseImportId],
             source: 'course',
             isCompleted: existingTask?.isCompleted ?? false,
-            description: _descriptionWithoutEstimate(description),
+            description: '',
           ),
         );
       }
@@ -397,7 +404,7 @@ class CourseImportService {
         courseName: courseName,
         source: 'course',
         isCompleted: existingTask?.isCompleted ?? false,
-        description: assignment['description'] as String? ?? '',
+        description: '',
       );
     }).toList();
   }
@@ -501,18 +508,6 @@ class CourseImportService {
     final total = hours * 60 + minutes;
     if (total <= 0) return null;
     return _normalizedEstimatedMinutes(total);
-  }
-
-  String _descriptionWithoutEstimate(String? rawDescription) {
-    final description = rawDescription?.trim() ?? '';
-    if (description.isEmpty) return '';
-    return description
-        .replaceFirst(
-          RegExp(r'^Estimated time:\s*[^\n\r]*(\r?\n){0,2}',
-              caseSensitive: false),
-          '',
-        )
-        .trim();
   }
 
   String _descriptionWithEstimate(String? rawDescription, int? minutes) {
