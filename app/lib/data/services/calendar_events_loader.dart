@@ -13,6 +13,7 @@ import 'course_import_service.dart';
 import '../../shared/services/canvas_tasks_service.dart';
 import '../../shared/services/suggested_schedule_store.dart';
 import '../../shared/utils/calendar_display_utils.dart';
+import '../../shared/utils/manual_tasks_calendar.dart';
 import '../../shared/utils/local_time_format.dart';
 import '../../shared/utils/task_timeline_utils.dart';
 
@@ -30,6 +31,7 @@ class CalendarEventsLoader {
     await _loadIcalFeeds(events);
     await _loadCourseImports(events);
     await _loadManualEvents(events);
+    await _loadManualTaskEvents(events);
     await _loadCanvasDueEvents(events);
 
     final deduped = CalendarDisplayUtils.dedupeCalendarEvents(events);
@@ -146,6 +148,12 @@ class CalendarEventsLoader {
         final events = await service.loadEventsForImport(rec.id);
         out.addAll(events);
       }
+    } catch (_) {}
+  }
+
+  static Future<void> _loadManualTaskEvents(List<EventModel> out) async {
+    try {
+      out.addAll(await ManualTasksCalendar.loadEvents());
     } catch (_) {}
   }
 

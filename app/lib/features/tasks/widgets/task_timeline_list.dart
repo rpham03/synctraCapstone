@@ -55,9 +55,13 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
   }
 
   void _scheduleWhenVisible(VoidCallback action) {
+    // Wait two frames so dialog routes finish disposing before scrolling.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_isRouteVisible()) return;
-      action();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_isRouteVisible()) return;
+        action();
+      });
     });
   }
 
@@ -80,6 +84,9 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
     if (widget.tasks.length > oldWidget.tasks.length &&
         _scrollAnchorMaxExtent != null) {
       _scheduleWhenVisible(_restoreScrollAnchor);
+    } else if (widget.tasks.length < oldWidget.tasks.length) {
+      // Deleting a task — keep scroll position; avoid ensureVisible during rebuild.
+      return;
     } else if (oldWidget.tasks.length != widget.tasks.length) {
       _didInitialScroll = false;
       _scheduleWhenVisible(_scrollToToday);
@@ -110,9 +117,9 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
   }
 
   void _scrollToToday() {
-    if (_didInitialScroll || !_isRouteVisible()) return;
+    if (_didInitialScroll || !_isRouteVisible() || !mounted) return;
     final ctx = _todayKey.currentContext;
-    if (ctx == null) return;
+    if (ctx == null || !ctx.mounted) return;
     _didInitialScroll = true;
     Scrollable.ensureVisible(
       ctx,

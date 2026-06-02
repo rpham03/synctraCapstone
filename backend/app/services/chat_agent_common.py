@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from app.services import chat_agent_tools
+from app.services.chat_client_context import append_schedule_proposals
 
 
 def system_instructions() -> str:
@@ -42,7 +43,7 @@ For study planning, use estimated_minutes from tasks when proposing blocks via p
 The app sends calendar busy times and tasks with each message; find_free_slots and propose_schedule_change use them.
 Do not invent assignment due dates or calendar events.
 Never print debug summaries, raw JSON, or empty lists like "Busy: []" or "Tasks: []" to the user — answer in natural language only.
-When you propose schedule changes, remind the user that proposals are not saved until they confirm in the app.
+When you propose schedule changes, the app adds those study blocks to the calendar right away.
 Be concise and practical."""
 
 TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
@@ -279,10 +280,14 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             }
         return chat_agent_tools.list_tasks_for_range(start, end)
     if tool == "propose_schedule_change":
-        return chat_agent_tools.propose_schedule_change(
+        result = chat_agent_tools.propose_schedule_change(
             params.get("task_name") or "Study block",
             params.get("hours", 1.0),
             params.get("deadline") or "",
             estimated_minutes=params.get("estimated_minutes"),
         )
+        proposal = result.get("proposal")
+        if isinstance(proposal, list):
+            append_schedule_proposals(proposal)
+        return result
     return {"error": f"Unknown tool: {tool}"}

@@ -37,6 +37,12 @@ class EventModel {
   bool get isCourseAssignment =>
       source == 'course' && (sourceEventId?.contains('assignment') ?? false);
 
+  bool get isManualTask => source == 'manual_task';
+
+  /// Due-date chip on the calendar (not a timed block).
+  bool get isDueDateChip =>
+      isManualTask || isCourseAssignment || source == 'canvas';
+
   int? get estimatedMinutes {
     final match = RegExp(r'^Estimated time:\s*([^\n]+)', multiLine: true)
         .firstMatch(description);

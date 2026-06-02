@@ -140,88 +140,20 @@ class _CollabScreenState extends State<CollabScreen> {
   }
 
   Future<void> _newGroupEvent() async {
-    final titleCtrl = TextEditingController();
-    DateTime day = DateTime.now().add(const Duration(days: 1));
-    var startT = const TimeOfDay(hour: 15, minute: 0);
-    var endT = const TimeOfDay(hour: 16, minute: 0);
-
-    final ok = await showDialog<bool>(
+    final result = await showDialog<_NewGroupEventResult>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModal) {
-          return AlertDialog(
-            title: const Text('New group event'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: titleCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Title',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  ListTile(
-                    title: Text(MaterialLocalizations.of(ctx).formatMediumDate(day)),
-                    trailing: const Icon(Icons.calendar_today),
-                    onTap: () async {
-                      final d = await showDatePicker(
-                        context: ctx,
-                        initialDate: day,
-                        firstDate: DateTime.now(),
-                        lastDate: DateTime.now().add(const Duration(days: 365)),
-                      );
-                      if (d != null) setModal(() => day = d);
-                    },
-                  ),
-                  ListTile(
-                    title: Text('${startT.format(ctx)} – ${endT.format(ctx)}'),
-                    trailing: const Icon(Icons.schedule),
-                    onTap: () async {
-                      final s = await showTimePicker(context: ctx, initialTime: startT);
-                      if (s == null || !ctx.mounted) return;
-                      final e = await showTimePicker(context: ctx, initialTime: endT);
-                      if (e == null || !ctx.mounted) return;
-                      setModal(() {
-                        startT = s;
-                        endT = e;
-                      });
-                    },
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Create')),
-            ],
-          );
-        },
-      ),
+      builder: (ctx) => const _NewGroupEventDialog(),
     );
 
-    if (ok != true || !mounted) {
-      titleCtrl.dispose();
-      return;
-    }
-    final title = titleCtrl.text.trim();
-    titleCtrl.dispose();
-    if (title.isEmpty) return;
-
-    final start = DateTime(day.year, day.month, day.day, startT.hour, startT.minute);
-    var end = DateTime(day.year, day.month, day.day, endT.hour, endT.minute);
-    if (!end.isAfter(start)) {
-      end = start.add(const Duration(hours: 1));
-    }
+    if (result == null || !mounted) return;
 
     setState(() {
       _sessions.add(
         _GroupSession(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
-          title: title,
-          start: start,
-          end: end,
+          title: result.title,
+          start: result.start,
+          end: result.end,
         ),
       );
     });
@@ -332,35 +264,50 @@ class _FeatureCard extends StatelessWidget {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: color.withAlpha(30),
-              child: Icon(icon, color: color),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  radius: 24,
+                  backgroundColor: color.withAlpha(30),
+                  child: Icon(icon, color: color),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            FilledButton(
-              onPressed: onTap,
-              style: FilledButton.styleFrom(backgroundColor: color),
-              child: Text(buttonLabel, style: const TextStyle(fontSize: 12)),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: onTap,
+                style: FilledButton.styleFrom(
+                  backgroundColor: color,
+                  visualDensity: VisualDensity.compact,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(buttonLabel, style: const TextStyle(fontSize: 12)),
+              ),
             ),
           ],
         ),
@@ -378,6 +325,141 @@ class _EmptyCollab extends StatelessWidget {
       icon: Icons.people_outline,
       title: 'No group sessions yet',
       message: 'Invite teammates and add a group event to get started.',
+    );
+  }
+}
+
+class _NewGroupEventResult {
+  final String title;
+  final DateTime start;
+  final DateTime end;
+
+  const _NewGroupEventResult({
+    required this.title,
+    required this.start,
+    required this.end,
+  });
+}
+
+/// Owns [TextEditingController]s so they are not disposed before the route closes.
+class _NewGroupEventDialog extends StatefulWidget {
+  const _NewGroupEventDialog();
+
+  @override
+  State<_NewGroupEventDialog> createState() => _NewGroupEventDialogState();
+}
+
+class _NewGroupEventDialogState extends State<_NewGroupEventDialog> {
+  late final TextEditingController _titleCtrl;
+  late DateTime _day;
+  var _startT = const TimeOfDay(hour: 15, minute: 0);
+  var _endT = const TimeOfDay(hour: 16, minute: 0);
+
+  @override
+  void initState() {
+    super.initState();
+    _titleCtrl = TextEditingController();
+    _day = DateTime.now().add(const Duration(days: 1));
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final title = _titleCtrl.text.trim();
+    if (title.isEmpty) return;
+
+    final start = DateTime(
+      _day.year,
+      _day.month,
+      _day.day,
+      _startT.hour,
+      _startT.minute,
+    );
+    var end = DateTime(
+      _day.year,
+      _day.month,
+      _day.day,
+      _endT.hour,
+      _endT.minute,
+    );
+    if (!end.isAfter(start)) {
+      end = start.add(const Duration(hours: 1));
+    }
+
+    Navigator.pop(
+      context,
+      _NewGroupEventResult(title: title, start: start, end: end),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('New group event'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _titleCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Title',
+                border: OutlineInputBorder(),
+              ),
+              textCapitalization: TextCapitalization.sentences,
+              autofocus: true,
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(MaterialLocalizations.of(context).formatMediumDate(_day)),
+              trailing: const Icon(Icons.calendar_today),
+              onTap: () async {
+                final picked = await showDatePicker(
+                  context: context,
+                  initialDate: _day,
+                  firstDate: DateTime.now(),
+                  lastDate: DateTime.now().add(const Duration(days: 365)),
+                );
+                if (picked != null && mounted) {
+                  setState(() => _day = picked);
+                }
+              },
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text('${_startT.format(context)} – ${_endT.format(context)}'),
+              trailing: const Icon(Icons.schedule),
+              onTap: () async {
+                final start = await showTimePicker(
+                  context: context,
+                  initialTime: _startT,
+                );
+                if (start == null || !mounted) return;
+                final end = await showTimePicker(
+                  context: context,
+                  initialTime: _endT,
+                );
+                if (end == null || !mounted) return;
+                setState(() {
+                  _startT = start;
+                  _endT = end;
+                });
+              },
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Create')),
+      ],
     );
   }
 }

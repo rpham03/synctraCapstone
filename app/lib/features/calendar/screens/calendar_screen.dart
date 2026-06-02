@@ -21,13 +21,17 @@ import '../../../data/models/schedule_block_model.dart';
 import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/services/llm_service.dart';
-import '../../../shared/services/schedule_chat_coordinator.dart';
+import '../../../shared/services/synctra_chat_constants.dart';
+import '../../../shared/services/synctra_chat_service.dart';
 import '../../../shared/services/scheduling_service.dart';
 import '../../../shared/services/suggested_schedule_store.dart';
 import '../../../shared/state/calendar_shell_bridge.dart';
 import '../../../shared/state/shell_sidebar_controller.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
+import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/utils/calendar_display_utils.dart';
+import '../../../shared/utils/manual_tasks_calendar.dart';
+import '../../../shared/utils/task_schedule_utils.dart';
 import '../../../shared/widgets/synctra_chat_panel.dart';
 import '../../../shared/widgets/sync_it_chrome.dart';
 
@@ -49,6 +53,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   final List<EventModel> _fixedEvents = [];
   final List<EventModel> _canvasEvents = [];
+  final List<EventModel> _manualTaskEvents = [];
   late final SuggestedScheduleStore _scheduleStore;
   late final CanvasTasksService _canvasTasks;
   late final CourseImportService _courseImportService;
@@ -73,9 +78,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _courseImportService = CourseImportService();
     _canvasTasks.addListener(_reloadCanvasEvents);
     CourseImportTasksBridge.instance.addListener(_handleCourseImportsRefresh);
+    ManualTasksBridge.instance.addListener(_handleManualTasksRefresh);
     _scheduleStore.addListener(_onScheduleStoreChanged);
     _loadSavedFeeds();
     _loadManualEvents();
+    _loadManualTaskEvents();
     _loadCourseImports();
     _reloadCanvasEvents();
     _nowTicker = Timer.periodic(const Duration(minutes: 1), (_) {
@@ -95,6 +102,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _loadCourseImports();
   }
 
+  void _handleManualTasksRefresh() {
+    _loadManualTaskEvents();
+  }
+
+  Future<void> _loadManualTaskEvents() async {
+    final events = await ManualTasksCalendar.loadEvents();
+    if (!mounted) return;
+    setState(() {
+      _manualTaskEvents
+        ..clear()
+        ..addAll(events);
+    });
+    _pushExternalBusyToStore();
+  }
+
   void _pushExternalBusyToStore() {
     _scheduleStore.setExternalBusy(_allEvents());
   }
@@ -105,6 +127,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _canvasTasks.removeListener(_reloadCanvasEvents);
     CourseImportTasksBridge.instance
         .removeListener(_handleCourseImportsRefresh);
+    ManualTasksBridge.instance.removeListener(_handleManualTasksRefresh);
     _scheduleStore.removeListener(_onScheduleStoreChanged);
     _nowTicker?.cancel();
     _timeScrollController.dispose();
@@ -116,6 +139,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
       yield e;
     }
     for (final e in _canvasEvents) {
+      yield e;
+    }
+    for (final e in _manualTaskEvents) {
       yield e;
     }
     for (final list in _feedEvents.values) {
@@ -262,6 +288,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
   List<EventModel> _courseAllDayOnDay(DateTime day) =>
       CalendarDisplayUtils.courseAllDayOnDay(_allEvents(), day);
 
+  List<EventModel> _manualTasksOnDay(DateTime day) =>
+      CalendarDisplayUtils.manualTasksOnDay(_allEvents(), day);
+
   List<ScheduleBlockModel> _blocksOnDay(DateTime day) =>
       _scheduleStore.blocks.where((b) => isSameDay(b.startTime, day)).toList();
 
@@ -399,23 +428,20 @@ class _CalendarScreenState extends State<CalendarScreen> {
           Navigator.pop(sheetCtx);
           _openEditEvent(event);
         },
-        onScheduleStudy: () {
+        onScheduleStudy: () async {
           Navigator.pop(sheetCtx);
           final mins = event.estimatedMinutes ??
               event.endTime.difference(event.startTime).inMinutes;
           final hours = (mins / 60.0).clamp(0.5, 4.0);
-          final msg =
-              GetIt.instance<ScheduleChatCoordinator>().scheduleStudyForDueItem(
-            taskId: event.source == 'canvas'
-                ? 'cv-${event.id.replaceFirst('canvas-', '')}'
-                : 'cv-${event.id}',
+          final result =
+              await GetIt.instance<SynctraChatService>().scheduleStudyForDueItem(
             title: event.title,
             dueDate: event.startTime,
             hours: hours < 0.5 ? 1.5 : hours,
           );
           if (mounted) {
             ScaffoldMessenger.of(context)
-                .showSnackBar(SnackBar(content: Text(msg)));
+                .showSnackBar(SnackBar(content: Text(result.reply)));
           }
         },
         onDelete: () => _confirmDeleteEvent(event, sheetCtx),
@@ -433,6 +459,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
         return 'Remove this assignment from Synctra? It stays on Canvas until you sync again.';
       case 'course':
         return 'Remove this from your imported course and the Tasks tab?';
+      case 'manual_task':
+        return 'Remove this task from Synctra and the Tasks tab?';
       case 'manual':
         return 'Delete this event from your calendar?';
       default:
@@ -477,6 +505,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
       await _canvasTasks.reloadFromCache();
     } else if (event.source == 'course') {
       CourseImportTasksBridge.instance.refresh();
+    } else if (event.source == 'manual_task') {
+      ManualTasksBridge.instance.refresh();
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -499,6 +529,10 @@ class _CalendarScreenState extends State<CalendarScreen> {
       case 'course':
         await _courseImportService.removeEventForCalendar(event);
         _fixedEvents.removeWhere((e) => e.id == event.id);
+      case 'manual_task':
+        final taskId = event.id.replaceFirst('manual-task-', '');
+        await ManualTasksCalendar.removeTaskById(taskId);
+        _manualTaskEvents.removeWhere((e) => e.id == event.id);
       default:
         if (event.source.startsWith('ical')) {
           for (final list in _feedEvents.values) {
@@ -697,6 +731,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
           await _loadCourseImports();
         }
         CourseImportTasksBridge.instance.refresh();
+      case 'manual_task':
+        await ManualTasksCalendar.updateTaskFromEvent(original, updated);
+        final mi = _manualTaskEvents.indexWhere((e) => e.id == original.id);
+        if (mi >= 0) {
+          setState(() => _manualTaskEvents[mi] = updated);
+        } else {
+          await _loadManualTaskEvents();
+        }
+        ManualTasksBridge.instance.refresh();
       default:
         if (original.source.startsWith('ical')) {
           for (final list in _feedEvents.values) {
@@ -776,6 +819,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       timedEventsOnDay: _timedEventsOnDay,
       canvasOnDay: _canvasChipsOnDay,
       courseAllDayOnDay: _courseAllDayOnDay,
+      manualTasksOnDay: _manualTasksOnDay,
       blocksOnDay: _blocksOnDay,
       visibleDays: _visibleDays(),
       viewModeEnum: _viewMode,
@@ -792,12 +836,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
   }
 
-  static const _calendarChatChips = [
-    'Plan this week',
-    'Add 2h study tomorrow',
-    "What's on my calendar?",
-    'Move my study block to Friday',
-  ];
+  static const _calendarChatChips = SynctraChatConstants.suggestionChips;
 
   void _toggleAiChat() {
     setState(() => _calendarChatOpen = !_calendarChatOpen);
@@ -945,6 +984,7 @@ class _CalendarMainPanel extends StatelessWidget {
   final List<EventModel> Function(DateTime) timedEventsOnDay;
   final List<EventModel> Function(DateTime) canvasOnDay;
   final List<EventModel> Function(DateTime) courseAllDayOnDay;
+  final List<EventModel> Function(DateTime) manualTasksOnDay;
   final List<ScheduleBlockModel> Function(DateTime) blocksOnDay;
   final List<DateTime> visibleDays;
   final _CalendarViewMode viewModeEnum;
@@ -984,6 +1024,7 @@ class _CalendarMainPanel extends StatelessWidget {
     required this.timedEventsOnDay,
     required this.canvasOnDay,
     required this.courseAllDayOnDay,
+    required this.manualTasksOnDay,
     required this.blocksOnDay,
     required this.visibleDays,
     required this.viewModeEnum,
@@ -1057,6 +1098,7 @@ class _CalendarMainPanel extends StatelessWidget {
                     timedEventsOnDay: timedEventsOnDay,
                     canvasOnDay: canvasOnDay,
                     courseAllDayOnDay: courseAllDayOnDay,
+                    manualTasksOnDay: manualTasksOnDay,
                     blocksOnDay: blocksOnDay,
                     onOpenEvent: onOpenEvent,
                     onTapBlock: onTapBlock,
@@ -1426,7 +1468,7 @@ class _DayAgendaItem {
     required this.accentSurface,
   });
 
-  factory _DayAgendaItem.fromEvent(EventModel event) {
+  factory _DayAgendaItem.fromEvent(EventModel event, {DateTime? viewDay}) {
     final (title, course) = _chipTitleParts(event.title);
     final displayTitle =
         course != null ? '$course · $title' : title.trim();
@@ -1434,6 +1476,7 @@ class _DayAgendaItem {
     final accent = switch (event.source) {
       'canvas' => AppColors.canvasAssignment,
       'course' => AppColors.deadline,
+      'manual_task' => AppColors.manualTask,
       'manual' => AppColors.fixedEvent,
       _ when event.source.startsWith('ical') => AppColors.icalAccent,
       _ => AppColors.primary,
@@ -1442,14 +1485,23 @@ class _DayAgendaItem {
     final typeLabel = switch (event.source) {
       'canvas' => 'Canvas',
       'course' => 'Course',
+      'manual_task' => 'Your task',
       'manual' => 'Event',
       _ when event.source.startsWith('ical') => 'iCal',
       _ => 'Calendar',
     };
 
     String timeLabel;
-    if (event.isDateOnlyCourseEvent) {
-      timeLabel = 'Due today';
+    if (event.isManualTask) {
+      timeLabel = manualTaskDayLabel(
+        viewDay: viewDay ?? event.endTime,
+        rangeStart: event.startTime,
+        rangeEnd: event.endTime,
+      );
+    } else if (event.isDateOnlyCourseEvent || event.isCourseAssignment) {
+      timeLabel = viewDay != null && isSameDay(event.startTime, viewDay)
+          ? 'Due today'
+          : 'Due ${DateFormat('MMM d').format(event.startTime)}';
     } else {
       final end = event.endTime;
       timeLabel = end.isAfter(event.startTime)
@@ -1518,7 +1570,7 @@ class _CalendarMonthView extends StatelessWidget {
     final items = <_DayAgendaItem>[];
     for (final raw in eventsForDay(day)) {
       if (raw is EventModel) {
-        items.add(_DayAgendaItem.fromEvent(raw));
+        items.add(_DayAgendaItem.fromEvent(raw, viewDay: day));
       } else if (raw is ScheduleBlockModel) {
         items.add(_DayAgendaItem.fromBlock(raw));
       }
@@ -2080,11 +2132,9 @@ class _MonthTableCalendar extends StatelessWidget {
 /// Day name + date above each column (aligned with the time grid).
 class _WeekDayHeaderRow extends StatelessWidget {
   final List<DateTime> days;
-  final DateTime selectedDay;
 
   const _WeekDayHeaderRow({
     required this.days,
-    required this.selectedDay,
   });
 
   @override
@@ -2127,9 +2177,6 @@ class _WeekDayHeaderRow extends StatelessWidget {
                     decoration: BoxDecoration(
                       border: Border(
                           left: BorderSide(color: scheme.outlineVariant)),
-                      color: isSameDay(d, selectedDay)
-                          ? scheme.primary.withValues(alpha: 0.06)
-                          : null,
                     ),
                     padding:
                         const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
@@ -2236,6 +2283,7 @@ class _WeekDayTimeGrid extends StatefulWidget {
   final List<EventModel> Function(DateTime) timedEventsOnDay;
   final List<EventModel> Function(DateTime) canvasOnDay;
   final List<EventModel> Function(DateTime) courseAllDayOnDay;
+  final List<EventModel> Function(DateTime) manualTasksOnDay;
   final List<ScheduleBlockModel> Function(DateTime) blocksOnDay;
   final void Function(EventModel) onOpenEvent;
   final void Function(ScheduleBlockModel) onTapBlock;
@@ -2255,6 +2303,7 @@ class _WeekDayTimeGrid extends StatefulWidget {
     required this.timedEventsOnDay,
     required this.canvasOnDay,
     required this.courseAllDayOnDay,
+    required this.manualTasksOnDay,
     required this.blocksOnDay,
     required this.onOpenEvent,
     required this.onTapBlock,
@@ -2346,12 +2395,12 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
       children: [
         _WeekDayHeaderRow(
           days: widget.days,
-          selectedDay: widget.selectedDay,
         ),
         _AllDayAssignmentStrip(
           days: widget.days,
           canvasOnDay: widget.canvasOnDay,
           courseAllDayOnDay: widget.courseAllDayOnDay,
+          manualTasksOnDay: widget.manualTasksOnDay,
           onOpenEvent: widget.onOpenEvent,
         ),
         Expanded(
@@ -2378,7 +2427,6 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
                               child: _DayTimeColumn(
                                 day: d,
                                 isToday: isSameDay(d, now),
-                                isSelected: isSameDay(d, widget.selectedDay),
                                 firstHour: widget.firstHour,
                                 lastHour: widget.lastHour,
                                 hourHeight: widget.hourHeight,
@@ -2409,12 +2457,14 @@ class _AllDayAssignmentStrip extends StatelessWidget {
   final List<DateTime> days;
   final List<EventModel> Function(DateTime) canvasOnDay;
   final List<EventModel> Function(DateTime) courseAllDayOnDay;
+  final List<EventModel> Function(DateTime) manualTasksOnDay;
   final void Function(EventModel) onOpenEvent;
 
   const _AllDayAssignmentStrip({
     required this.days,
     required this.canvasOnDay,
     required this.courseAllDayOnDay,
+    required this.manualTasksOnDay,
     required this.onOpenEvent,
   });
 
@@ -2422,7 +2472,10 @@ class _AllDayAssignmentStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final maxChips = days
-        .map((d) => canvasOnDay(d).length + courseAllDayOnDay(d).length)
+        .map((d) =>
+            canvasOnDay(d).length +
+            courseAllDayOnDay(d).length +
+            manualTasksOnDay(d).length)
         .fold<int>(0, (a, b) => a > b ? a : b);
     final rowHeight = maxChips == 0 ? 36.0 : 28.0 + maxChips * 26.0;
 
@@ -2472,6 +2525,15 @@ class _AllDayAssignmentStrip extends StatelessWidget {
                         child: _AllDayEventChip(
                           event: a,
                           color: AppColors.canvasAssignment,
+                          onTap: () => onOpenEvent(a),
+                        ),
+                      ),
+                    for (final a in manualTasksOnDay(d))
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: _AllDayEventChip(
+                          event: a,
+                          color: AppColors.manualTask,
                           onTap: () => onOpenEvent(a),
                         ),
                       ),
@@ -2649,7 +2711,6 @@ class _TimeGutter extends StatelessWidget {
 class _DayTimeColumn extends StatelessWidget {
   final DateTime day;
   final bool isToday;
-  final bool isSelected;
   final int firstHour;
   final int lastHour;
   final double hourHeight;
@@ -2666,7 +2727,6 @@ class _DayTimeColumn extends StatelessWidget {
   const _DayTimeColumn({
     required this.day,
     required this.isToday,
-    required this.isSelected,
     required this.firstHour,
     required this.lastHour,
     required this.hourHeight,
@@ -2768,10 +2828,6 @@ class _DayTimeColumn extends StatelessWidget {
             isToday ? scheme.primary.withValues(alpha: 0.04) : scheme.surface,
         border: Border(
           left: BorderSide(color: scheme.outlineVariant),
-          right: BorderSide(
-            color: isSelected ? scheme.primary : Colors.transparent,
-            width: isSelected ? 2 : 0,
-          ),
         ),
       ),
       child: LayoutBuilder(
@@ -3266,6 +3322,8 @@ class _CalendarEventDetailSheet extends StatelessWidget {
         return 'Canvas';
       case 'course':
         return 'Course import';
+      case 'manual_task':
+        return 'Your task';
       case 'manual':
         return 'Your event';
       default:

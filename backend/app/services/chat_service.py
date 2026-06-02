@@ -9,6 +9,7 @@ from app.core.config.settings import settings
 from app.services.chat_agent_common import sanitize_chat_reply
 from app.services.chat_client_context import (
     clear_client_context,
+    get_schedule_proposals,
     set_calendar_events,
     set_client_today,
     set_tasks,
@@ -58,10 +59,10 @@ class ChatService:
         client_today: str | None = None,
         timezone_offset_minutes: int | None = None,
         timezone_name: str | None = None,
-    ) -> str:
+    ) -> tuple[str, list[dict[str, Any]]]:
         text = user_message.strip()
         if not text:
-            return "Send me a message about your schedule or tasks."
+            return "Send me a message about your schedule or tasks.", []
 
         set_calendar_events(calendar_events)
         set_tasks(tasks)
@@ -73,7 +74,7 @@ class ChatService:
         finally:
             clear_client_context()
 
-    async def _process_message_inner(self, text: str, user_id: str) -> str:
+    async def _process_message_inner(self, text: str, user_id: str) -> tuple[str, list[dict[str, Any]]]:
         provider = self._provider()
         use_ollama = provider == "ollama" or (
             provider == "auto" and not (settings.openai_api_key or "").strip()
@@ -89,14 +90,15 @@ class ChatService:
                 reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)
-                return reply
+                return reply, get_schedule_proposals()
             except Exception as e:
                 if use_openai and (settings.openai_api_key or "").strip():
                     pass  # fall through to OpenAI
                 else:
                     return (
                         f"{str(e)[:500]}. "
-                        "Use a tool-capable model, e.g. ollama pull llama3.2"
+                        "Use a tool-capable model, e.g. ollama pull llama3.2",
+                        [],
                     )
 
         if use_openai and (settings.openai_api_key or "").strip():
@@ -106,14 +108,15 @@ class ChatService:
                 reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)
-                return reply
+                return reply, get_schedule_proposals()
             except Exception as e:
                 return (
                     f"I hit an error talking to the AI service: {str(e)[:400]}. "
-                    "Check OPENAI_API_KEY and billing, or set CHAT_LLM_PROVIDER=ollama."
+                    "Check OPENAI_API_KEY and billing, or set CHAT_LLM_PROVIDER=ollama.",
+                    [],
                 )
 
-        return self._fallback_reply(text.lower())
+        return self._fallback_reply(text.lower()), []
 
     def _fallback_reply(self, text: str) -> str:
         """Keyword routing when no LLM is available."""

@@ -1,12 +1,12 @@
 // Embedded Synctra AI chat — used on Chat tab and beside the weekly task board.
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:get_it/get_it.dart';
 import 'package:intl/intl.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/constants/api_constants.dart';
 import '../../data/models/chat_message_model.dart';
-import '../../data/services/calendar_events_loader.dart';
+import '../services/synctra_chat_constants.dart';
+import '../services/synctra_chat_service.dart';
+import '../services/synctra_chat_store.dart';
 import 'sync_it_chrome.dart';
 
 class SynctraChatPanel extends StatefulWidget {
@@ -37,92 +37,45 @@ class SynctraChatPanel extends StatefulWidget {
 class _SynctraChatPanelState extends State<SynctraChatPanel> {
   final _ctrl = TextEditingController();
   final _scrollCtrl = ScrollController();
-  bool _loading = false;
 
-  static const _welcome =
-      "Hi! I'm Synctra. Ask me to add or move study blocks — changes appear on your calendar right away.";
+  SynctraChatService get _chat => GetIt.instance<SynctraChatService>();
+  SynctraChatStore get _store => GetIt.instance<SynctraChatStore>();
 
-  final List<ChatMessageModel> _messages = [
-    ChatMessageModel(
-      id: 'welcome',
-      content: _welcome,
-      role: MessageRole.assistant,
-      timestamp: DateTime.now(),
-    ),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _store.addListener(_onStoreChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  }
 
   @override
   void dispose() {
+    _store.removeListener(_onStoreChanged);
     _ctrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
 
-  Future<String> _resolveReply(String userText) async {
-    try {
-      final calendarEvents = await CalendarEventsLoader.loadForChat();
-      final tasks = await CalendarEventsLoader.loadTasksForChat();
-      final uid = Supabase.instance.client.auth.currentUser?.id ?? 'app-user';
-      final response = await Dio().post<Map<String, dynamic>>(
-        '${ApiConstants.baseUrl}/chat/message',
-        data: {
-          'message': userText,
-          'user_id': uid,
-          'client_today': CalendarEventsLoader.clientTodayIso(),
-          'timezone_offset_minutes': DateTime.now().timeZoneOffset.inMinutes,
-          'timezone_name': DateTime.now().timeZoneName,
-          'calendar_events': calendarEvents,
-          'tasks': tasks,
-        },
-      );
-      return response.data?['reply']?.toString() ??
-          'Sorry, I did not get a reply from the server.';
-    } on DioException catch (e) {
-      final data = e.response?.data;
-      if (data is Map && data['detail'] != null) {
-        return data['detail'].toString();
-      }
-      if (e.type == DioExceptionType.connectionError ||
-          e.error?.toString().contains('Connection refused') == true) {
-        return 'Cannot reach the Synctra backend at ${ApiConstants.baseUrl}. '
-            'Start it on your Mac with:\n'
-            'cd backend && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000';
-      }
-      return e.message ?? 'Could not reach the chat API';
-    } catch (e) {
-      return '$e';
+  void _onStoreChanged() {
+    if (mounted) {
+      setState(() {});
+      _scrollToBottom();
     }
   }
 
   Future<void> _send() async {
     final text = _ctrl.text.trim();
-    if (text.isEmpty || _loading) return;
+    if (text.isEmpty || _store.loading) return;
 
-    setState(() {
-      _messages.add(ChatMessageModel(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        content: text,
-        role: MessageRole.user,
-        timestamp: DateTime.now(),
-      ));
-      _loading = true;
-    });
+    _store.addUserMessage(text);
+    _store.setLoading(true);
     _ctrl.clear();
-    _scrollToBottom();
 
-    final reply = await _resolveReply(text);
+    final reply = await _chat.sendMessage(text);
 
     if (!mounted) return;
-    setState(() {
-      _messages.add(ChatMessageModel(
-        id: '${DateTime.now().millisecondsSinceEpoch}_resp',
-        content: reply,
-        role: MessageRole.assistant,
-        timestamp: DateTime.now(),
-      ));
-      _loading = false;
-    });
-    _scrollToBottom();
+    _store.addAssistantMessage(reply.reply);
+    _store.setLoading(false);
   }
 
   void _scrollToBottom() {
@@ -138,22 +91,13 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
   }
 
   void _clearChat() {
-    setState(() {
-      _messages
-        ..clear()
-        ..add(
-          ChatMessageModel(
-            id: 'welcome',
-            content: _welcome,
-            role: MessageRole.assistant,
-            timestamp: DateTime.now(),
-          ),
-        );
-    });
+    _store.resetToWelcome();
   }
 
   @override
   Widget build(BuildContext context) {
+    final messages = _store.messages;
+    final loading = _store.loading;
     final scheme = Theme.of(context).colorScheme;
     final theme = Theme.of(context).textTheme;
     final hPad = widget.compact ? 12.0 : 16.0;
@@ -215,26 +159,28 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
             child: ListView.builder(
               controller: _scrollCtrl,
               padding: EdgeInsets.fromLTRB(hPad, 10, hPad, 6),
-              itemCount: _messages.length + (_loading ? 1 : 0),
+              itemCount: messages.length + (loading ? 1 : 0),
               itemBuilder: (_, i) {
-                if (_loading && i == _messages.length) {
+                if (loading && i == messages.length) {
                   return _TypingIndicator(compact: widget.compact);
                 }
                 return _MessageBubble(
-                  message: _messages[i],
+                  message: messages[i],
                   maxWidthFactor: maxBubbleW,
                   compact: widget.compact,
                 );
               },
             ),
           ),
-          if (widget.suggestionChips != null && widget.suggestionChips!.isNotEmpty)
+          if ((widget.suggestionChips ?? SynctraChatConstants.suggestionChips)
+              .isNotEmpty)
             SizedBox(
               height: widget.compact ? 34 : 36,
               child: ListView(
                 scrollDirection: Axis.horizontal,
                 padding: EdgeInsets.symmetric(horizontal: hPad),
-                children: widget.suggestionChips!
+                children: (widget.suggestionChips ??
+                        SynctraChatConstants.suggestionChips)
                     .map(
                       (s) => Padding(
                         padding: const EdgeInsets.only(right: 6),
@@ -294,14 +240,14 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
                 ),
                 const SizedBox(width: 6),
                 FilledButton(
-                  onPressed: _loading ? null : _send,
+                  onPressed: loading ? null : _send,
                   style: FilledButton.styleFrom(
                     minimumSize: Size(widget.compact ? 40 : 44, widget.compact ? 40 : 44),
                     padding: EdgeInsets.zero,
                     shape: const CircleBorder(),
                   ),
                   child: Icon(
-                    _loading ? Icons.hourglass_top_rounded : Icons.arrow_upward_rounded,
+                    loading ? Icons.hourglass_top_rounded : Icons.arrow_upward_rounded,
                     size: 18,
                   ),
                 ),

@@ -50,8 +50,11 @@ def test_chat_message(monkeypatch):
         json={"message": "What is due this week?", "user_id": "test-user"},
     )
     assert r.status_code == 200
-    assert "reply" in r.json()
-    assert len(r.json()["reply"]) > 0
+    body = r.json()
+    assert "reply" in body
+    assert "schedule_proposals" in body
+    assert len(body["reply"]) > 0
+    assert isinstance(body["schedule_proposals"], list)
 
 
 def test_schedule_suggest_empty_tasks():

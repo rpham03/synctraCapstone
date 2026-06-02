@@ -2,6 +2,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get_it/get_it.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,8 +11,10 @@ import 'package:uuid/uuid.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/task_model.dart';
 import '../../../data/services/course_import_service.dart';
+import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
+import '../../../shared/utils/duration_format.dart';
 import '../../../shared/utils/task_timeline_utils.dart';
 import '../../../shared/widgets/synctra_empty_state.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
@@ -105,6 +108,7 @@ class _TasksScreenState extends State<TasksScreen> {
     _canvasService = GetIt.instance<CanvasTasksService>();
     _courseImportService = CourseImportService();
     CourseImportTasksBridge.instance.addListener(_handleCourseTasksRefresh);
+    ManualTasksBridge.instance.addListener(_handleManualTasksRefresh);
     _canvasService.addListener(_handleCanvasTasksRefresh);
     _loadManualTasks();
     _loadCourseTasks();
@@ -115,12 +119,17 @@ class _TasksScreenState extends State<TasksScreen> {
   @override
   void dispose() {
     CourseImportTasksBridge.instance.removeListener(_handleCourseTasksRefresh);
+    ManualTasksBridge.instance.removeListener(_handleManualTasksRefresh);
     _canvasService.removeListener(_handleCanvasTasksRefresh);
     super.dispose();
   }
 
   void _handleCourseTasksRefresh() {
     _loadCourseTasks();
+  }
+
+  void _handleManualTasksRefresh() {
+    _loadManualTasks();
   }
 
   void _handleCanvasTasksRefresh() {
@@ -208,114 +217,33 @@ class _TasksScreenState extends State<TasksScreen> {
   }
 
   Future<void> _showAddTask() async {
-    final titleCtrl = TextEditingController();
-    final descCtrl = TextEditingController();
-    DateTime due = DateTime.now().add(const Duration(days: 1));
-    var est = 180;
-
-    final ok = await showDialog<bool>(
+    final result = await showDialog<_AddManualTaskResult>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setModal) {
-          return AlertDialog(
-            title: const Text('New task'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    controller: titleCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Title',
-                      border: OutlineInputBorder(),
-                    ),
-                    textCapitalization: TextCapitalization.sentences,
-                    autofocus: true,
-                  ),
-                  const SizedBox(height: 12),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Due date'),
-                    subtitle: Text(DateFormat.yMMMd().format(due)),
-                    onTap: () async {
-                      final picked = await showDatePicker(
-                        context: ctx,
-                        initialDate: due,
-                        firstDate:
-                            DateTime.now().subtract(const Duration(days: 1)),
-                        lastDate:
-                            DateTime.now().add(const Duration(days: 365 * 2)),
-                      );
-                      if (picked != null) setModal(() => due = picked);
-                    },
-                  ),
-                  Row(
-                    children: [
-                      const Text('Estimate (min)'),
-                      const Spacer(),
-                      DropdownButton<int>(
-                        value: est,
-                        items: [15, 30, 45, 60, 90, 120, 180]
-                            .map((m) =>
-                                DropdownMenuItem(value: m, child: Text('$m')))
-                            .toList(),
-                        onChanged: (v) => setModal(() => est = v ?? 60),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: descCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Description (optional)',
-                      hintText: 'Details, links, rubric notes…',
-                      alignLabelWithHint: true,
-                      border: OutlineInputBorder(),
-                    ),
-                    minLines: 2,
-                    maxLines: 4,
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Cancel')),
-              FilledButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Add')),
-            ],
-          );
-        },
-      ),
+      builder: (ctx) => const _AddManualTaskDialog(),
     );
 
-    if (ok != true || !mounted) {
-      titleCtrl.dispose();
-      descCtrl.dispose();
-      return;
-    }
-    final title = titleCtrl.text.trim();
-    final desc = descCtrl.text.trim();
-    titleCtrl.dispose();
-    descCtrl.dispose();
-    if (title.isEmpty) return;
+    if (result == null || !mounted) return;
 
     setState(() {
       _tasks.add(
         TaskModel(
           id: const Uuid().v4(),
-          title: title,
-          dueDate: DateTime(due.year, due.month, due.day, 23, 59),
-          estimatedMinutes: est,
+          title: result.title,
+          dueDate: DateTime(
+            result.due.year,
+            result.due.month,
+            result.due.day,
+            23,
+            59,
+          ),
+          estimatedMinutes: result.estimatedMinutes,
           source: 'manual',
-          description: desc,
+          description: result.description,
         ),
       );
     });
     await _persistManualTasks();
+    ManualTasksBridge.instance.refresh();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Task added.')),
@@ -327,8 +255,10 @@ class _TasksScreenState extends State<TasksScreen> {
     final i = _tasks.indexWhere((t) => t.id == task.id);
     if (i < 0) return;
     setState(() => _tasks[i] = task.copyWith(isCompleted: done));
-    if (task.source == 'manual') await _persistManualTasks();
-    if (task.source == 'course') {
+    if (task.source == 'manual') {
+      await _persistManualTasks();
+      ManualTasksBridge.instance.refresh();
+    } else if (task.source == 'course') {
       await _courseImportService.updateCachedTask(_tasks[i]);
     }
   }
@@ -339,6 +269,7 @@ class _TasksScreenState extends State<TasksScreen> {
     setState(() => _tasks[i] = task.copyWith(dueDate: newDue));
     if (task.source == 'manual') {
       await _persistManualTasks();
+      ManualTasksBridge.instance.refresh();
     } else if (task.source == 'course') {
       await _courseImportService.updateCachedTask(_tasks[i]);
     } else if (task.source == 'canvas') {
@@ -396,6 +327,7 @@ class _TasksScreenState extends State<TasksScreen> {
     setState(() => _tasks.removeWhere((t) => t.id == task.id));
     if (task.source == 'manual') {
       await _persistManualTasks();
+      ManualTasksBridge.instance.refresh();
     } else if (task.source == 'canvas') {
       await _persistCanvasFromState();
     } else if (task.source == 'course') {
@@ -700,11 +632,12 @@ class _TasksScreenState extends State<TasksScreen> {
   }
 
   void _showFilterSheet() {
-    showModalBottomSheet(
+    final draft = Set<String>.from(_activeFilters);
+    showModalBottomSheet<void>(
       context: context,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (_) => StatefulBuilder(
+      builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModal) => Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
@@ -716,18 +649,16 @@ class _TasksScreenState extends State<TasksScreen> {
               const SizedBox(height: 16),
               for (final source in ['canvas', 'course', 'manual'])
                 CheckboxListTile(
-                  value: _activeFilters.contains(source),
+                  value: draft.contains(source),
                   title: Text(_sourceFilterLabel(source)),
                   activeColor: AppColors.primary,
                   onChanged: (v) {
                     setModal(() {
-                      setState(() {
-                        if (v == true) {
-                          _activeFilters.add(source);
-                        } else {
-                          _activeFilters.remove(source);
-                        }
-                      });
+                      if (v == true) {
+                        draft.add(source);
+                      } else {
+                        draft.remove(source);
+                      }
                     });
                   },
                 ),
@@ -735,7 +666,14 @@ class _TasksScreenState extends State<TasksScreen> {
           ),
         ),
       ),
-    );
+    ).then((_) {
+      if (!mounted) return;
+      setState(() {
+        _activeFilters
+          ..clear()
+          ..addAll(draft);
+      });
+    });
   }
 
   String _sourceFilterLabel(String source) {
@@ -842,6 +780,201 @@ class _WeekBody extends StatelessWidget {
 }
 
 // ── Sub-widgets ────────────────────────────────────────────────────────────────
+
+class _AddManualTaskResult {
+  final String title;
+  final String description;
+  final DateTime due;
+  final int estimatedMinutes;
+
+  const _AddManualTaskResult({
+    required this.title,
+    required this.description,
+    required this.due,
+    required this.estimatedMinutes,
+  });
+}
+
+/// Owns [TextEditingController]s so they are not disposed before the route closes.
+class _AddManualTaskDialog extends StatefulWidget {
+  const _AddManualTaskDialog();
+
+  @override
+  State<_AddManualTaskDialog> createState() => _AddManualTaskDialogState();
+}
+
+class _AddManualTaskDialogState extends State<_AddManualTaskDialog> {
+  late final TextEditingController _titleCtrl;
+  late final TextEditingController _descCtrl;
+  late final TextEditingController _hoursCtrl;
+  late final TextEditingController _minutesCtrl;
+  late DateTime _due;
+  String? _estimateError;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleCtrl = TextEditingController();
+    _descCtrl = TextEditingController();
+    final defaultParts = DurationFormat.fromMinutes(
+      DurationFormat.defaultEstimateMinutes,
+    );
+    _hoursCtrl = TextEditingController(text: '${defaultParts.hours}');
+    _minutesCtrl = TextEditingController(text: '${defaultParts.minutes}');
+    _due = DateTime.now().add(const Duration(days: 1));
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _descCtrl.dispose();
+    _hoursCtrl.dispose();
+    _minutesCtrl.dispose();
+    super.dispose();
+  }
+
+  int? _parseEstimateMinutes() {
+    final parsed = DurationFormat.parseHoursMinutes(
+      _hoursCtrl.text,
+      _minutesCtrl.text,
+    );
+    if (parsed.error != null) {
+      setState(() => _estimateError = parsed.error);
+      return null;
+    }
+    return parsed.minutes;
+  }
+
+  void _submit() {
+    final title = _titleCtrl.text.trim();
+    if (title.isEmpty) return;
+    final estimate = _parseEstimateMinutes();
+    if (estimate == null) return;
+    Navigator.pop(
+      context,
+      _AddManualTaskResult(
+        title: title,
+        description: _descCtrl.text.trim(),
+        due: _due,
+        estimatedMinutes: estimate,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('New task'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _titleCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Title',
+                border: OutlineInputBorder(),
+              ),
+              textCapitalization: TextCapitalization.sentences,
+              autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Due date'),
+              subtitle: Text(DateFormat.yMMMd().format(_due)),
+              onTap: () async {
+                final picked = await showDatePicker(
+                  context: context,
+                  initialDate: _due,
+                  firstDate: DateTime.now().subtract(const Duration(days: 1)),
+                  lastDate: DateTime.now().add(const Duration(days: 365 * 2)),
+                );
+                if (picked != null && mounted) {
+                  setState(() => _due = picked);
+                }
+              },
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Estimated time',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _hoursCtrl,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: 'Hours',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (_) {
+                      if (_estimateError != null) {
+                        setState(() => _estimateError = null);
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _minutesCtrl,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: const InputDecoration(
+                      labelText: 'Minutes',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (_) {
+                      if (_estimateError != null) {
+                        setState(() => _estimateError = null);
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            if (_estimateError != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                _estimateError!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: _descCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+                hintText: 'Details, links, rubric notes…',
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+              ),
+              minLines: 2,
+              maxLines: 4,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Add')),
+      ],
+    );
+  }
+}
 
 class _EmptyTasks extends StatelessWidget {
   final VoidCallback onAdd;

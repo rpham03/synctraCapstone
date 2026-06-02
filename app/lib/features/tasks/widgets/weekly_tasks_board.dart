@@ -5,6 +5,8 @@ import 'package:intl/intl.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../data/models/task_model.dart';
+import '../../../shared/utils/task_schedule_utils.dart';
+import '../../../shared/utils/task_timeline_utils.dart';
 
 DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
@@ -13,18 +15,14 @@ DateTime weekMondayOf(DateTime anchor) {
   return d.subtract(Duration(days: d.weekday - DateTime.monday));
 }
 
-bool taskDueInWeek(TaskModel t, DateTime weekMonday) {
-  final end = weekMonday.add(const Duration(days: 7));
-  final dd = _dateOnly(t.dueDate);
-  return !dd.isBefore(weekMonday) && dd.isBefore(end);
-}
-
-int _dayIndexForDueDate(DateTime due, DateTime weekMonday) {
-  return _dateOnly(due).difference(weekMonday).inDays.clamp(0, 6);
-}
+bool taskDueInWeek(TaskModel t, DateTime weekMonday) =>
+    taskOverlapsWeek(t, weekMonday);
 
 Color _priorityDotColor(TaskModel t, ThemeData theme) {
   if (t.isCompleted) return theme.colorScheme.outlineVariant;
+  if (t.source == 'manual') return AppColors.manualTask;
+  if (t.source == 'course') return AppColors.deadline;
+  if (t.source == 'canvas') return AppColors.canvasAssignment;
   final days = _dateOnly(t.dueDate).difference(_dateOnly(DateTime.now())).inDays;
   if (days < 0) return AppColors.deadline;
   if (days <= 1) return const Color(0xFFE11D48);
@@ -88,10 +86,16 @@ class _WeeklyTasksBoardState extends State<WeeklyTasksBoard> {
   }
 
   List<TaskModel> _tasksForDay(int dayIndex) {
+    final day = _dateOnly(widget.weekMonday.add(Duration(days: dayIndex)));
     return widget.tasks
-        .where((t) => taskDueInWeek(t, widget.weekMonday) && _dayIndexForDueDate(t.dueDate, widget.weekMonday) == dayIndex)
+        .where((t) =>
+            taskDueInWeek(t, widget.weekMonday) && taskCoversDay(t, day))
         .toList()
-      ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+      ..sort((a, b) {
+        final dueCmp = a.dueDate.compareTo(b.dueDate);
+        if (dueCmp != 0) return dueCmp;
+        return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+      });
   }
 
   @override
@@ -308,14 +312,7 @@ class _DayColumn extends StatelessWidget {
       onWillAcceptWithDetails: (_) => true,
       onAcceptWithDetails: (details) {
         final t = details.data;
-        final newDue = DateTime(
-          day.year,
-          day.month,
-          day.day,
-          t.dueDate.hour,
-          t.dueDate.minute,
-        );
-        onTaskDueChanged(t, newDue);
+        onTaskDueChanged(t, taskDueEndOfDay(day));
       },
       builder: (context, candidate, rejected) {
         final over = candidate.isNotEmpty;
@@ -405,6 +402,7 @@ class _DayColumn extends StatelessWidget {
                                   padding: const EdgeInsets.only(bottom: 6),
                                   child: _BoardTaskCard(
                                     task: t,
+                                    day: day,
                                     dotColor: _priorityDotColor(t, theme),
                                     onToggleDone: onToggleDone,
                                     onDelete: () => onDeleteTask(t),
@@ -425,12 +423,14 @@ class _DayColumn extends StatelessWidget {
 
 class _BoardTaskCard extends StatelessWidget {
   final TaskModel task;
+  final DateTime day;
   final Color dotColor;
   final void Function(TaskModel task, bool done) onToggleDone;
   final VoidCallback onDelete;
 
   const _BoardTaskCard({
     required this.task,
+    required this.day,
     required this.dotColor,
     required this.onToggleDone,
     required this.onDelete,
@@ -495,6 +495,25 @@ class _BoardTaskCard extends StatelessWidget {
                     'Canvas',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: cs.primary.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ],
+                if (taskSpanCalendarDays(task.estimatedMinutes) > 1) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    taskIsDueDay(task, day)
+                        ? 'Due'
+                        : (taskDateOnly(day) ==
+                                taskWorkStartDate(
+                                    task.dueDate, task.estimatedMinutes)
+                            ? 'Starts'
+                            : 'In progress'),
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: taskIsDueDay(task, day)
+                          ? AppColors.deadline
+                          : cs.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 10,
                     ),
                   ),
                 ],

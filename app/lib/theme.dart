@@ -38,6 +38,10 @@ abstract final class AppColors {
   static const Color canvasAssignment = secondary;
   static const Color canvasAssignmentContainer = Color(0xFFFFF6E8);
 
+  /// Tasks added manually on the Tasks tab (calendar due chips + list accent).
+  static const Color manualTask = Color(0xFF16A34A);
+  static const Color manualTaskContainer = Color(0xFFE8F5EC);
+
   static const Color fixedEvent = primary;
   static const Color aiStudyBlock = success;
   static const Color confirmedStudyBlock = success;

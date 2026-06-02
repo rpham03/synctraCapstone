@@ -4,6 +4,7 @@ import 'package:table_calendar/table_calendar.dart';
 
 import '../../data/models/event_model.dart';
 import '../../data/models/schedule_block_model.dart';
+import 'task_schedule_utils.dart';
 
 class CalendarDisplayUtils {
   CalendarDisplayUtils._();
@@ -53,8 +54,19 @@ class CalendarDisplayUtils {
             .where((e) => isSameDay(e.startTime, day))
             .where((e) => !e.isDateOnlyCourseEvent)
             .where((e) => !e.isCourseAssignment)
+            .where((e) => !e.isManualTask)
             .where((e) => e.source != 'canvas' || canvasShowsInTimeGrid(e)),
       );
+
+  static List<EventModel> manualTasksOnDay(
+    Iterable<EventModel> all,
+    DateTime day,
+  ) =>
+      all
+          .where((e) =>
+              e.isManualTask &&
+              eventCoversDay(e.startTime, e.endTime, day))
+          .toList();
 
   static List<EventModel> canvasOnDay(Iterable<EventModel> all, DateTime day) =>
       all.where((e) => e.source == 'canvas' && isSameDay(e.startTime, day)).toList();
@@ -79,8 +91,15 @@ class CalendarDisplayUtils {
         .where((c) => !canvasShowsInTimeGrid(c))
         .toList();
     final courseAllDay = courseAllDayOnDay(allEvents, day);
+    final manualTasks = manualTasksOnDay(allEvents, day);
     final dayBlocks = blocks.where((b) => isSameDay(b.startTime, day)).toList();
-    return [...timed, ...canvasChipsOnly, ...courseAllDay, ...dayBlocks];
+    return [
+      ...timed,
+      ...canvasChipsOnly,
+      ...courseAllDay,
+      ...manualTasks,
+      ...dayBlocks,
+    ];
   }
 
   static String localDateKey(DateTime dt) =>
