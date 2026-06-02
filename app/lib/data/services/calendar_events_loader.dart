@@ -1,4 +1,4 @@
-// Loads calendar events and tasks for Chat (same sources as Calendar + Tasks tabs).
+// Loads calendar events and tasks for Chat (same rules as Calendar + Tasks tabs).
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -7,42 +7,114 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/api_constants.dart';
 import '../models/event_model.dart';
+import '../models/schedule_block_model.dart';
 import '../models/task_model.dart';
 import 'course_import_service.dart';
 import '../../shared/services/canvas_tasks_service.dart';
+import '../../shared/services/suggested_schedule_store.dart';
+import '../../shared/utils/calendar_display_utils.dart';
+import '../../shared/utils/local_time_format.dart';
+import '../../shared/utils/task_timeline_utils.dart';
 
 class CalendarEventsLoader {
   static const _manualEventsKey = 'synctra_manual_events_v1';
   static const _manualTasksKey = 'synctra_manual_tasks_v1';
 
-  /// Calendar events to send with each chat message (schedule / busy times).
+  /// Device-local calendar date (YYYY-MM-DD) for the chat backend.
+  static String clientTodayIso() =>
+      CalendarDisplayUtils.localDateKey(DateTime.now());
+
+  /// Calendar events aligned with the Calendar tab (deduped, with local_date).
   static Future<List<Map<String, dynamic>>> loadForChat() async {
-    final out = <Map<String, dynamic>>[];
-    await _loadIcalFeeds(out);
-    await _loadCourseImports(out);
-    await _loadManualEvents(out);
-    await _loadCanvasDueEvents(out);
+    final events = <EventModel>[];
+    await _loadIcalFeeds(events);
+    await _loadCourseImports(events);
+    await _loadManualEvents(events);
+    await _loadCanvasDueEvents(events);
+
+    final deduped = CalendarDisplayUtils.dedupeCalendarEvents(events);
+    final out = deduped.map(_eventPayload).toList();
+
+    final store = _scheduleStoreOrNull();
+    if (store != null) {
+      for (final b in store.blocks) {
+        out.add(_blockPayload(b));
+      }
+    }
+
     return out;
   }
 
-  /// Tasks due today or later from the Tasks tab.
+  /// Tasks due today or later — manual, Canvas cache, and course import cache.
   static Future<List<Map<String, dynamic>>> loadTasksForChat() async {
+    final manual = <TaskModel>[];
+    final canvas = <TaskModel>[];
+    final course = <TaskModel>[];
+
+    await _loadManualTasks(manual);
+    await _loadCachedCanvasTasks(canvas);
+    await _loadCourseTasks(course);
+
+    final merged = mergeCanvasAndCourseTasks(canvas, course);
+    final all = [...manual, ...merged];
     final out = <Map<String, dynamic>>[];
-    await _loadManualTasks(out);
-    await _loadCachedCanvasTasks(out);
+    for (final t in all) {
+      if (!t.isDueTodayOrLater || t.isCompleted) continue;
+      out.add(_taskPayload(t));
+    }
     return out;
   }
 
-  static void _addEvent(List<Map<String, dynamic>> out, EventModel e) {
-    out.add({
+  static SuggestedScheduleStore? _scheduleStoreOrNull() {
+    try {
+      final g = GetIt.instance;
+      if (g.isRegistered<SuggestedScheduleStore>()) {
+        return g<SuggestedScheduleStore>();
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static Map<String, dynamic> _eventPayload(EventModel e) {
+    final allDay = e.isDateOnlyCourseEvent || e.isCourseAssignment;
+    return {
+      'id': e.id,
       'start_time': e.startTime.toIso8601String(),
       'end_time': e.endTime.toIso8601String(),
+      'local_date': CalendarDisplayUtils.localDateKey(e.startTime),
+      'time_label': allDay
+          ? null
+          : LocalTimeFormat.timeRange(e.startTime, e.endTime),
+      'when_label': allDay
+          ? LocalTimeFormat.whenDateOnly(e.startTime)
+          : LocalTimeFormat.whenTimed(e.startTime, e.endTime),
       'title': e.title,
       'source': e.source,
-    });
+      'description': e.description,
+      'is_all_day': allDay,
+    };
   }
 
-  static Future<void> _loadIcalFeeds(List<Map<String, dynamic>> out) async {
+  static Map<String, dynamic> _blockPayload(ScheduleBlockModel b) => {
+        'id': b.id,
+        'start_time': b.startTime.toIso8601String(),
+        'end_time': b.endTime.toIso8601String(),
+        'local_date': CalendarDisplayUtils.localDateKey(b.startTime),
+        'time_label': LocalTimeFormat.timeRange(b.startTime, b.endTime),
+        'when_label': LocalTimeFormat.whenTimed(b.startTime, b.endTime),
+        'title': b.taskTitle,
+        'source': 'study_block',
+        'description': b.description,
+        'is_all_day': false,
+      };
+
+  static Map<String, dynamic> _taskPayload(TaskModel t) => {
+        ...t.toJson(),
+        'local_due_date': CalendarDisplayUtils.localDateKey(t.dueDate),
+        'due_label': LocalTimeFormat.dueLabel(t.dueDate),
+      };
+
+  static Future<void> _loadIcalFeeds(List<EventModel> out) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getStringList('ical_feeds') ?? [];
     for (final item in raw) {
@@ -59,31 +131,25 @@ class CalendarEventsLoader {
         if (events is! List) continue;
         for (final e in events) {
           if (e is Map) {
-            _addEvent(out, EventModel.fromJson(Map<String, dynamic>.from(e)));
+            out.add(EventModel.fromJson(Map<String, dynamic>.from(e)));
           }
         }
-      } catch (_) {
-        // Skip feeds that fail to sync (offline, bad URL, etc.)
-      }
+      } catch (_) {}
     }
   }
 
-  static Future<void> _loadCourseImports(List<Map<String, dynamic>> out) async {
+  static Future<void> _loadCourseImports(List<EventModel> out) async {
     try {
       final service = CourseImportService();
       final imports = await service.loadImports();
       for (final rec in imports) {
         final events = await service.loadEventsForImport(rec.id);
-        for (final e in events) {
-          _addEvent(out, e);
-        }
+        out.addAll(events);
       }
-    } catch (_) {
-      // Not signed in or Supabase unavailable
-    }
+    } catch (_) {}
   }
 
-  static Future<void> _loadManualEvents(List<Map<String, dynamic>> out) async {
+  static Future<void> _loadManualEvents(List<EventModel> out) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_manualEventsKey);
     if (raw == null || raw.isEmpty) return;
@@ -91,33 +157,23 @@ class CalendarEventsLoader {
       final list = jsonDecode(raw) as List<dynamic>;
       for (final item in list) {
         if (item is! Map) continue;
-        final m = Map<String, dynamic>.from(item);
-        final e = EventModel.fromJson(m);
-        if (e.source == 'manual') {
-          _addEvent(out, e);
-        }
+        final e = EventModel.fromJson(Map<String, dynamic>.from(item));
+        if (e.source == 'manual') out.add(e);
       }
     } catch (_) {}
   }
 
-  static Future<void> _loadCanvasDueEvents(List<Map<String, dynamic>> out) async {
+  static Future<void> _loadCanvasDueEvents(List<EventModel> out) async {
     try {
       final g = GetIt.instance;
       if (!g.isRegistered<CanvasTasksService>()) return;
       final service = g<CanvasTasksService>();
       final tasks = await service.loadCached();
-      for (final e in service.toCalendarEvents(tasks)) {
-        _addEvent(out, e);
-      }
+      out.addAll(service.toCalendarEvents(tasks));
     } catch (_) {}
   }
 
-  static void _addTask(List<Map<String, dynamic>> out, TaskModel t) {
-    if (!t.isDueTodayOrLater || t.isCompleted) return;
-    out.add(t.toJson());
-  }
-
-  static Future<void> _loadManualTasks(List<Map<String, dynamic>> out) async {
+  static Future<void> _loadManualTasks(List<TaskModel> out) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_manualTasksKey);
     if (raw == null || raw.isEmpty) return;
@@ -125,19 +181,24 @@ class CalendarEventsLoader {
       final list = jsonDecode(raw) as List<dynamic>;
       for (final item in list) {
         if (item is! Map) continue;
-        _addTask(out, TaskModel.fromJson(Map<String, dynamic>.from(item)));
+        out.add(TaskModel.fromJson(Map<String, dynamic>.from(item)));
       }
     } catch (_) {}
   }
 
-  static Future<void> _loadCachedCanvasTasks(List<Map<String, dynamic>> out) async {
+  static Future<void> _loadCachedCanvasTasks(List<TaskModel> out) async {
     try {
       final g = GetIt.instance;
       if (!g.isRegistered<CanvasTasksService>()) return;
       final tasks = await g<CanvasTasksService>().loadCached();
-      for (final t in tasks) {
-        _addTask(out, t);
-      }
+      out.addAll(tasks);
+    } catch (_) {}
+  }
+
+  static Future<void> _loadCourseTasks(List<TaskModel> out) async {
+    try {
+      final service = CourseImportService();
+      out.addAll(await service.loadCachedTasks());
     } catch (_) {}
   }
 }

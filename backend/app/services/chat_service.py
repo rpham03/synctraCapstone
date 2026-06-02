@@ -10,7 +10,10 @@ from app.services.chat_agent_common import sanitize_chat_reply
 from app.services.chat_client_context import (
     clear_client_context,
     set_calendar_events,
+    set_client_today,
     set_tasks,
+    set_timezone_name,
+    set_timezone_offset_minutes,
 )
 from app.services.ollama_agent_service import OllamaAgentService
 from app.services.openai_agent_service import OpenAIAgentService
@@ -52,6 +55,9 @@ class ChatService:
         *,
         calendar_events: list[dict[str, Any]] | None = None,
         tasks: list[dict[str, Any]] | None = None,
+        client_today: str | None = None,
+        timezone_offset_minutes: int | None = None,
+        timezone_name: str | None = None,
     ) -> str:
         text = user_message.strip()
         if not text:
@@ -59,6 +65,9 @@ class ChatService:
 
         set_calendar_events(calendar_events)
         set_tasks(tasks)
+        set_client_today(client_today)
+        set_timezone_offset_minutes(timezone_offset_minutes)
+        set_timezone_name(timezone_name)
         try:
             return await self._process_message_inner(text, user_id)
         finally:

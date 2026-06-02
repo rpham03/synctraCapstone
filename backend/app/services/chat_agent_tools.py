@@ -8,7 +8,11 @@ from dateutil import parser as date_parser
 
 from app.core.config.settings import settings
 from app.integrations.canvas.canvas_client import CanvasClient
-from app.services.chat_client_context import get_calendar_events, get_tasks
+from app.services.chat_client_context import (
+    effective_today,
+    get_calendar_events,
+    get_tasks,
+)
 from app.services.scheduler_service import SchedulerService, Task
 
 # Default “calendar day” window when no iCal events are supplied yet.
@@ -18,7 +22,45 @@ _MIN_SLOT_MINUTES = 60
 
 
 def today_local() -> date:
+    """Server date — prefer [effective_today] when handling chat requests."""
     return datetime.now().date()
+
+
+def _event_local_date(raw: dict) -> date | None:
+    ld = _as_str(raw.get("local_date")).strip()
+    if ld:
+        try:
+            return date.fromisoformat(ld[:10])
+        except ValueError:
+            pass
+    row = _parse_busy_event(raw)
+    if row:
+        return row[0].date()
+    return None
+
+
+def _task_local_due_date(raw: dict) -> date | None:
+    ld = _as_str(raw.get("local_due_date")).strip()
+    if ld:
+        try:
+            return date.fromisoformat(ld[:10])
+        except ValueError:
+            pass
+    try:
+        return _parse_iso_datetime(raw.get("due_date")).date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _event_in_date_range(raw: dict, start_d: date, end_d: date) -> bool:
+    local = _event_local_date(raw)
+    if local is not None:
+        return start_d <= local <= end_d
+    row = _parse_busy_event(raw)
+    if not row:
+        return False
+    bs, be, _ = row
+    return bs.date() <= end_d and be.date() >= start_d
 
 
 def week_range_mon_fri(anchor: date | None = None) -> tuple[str, str]:
@@ -31,7 +73,7 @@ def week_range_mon_fri(anchor: date | None = None) -> tuple[str, str]:
 
 def sanitize_free_slot_range(start_date: str, end_date: str) -> tuple[str, str, bool]:
     """If the model passed stale dates (e.g. March when today is May), use this week."""
-    today = today_local()
+    today = effective_today()
     try:
         start_d = _parse_date_bound(start_date, end_of_day=False).date()
         end_d = _parse_date_bound(end_date, end_of_day=True).date()
@@ -54,6 +96,42 @@ def _as_str(value: object) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     return str(value)
+
+
+def format_local_time(dt: datetime) -> str:
+    """12-hour clock for wall-clock times from the user's device."""
+    hour = dt.hour
+    minute = dt.minute
+    h12 = hour % 12 or 12
+    suffix = "AM" if hour < 12 else "PM"
+    return f"{h12}:{minute:02d} {suffix}"
+
+
+def format_local_time_range(start: datetime, end: datetime) -> str:
+    return f"{format_local_time(start)} – {format_local_time(end)}"
+
+
+def _event_time_label(raw: dict, start: datetime, end: datetime) -> str | None:
+    if raw.get("is_all_day"):
+        when = _as_str(raw.get("when_label")).strip()
+        return when or None
+    label = _as_str(raw.get("time_label")).strip()
+    if label:
+        return label
+    return format_local_time_range(start, end)
+
+
+def _format_date_short(dt: datetime) -> str:
+    return dt.strftime("%a, %b %d").replace(" 0", " ")
+
+
+def _event_when_label(raw: dict, start: datetime, end: datetime) -> str:
+    when = _as_str(raw.get("when_label")).strip()
+    if when:
+        return when
+    if raw.get("is_all_day"):
+        return _format_date_short(start)
+    return f"{_format_date_short(start)} · {format_local_time_range(start, end)}"
 
 
 def _parse_iso_datetime(value: object) -> datetime:
@@ -214,6 +292,7 @@ def find_free_slots_in_calendar(start_date: str, end_date: str) -> dict:
                 {
                     "start": gap_start.isoformat(),
                     "end": gap_end.isoformat(),
+                    "time_label": format_local_time_range(gap_start, gap_end),
                     "minutes_available": int(
                         (gap_end - gap_start).total_seconds() // 60
                     ),
@@ -221,7 +300,7 @@ def find_free_slots_in_calendar(start_date: str, end_date: str) -> dict:
             )
         day_cursor = day_cursor + timedelta(days=1)
 
-    today = today_local()
+    today = effective_today()
     mon, fri = week_range_mon_fri(today)
     if parsed_busy:
         note = (
@@ -268,28 +347,35 @@ def list_calendar_events_for_range(start_date: str, end_date: str) -> dict:
     if end < start:
         return {"events": [], "error": "end_date must be on or after start_date"}
 
+    start_d = start.date()
+    end_d = end.date()
     events_out: list[dict] = []
     for raw in get_calendar_events():
         if not isinstance(raw, dict):
+            continue
+        if not _event_in_date_range(raw, start_d, end_d):
             continue
         row = _parse_busy_event(raw)
         if not row:
             continue
         bs, be, title = row
-        if bs >= end or be <= start:
-            continue
         source = _as_str(raw.get("source")).strip() or "calendar"
+        local = _event_local_date(raw)
         events_out.append(
             {
                 "title": title,
                 "start_time": bs.isoformat(),
                 "end_time": be.isoformat(),
+                "local_date": local.isoformat() if local else None,
+                "time_label": _event_time_label(raw, bs, be),
+                "when_label": _event_when_label(raw, bs, be),
                 "source": source,
+                "is_all_day": bool(raw.get("is_all_day")),
             }
         )
     events_out.sort(key=lambda e: e["start_time"])
 
-    today = today_local()
+    today = effective_today()
     mon, fri = week_range_mon_fri(today)
     if events_out:
         note = (
@@ -329,19 +415,31 @@ def list_tasks_for_range(due_start: str, due_end: str) -> dict:
             continue
         if raw.get("is_completed"):
             continue
+        due_d = _task_local_due_date(raw)
+        if due_d is None or due_d < start_d or due_d > end_d:
+            continue
         try:
             due = _parse_iso_datetime(raw.get("due_date"))
         except (ValueError, TypeError):
             continue
-        due_d = due.date()
-        if due_d < start_d or due_d > end_d:
-            continue
         t = _task_with_display_label(raw)
         t["due_date"] = due.isoformat()
+        if due_d:
+            t["local_due_date"] = due_d.isoformat()
+        due_label = _as_str(raw.get("due_label")).strip()
+        if due_label:
+            t["due_label"] = due_label
+        else:
+            at_midnight = due.hour == 0 and due.minute == 0
+            t["due_label"] = (
+                _format_date_short(due)
+                if at_midnight
+                else f"{_format_date_short(due)} · {format_local_time(due)}"
+            )
         tasks_out.append(t)
     tasks_out.sort(key=lambda t: t.get("due_date", ""))
 
-    today = today_local()
+    today = effective_today()
     mon, fri = week_range_mon_fri(today)
     if tasks_out:
         note = (

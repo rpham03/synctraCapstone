@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextvars
+from datetime import date
 from typing import Any
 
 _calendar_events: contextvars.ContextVar[list[dict[str, Any]] | None] = (
@@ -9,6 +10,15 @@ _calendar_events: contextvars.ContextVar[list[dict[str, Any]] | None] = (
 )
 _tasks: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
     "chat_tasks", default=None
+)
+_client_today: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "chat_client_today", default=None
+)
+_timezone_offset: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "chat_timezone_offset_minutes", default=None
+)
+_timezone_name: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "chat_timezone_name", default=None
 )
 
 
@@ -34,6 +44,53 @@ def get_tasks() -> list[dict[str, Any]]:
     return [t for t in raw if isinstance(t, dict)]
 
 
+def set_client_today(value: str | None) -> None:
+    _client_today.set(value)
+
+
+def set_timezone_offset_minutes(value: int | None) -> None:
+    _timezone_offset.set(value)
+
+
+def get_timezone_offset_minutes() -> int | None:
+    return _timezone_offset.get()
+
+
+def set_timezone_name(value: str | None) -> None:
+    _timezone_name.set((value or "").strip() or None)
+
+
+def get_timezone_name() -> str | None:
+    return _timezone_name.get()
+
+
+def client_timezone_label() -> str:
+    name = get_timezone_name()
+    if name:
+        return name
+    offset = get_timezone_offset_minutes()
+    if offset is not None:
+        hours = offset // 60
+        sign = "+" if hours >= 0 else ""
+        return f"UTC{sign}{hours}"
+    return "local time"
+
+
+def effective_today() -> date:
+    from app.services.chat_agent_tools import today_local
+
+    raw = _client_today.get()
+    if raw:
+        try:
+            return date.fromisoformat(str(raw).strip()[:10])
+        except ValueError:
+            pass
+    return today_local()
+
+
 def clear_client_context() -> None:
     _calendar_events.set(None)
     _tasks.set(None)
+    _client_today.set(None)
+    _timezone_offset.set(None)
+    _timezone_name.set(None)

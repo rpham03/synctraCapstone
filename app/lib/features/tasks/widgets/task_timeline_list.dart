@@ -31,6 +31,7 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
   final _scrollCtrl = ScrollController();
   final _todayKey = GlobalKey();
   var _didInitialScroll = false;
+  var _wasRouteVisible = false;
   double? _scrollAnchorPixels;
   double? _scrollAnchorMaxExtent;
 
@@ -38,6 +39,7 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
   void initState() {
     super.initState();
     _scrollCtrl.addListener(_onScroll);
+    _scheduleWhenVisible(_scrollToToday);
   }
 
   @override
@@ -47,20 +49,45 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
     super.dispose();
   }
 
+  bool _isRouteVisible() {
+    final route = ModalRoute.of(context);
+    return route == null || route.isCurrent;
+  }
+
+  void _scheduleWhenVisible(VoidCallback action) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_isRouteVisible()) return;
+      action();
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final visible = _isRouteVisible();
+    if (visible && !_wasRouteVisible) {
+      _didInitialScroll = false;
+      _scheduleWhenVisible(_scrollToToday);
+    }
+    _wasRouteVisible = visible;
+  }
+
   @override
   void didUpdateWidget(TaskTimelineList oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!_isRouteVisible()) return;
+
     if (widget.tasks.length > oldWidget.tasks.length &&
         _scrollAnchorMaxExtent != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _restoreScrollAnchor());
+      _scheduleWhenVisible(_restoreScrollAnchor);
     } else if (oldWidget.tasks.length != widget.tasks.length) {
       _didInitialScroll = false;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday());
+      _scheduleWhenVisible(_scrollToToday);
     }
   }
 
   void _onScroll() {
-    if (!_scrollCtrl.hasClients) return;
+    if (!_scrollCtrl.hasClients || !_isRouteVisible()) return;
     if (_scrollCtrl.position.pixels <= 72 &&
         widget.hasOlderOutsideWindow &&
         !widget.loadingOlder) {
@@ -83,7 +110,7 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
   }
 
   void _scrollToToday() {
-    if (_didInitialScroll) return;
+    if (_didInitialScroll || !_isRouteVisible()) return;
     final ctx = _todayKey.currentContext;
     if (ctx == null) return;
     _didInitialScroll = true;
@@ -102,8 +129,6 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
     if (sections.isEmpty) {
       return const SizedBox.shrink();
     }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday());
 
     final scheme = Theme.of(context).colorScheme;
     final theme = Theme.of(context).textTheme;

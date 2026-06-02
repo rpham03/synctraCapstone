@@ -3,23 +3,24 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../state/calendar_shell_bridge.dart';
 import '../services/auth_service.dart';
+import '../state/calendar_shell_bridge.dart';
+import '../state/shell_sidebar_controller.dart';
 import 'synctra_combined_sidebar.dart';
 
 class MainShell extends StatelessWidget {
   final StatefulNavigationShell navigationShell;
   const MainShell({super.key, required this.navigationShell});
 
-  static const _sidebarWidth = 300.0;
-  static const _desktopBreakpoint = 1000.0;
+  static const sidebarWidth = 300.0;
+  static const desktopBreakpoint = ShellSidebarController.desktopBreakpoint;
 
   @override
   Widget build(BuildContext context) {
     final selectedIndex = navigationShell.currentIndex;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final useSidebarLayout = constraints.maxWidth >= _desktopBreakpoint;
+        final useSidebarLayout = constraints.maxWidth >= desktopBreakpoint;
         return useSidebarLayout
             ? _SidebarLayoutShell(
                 navigationShell: navigationShell,
@@ -34,7 +35,7 @@ class MainShell extends StatelessWidget {
   }
 }
 
-/// Wide screens: one fixed column (nav + planner) beside the active tab.
+/// Wide screens: optional fixed nav column; main content expands when hidden.
 class _SidebarLayoutShell extends StatefulWidget {
   final StatefulNavigationShell navigationShell;
   final int selectedIndex;
@@ -49,39 +50,65 @@ class _SidebarLayoutShell extends StatefulWidget {
 }
 
 class _SidebarLayoutShellState extends State<_SidebarLayoutShell> {
+  final _sidebar = ShellSidebarController.instance;
+
   @override
   void initState() {
     super.initState();
-    // Rebuild sidebar after CalendarScreen registers its planner (build order fix).
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) setState(() {});
-    });
+    _sidebar.addListener(_onSidebarChanged);
+    CalendarShellBridge.instance.registerOpenDrawer(_toggleSidebar);
   }
+
+  @override
+  void dispose() {
+    _sidebar.removeListener(_onSidebarChanged);
+    CalendarShellBridge.instance.registerOpenDrawer(null);
+    super.dispose();
+  }
+
+  void _onSidebarChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _toggleSidebar() => _sidebar.toggle();
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final sidebarOpen = _sidebar.visible;
 
     return Scaffold(
       backgroundColor: scheme.surfaceContainerLowest,
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(
-            width: MainShell._sidebarWidth,
-            child: SynctraCombinedSidebar(
-              navigationShell: widget.navigationShell,
-              selectedIndex: widget.selectedIndex,
-              onSignOut: () => _signOut(context),
-            ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeInOut,
+            alignment: Alignment.centerLeft,
+            clipBehavior: Clip.hardEdge,
+            child: sidebarOpen
+                ? SizedBox(
+                    width: MainShell.sidebarWidth,
+                    child: SynctraCombinedSidebar(
+                      navigationShell: widget.navigationShell,
+                      selectedIndex: widget.selectedIndex,
+                      onSignOut: () => _signOut(context),
+                    ),
+                  )
+                : const SizedBox.shrink(),
           ),
           Expanded(
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: scheme.surface,
-                border: Border(
-                  left: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.75)),
-                ),
+                border: sidebarOpen
+                    ? Border(
+                        left: BorderSide(
+                          color: scheme.outlineVariant.withValues(alpha: 0.75),
+                        ),
+                      )
+                    : null,
               ),
               child: ClipRect(child: widget.navigationShell),
             ),
@@ -131,7 +158,7 @@ class _DrawerLayoutShellState extends State<_DrawerLayoutShell> {
       key: _scaffoldKey,
       backgroundColor: scheme.surface,
       drawer: Drawer(
-        width: MainShell._sidebarWidth,
+        width: MainShell.sidebarWidth,
         child: SynctraCombinedSidebar(
           navigationShell: widget.navigationShell,
           selectedIndex: widget.selectedIndex,

@@ -2,11 +2,15 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../state/calendar_shell_bridge.dart';
+import '../state/shell_sidebar_controller.dart';
+
 class SynctraPageHeader extends StatelessWidget implements PreferredSizeWidget {
   final String title;
   final String? subtitle;
   final List<Widget>? actions;
   final bool showSettings;
+  final bool showSidebarToggle;
 
   const SynctraPageHeader({
     super.key,
@@ -14,6 +18,7 @@ class SynctraPageHeader extends StatelessWidget implements PreferredSizeWidget {
     this.subtitle,
     this.actions,
     this.showSettings = true,
+    this.showSidebarToggle = true,
   });
 
   @override
@@ -23,6 +28,8 @@ class SynctraPageHeader extends StatelessWidget implements PreferredSizeWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final isDesktop =
+        MediaQuery.sizeOf(context).width >= ShellSidebarController.desktopBreakpoint;
     final trailing = <Widget>[
       ...?actions,
       if (showSettings)
@@ -39,7 +46,22 @@ class SynctraPageHeader extends StatelessWidget implements PreferredSizeWidget {
       backgroundColor: scheme.surface,
       surfaceTintColor: Colors.transparent,
       automaticallyImplyLeading: false,
-      titleSpacing: 20,
+      leading: showSidebarToggle && isDesktop
+          ? ListenableBuilder(
+              listenable: ShellSidebarController.instance,
+              builder: (context, _) {
+                final open = ShellSidebarController.instance.visible;
+                return IconButton(
+                  tooltip: open ? 'Hide navigation' : 'Show navigation',
+                  icon: Icon(Icons.menu,
+                      color: scheme.onSurfaceVariant, size: 22),
+                  onPressed: () =>
+                      CalendarShellBridge.instance.openDrawer?.call(),
+                );
+              },
+            )
+          : null,
+      titleSpacing: showSidebarToggle && isDesktop ? 0 : 20,
       toolbarHeight: preferredSize.height,
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

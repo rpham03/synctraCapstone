@@ -125,6 +125,62 @@ class CourseImportService {
     await saveCachedTasks(tasks);
   }
 
+  /// Removes a course event from Supabase and drops any linked cached task row.
+  Future<void> removeEventForCalendar(EventModel event) async {
+    await _db.from('events').delete().eq('id', event.id);
+    final sourceEventId = event.sourceEventId;
+    if (sourceEventId != null && sourceEventId.contains('assignment')) {
+      final taskId = _courseTaskIdFromSourceEventId(sourceEventId);
+      await removeTaskForCalendar(taskId, updateCacheOnly: true);
+    }
+  }
+
+  /// Updates a course calendar event in Supabase (and linked cached task when applicable).
+  Future<void> updateCalendarEvent(EventModel event) async {
+    await _db.from('events').update({
+      'title': event.title,
+      'description': event.description,
+      'start_time': event.startTime.toUtc().toIso8601String(),
+      'end_time': event.endTime.toUtc().toIso8601String(),
+    }).eq('id', event.id);
+
+    final sourceEventId = event.sourceEventId;
+    if (sourceEventId == null || !sourceEventId.contains('assignment')) {
+      return;
+    }
+    final taskId = _courseTaskIdFromSourceEventId(sourceEventId);
+    final cached = await _loadLocalCachedTasks();
+    final i = cached.indexWhere((t) => t.id == taskId);
+    if (i < 0) return;
+    cached[i] = cached[i].copyWith(
+      title: event.title,
+      dueDate: event.startTime,
+      description: '',
+    );
+    await saveCachedTasks(cached);
+  }
+
+  /// Removes a course assignment task and any linked calendar events.
+  Future<void> removeTaskForCalendar(
+    String taskId, {
+    bool updateCacheOnly = false,
+  }) async {
+    if (!updateCacheOnly) {
+      final eventRows = await _db
+          .from('events')
+          .select('id,source_event_id')
+          .eq('user_id', _userId)
+          .eq('source', 'course');
+      for (final row in _rowsFrom(eventRows)) {
+        final sourceEventId = row['source_event_id'] as String? ?? '';
+        if (_courseTaskIdFromSourceEventId(sourceEventId) != taskId) continue;
+        await _db.from('events').delete().eq('id', row['id'] as String);
+      }
+    }
+    final cached = await _loadLocalCachedTasks();
+    await saveCachedTasks(cached.where((t) => t.id != taskId).toList());
+  }
+
   Future<List<TaskModel>> _loadTasksFromImportedAssignmentEvents(
     List<TaskModel> cachedTasks,
   ) async {

@@ -105,6 +105,7 @@ class _TasksScreenState extends State<TasksScreen> {
     _canvasService = GetIt.instance<CanvasTasksService>();
     _courseImportService = CourseImportService();
     CourseImportTasksBridge.instance.addListener(_handleCourseTasksRefresh);
+    _canvasService.addListener(_handleCanvasTasksRefresh);
     _loadManualTasks();
     _loadCourseTasks();
     _loadCachedCanvas();
@@ -114,11 +115,16 @@ class _TasksScreenState extends State<TasksScreen> {
   @override
   void dispose() {
     CourseImportTasksBridge.instance.removeListener(_handleCourseTasksRefresh);
+    _canvasService.removeListener(_handleCanvasTasksRefresh);
     super.dispose();
   }
 
   void _handleCourseTasksRefresh() {
     _loadCourseTasks();
+  }
+
+  void _handleCanvasTasksRefresh() {
+    _loadCachedCanvas();
   }
 
   Future<void> _loadCachedCanvas() async {
@@ -392,8 +398,14 @@ class _TasksScreenState extends State<TasksScreen> {
       await _persistManualTasks();
     } else if (task.source == 'canvas') {
       await _persistCanvasFromState();
+    } else if (task.source == 'course') {
+      await _courseImportService.removeTaskForCalendar(task.id);
+      CourseImportTasksBridge.instance.refresh();
     }
     if (!mounted) return;
+    if (task.source == 'canvas') {
+      await _canvasService.reloadFromCache();
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Task removed.')),
     );
