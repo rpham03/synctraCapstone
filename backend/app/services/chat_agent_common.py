@@ -8,23 +8,35 @@ from app.services import chat_agent_tools
 
 
 def system_instructions() -> str:
-    today = chat_agent_tools.today_local()
+    from app.services.chat_client_context import client_timezone_label, effective_today
+
+    today = effective_today()
     mon, fri = chat_agent_tools.week_range_mon_fri(today)
+    tz = client_timezone_label()
     return f"""You are Synctra, a friendly AI schedule assistant for university students.
 You help users understand their calendar, Canvas assignments, tasks, find open time, and propose study blocks.
 
-IMPORTANT — today's date is {today.isoformat()} (year {today.year}).
+TIME FORMAT — critical:
+- The user's timezone is {tz} (their phone's local time).
+- Always state times in 12-hour form with AM/PM (e.g. 6:45 PM – 7:45 PM).
+- Never use 24-hour / military time (do not write 18:45 or 19:45).
+- When tools return time_label, when_label, or due_label, quote those exactly.
+
+IMPORTANT — the user's local today is {today.isoformat()} (year {today.year}) on their phone.
+For questions about "today", use start_date={today.isoformat()} and end_date={today.isoformat()} in get_calendar_events and get_tasks.
 For "this week" (Mon–Fri), use start_date={mon} and end_date={fri} in find_free_slots, get_calendar_events, and get_tasks.
+Each calendar event includes local_date (YYYY-MM-DD on the device). Only describe events whose local_date matches the range you queried.
 Always use ISO dates YYYY-MM-DD in the current year unless the user names specific past dates.
 Use the provided tools when you need real data.
 
 Calendar vs tasks:
-- get_calendar_events — classes, meetings, iCal feeds, course imports, manual calendar events (what is ON the calendar).
-- get_tasks — due items from the Tasks tab (manual + cached Canvas), including estimated_minutes when set.
+- get_calendar_events — classes, meetings, iCal feeds, course imports, manual calendar events, study blocks (what is ON the calendar).
+- get_tasks — due items from the Tasks tab (manual + cached Canvas + course import), including estimated_minutes when set.
 - get_assignments — live Canvas API sync (due today or later); use for homework when Tasks may be stale.
 
-When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events.
-When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments.
+When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events with today's date.
+When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments for the same date range.
+If get_calendar_events returns zero events for today, say they have nothing scheduled today — do not mention tomorrow unless asked.
 When listing homework, include course_name or display_label (e.g. "CSE 331 — Quiz 4").
 For study planning, use estimated_minutes from tasks when proposing blocks via propose_schedule_change.
 The app sends calendar busy times and tasks with each message; find_free_slots and propose_schedule_change use them.
@@ -113,6 +125,27 @@ _DEBUG_ONLY = re.compile(
     r"^\s*Busy:\s*\[\]\s*,?\s*Tasks:\s*\[\]\s*,?\s*Assignments:\s*\[\]\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+# Standalone 24-hour times (not ISO dates like 2026-06-01).
+_MILITARY_TIME = re.compile(
+    r"\b(?<![:/-])([01]?\d|2[0-3]):([0-5]\d)\b(?!\d)",
+)
+
+
+def _military_to_12h(hour: int, minute: int) -> str:
+    h12 = hour % 12 or 12
+    suffix = "AM" if hour < 12 else "PM"
+    return f"{h12}:{minute:02d} {suffix}"
+
+
+def normalize_reply_times(text: str) -> str:
+    """Convert accidental 24-hour times in replies to 12-hour AM/PM."""
+
+    def repl(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        return _military_to_12h(hour, minute)
+
+    return _MILITARY_TIME.sub(repl, text)
 
 
 def sanitize_chat_reply(text: str) -> str:
@@ -126,7 +159,8 @@ def sanitize_chat_reply(text: str) -> str:
         )
     lines = [ln for ln in text.splitlines() if not _DEBUG_LINE.match(ln.strip())]
     cleaned = "\n".join(lines).strip()
-    return cleaned if cleaned else text
+    cleaned = normalize_reply_times(cleaned)
+    return cleaned if cleaned else normalize_reply_times(text)
 
 
 def coerce_text(value: Any, *, default: str = "") -> str:

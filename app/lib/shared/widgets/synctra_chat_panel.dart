@@ -68,6 +68,9 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
         data: {
           'message': userText,
           'user_id': uid,
+          'client_today': CalendarEventsLoader.clientTodayIso(),
+          'timezone_offset_minutes': DateTime.now().timeZoneOffset.inMinutes,
+          'timezone_name': DateTime.now().timeZoneName,
           'calendar_events': calendarEvents,
           'tasks': tasks,
         },

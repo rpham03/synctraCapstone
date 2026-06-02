@@ -7,6 +7,13 @@ from app.services import chat_agent_tools
 from app.services.chat_service import ChatService
 
 
+def test_normalize_reply_times_converts_military():
+    from app.services.chat_agent_common import normalize_reply_times
+
+    assert "6:45 PM" in normalize_reply_times("from 18:45 to 19:45")
+    assert "18:45" not in normalize_reply_times("from 18:45 to 19:45")
+
+
 def test_sanitize_chat_reply_strips_debug_dump():
     from app.services.chat_agent_common import sanitize_chat_reply
 
@@ -105,6 +112,7 @@ def test_list_calendar_events_from_client_context():
         clear_client_context()
     assert result["count"] == 1
     assert "CSE 331" in result["events"][0]["title"]
+    assert result["events"][0]["time_label"] == "10:00 AM – 11:00 AM"
 
 
 def test_list_tasks_from_client_context():
@@ -131,6 +139,7 @@ def test_list_tasks_from_client_context():
     assert result["count"] == 1
     assert result["tasks"][0]["display_label"] == "CSE 331 — Problem set 3"
     assert result["tasks"][0]["estimated_minutes"] == 90
+    assert "due_label" in result["tasks"][0]
 
 
 def test_propose_schedule_change_splits_long_sessions():

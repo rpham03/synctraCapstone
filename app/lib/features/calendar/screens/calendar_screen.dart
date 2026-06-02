@@ -25,7 +25,9 @@ import '../../../shared/services/schedule_chat_coordinator.dart';
 import '../../../shared/services/scheduling_service.dart';
 import '../../../shared/services/suggested_schedule_store.dart';
 import '../../../shared/state/calendar_shell_bridge.dart';
+import '../../../shared/state/shell_sidebar_controller.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
+import '../../../shared/utils/calendar_display_utils.dart';
 import '../../../shared/widgets/synctra_chat_panel.dart';
 import '../../../shared/widgets/sync_it_chrome.dart';
 
@@ -70,6 +72,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _canvasTasks = GetIt.instance<CanvasTasksService>();
     _courseImportService = CourseImportService();
     _canvasTasks.addListener(_reloadCanvasEvents);
+    CourseImportTasksBridge.instance.addListener(_handleCourseImportsRefresh);
     _scheduleStore.addListener(_onScheduleStoreChanged);
     _loadSavedFeeds();
     _loadManualEvents();
@@ -78,20 +81,18 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _nowTicker = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted) setState(() {});
     });
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _publishPlannerToShell());
-  }
-
-  void _publishPlannerToShell() {
-    if (!mounted) return;
-    CalendarShellBridge.instance.setPlannerBuilder(_buildPlannerPanel);
+    CalendarShellBridge.instance.registerImportActions(
+      onIcal: _openIcalFeedsSheet,
+      onCourseImport: _openCourseImportSheet,
+    );
   }
 
   void _onScheduleStoreChanged() {
-    if (mounted) {
-      setState(() {});
-      CalendarShellBridge.instance.refreshPlanner();
-    }
+    if (mounted) setState(() {});
+  }
+
+  void _handleCourseImportsRefresh() {
+    _loadCourseImports();
   }
 
   void _pushExternalBusyToStore() {
@@ -100,24 +101,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   @override
   void dispose() {
-    CalendarShellBridge.instance.clearPlanner();
+    CalendarShellBridge.instance.registerImportActions();
     _canvasTasks.removeListener(_reloadCanvasEvents);
+    CourseImportTasksBridge.instance
+        .removeListener(_handleCourseImportsRefresh);
     _scheduleStore.removeListener(_onScheduleStoreChanged);
     _nowTicker?.cancel();
     _timeScrollController.dispose();
     super.dispose();
-  }
-
-  Widget _buildPlannerPanel() {
-    return _CalendarPlannerPanel(
-      focusedDay: _focusedDay,
-      selectedDay: _selectedDay,
-      eventsForDay: _eventsForDay,
-      onDaySelected: _onDaySelected,
-      onPageChanged: (d) => setState(() => _focusedDay = d),
-      onOpenIcal: _openIcalFeedsSheet,
-      onOpenCourseImport: _openCourseImportSheet,
-    );
   }
 
   Iterable<EventModel> _allEvents() sync* {
@@ -260,126 +251,26 @@ class _CalendarScreenState extends State<CalendarScreen> {
     CourseImportTasksBridge.instance.refresh();
   }
 
-  List<EventModel> _canvasOnDay(DateTime day) => _allEvents()
-      .where((e) => e.source == 'canvas' && isSameDay(e.startTime, day))
-      .toList();
+  List<EventModel> _timedEventsOnDay(DateTime day) =>
+      CalendarDisplayUtils.timedEventsOnDay(_allEvents(), day);
 
-  /// Due-date chips only — timed Canvas items live in the hour grid.
   List<EventModel> _canvasChipsOnDay(DateTime day) =>
-      _canvasOnDay(day).where((e) => !_canvasShowsInTimeGrid(e)).toList();
+      CalendarDisplayUtils.canvasOnDay(_allEvents(), day)
+          .where((c) => !CalendarDisplayUtils.canvasShowsInTimeGrid(c))
+          .toList();
 
-  List<EventModel> _courseAllDayOnDay(DateTime day) => _dedupeCalendarEvents(
-        _allEvents().where((e) =>
-            (e.isDateOnlyCourseEvent || e.isCourseAssignment) &&
-            isSameDay(e.startTime, day)),
-      );
-
-  /// Canvas items that also occupy the time grid (vs due-date-only chips in the all-day row).
-  static bool _canvasShowsInTimeGrid(EventModel e) {
-    if (e.source != 'canvas') return false;
-    final durMin = e.endTime.difference(e.startTime).inMinutes;
-    if (durMin >= 30) return true;
-    final h = e.startTime.hour;
-    if (h >= 6 && h <= 21) return true;
-    return false;
-  }
-
-  static List<EventModel> _dedupeCalendarEvents(Iterable<EventModel> events) {
-    final unique = <EventModel>[];
-    final indexByKey = <String, int>{};
-
-    for (final event in events) {
-      final key = _displayDedupeKey(event);
-      if (key == null) {
-        unique.add(event);
-        continue;
-      }
-
-      final existingIndex = indexByKey[key];
-      if (existingIndex == null) {
-        indexByKey[key] = unique.length;
-        unique.add(event);
-        continue;
-      }
-
-      final existing = unique[existingIndex];
-      if (_eventDisplayScore(event) > _eventDisplayScore(existing)) {
-        unique[existingIndex] = event;
-      }
-    }
-
-    return unique;
-  }
-
-  static String? _displayDedupeKey(EventModel event) {
-    if (event.source != 'course') return null;
-
-    final importKey = _courseImportKey(event);
-    final dateKey = DateFormat('yyyy-MM-dd').format(event.startTime);
-    if (event.isCourseAssignment) {
-      return [
-        'course-assignment',
-        importKey,
-        dateKey,
-        _normalizedEventTitle(event.title),
-      ].join('|');
-    }
-
-    final normalizedTitle = _normalizedEventTitle(event.title);
-    if (!normalizedTitle.startsWith('lecture')) return null;
-    return [
-      'course-lecture',
-      importKey,
-      dateKey,
-      _timeKey(event.startTime),
-      _timeKey(event.endTime),
-    ].join('|');
-  }
-
-  static String _courseImportKey(EventModel event) {
-    final sourceEventId = event.sourceEventId;
-    if (sourceEventId == null || sourceEventId.isEmpty) return 'unknown';
-    if (sourceEventId.length <= 36) return sourceEventId;
-    return sourceEventId.substring(0, 36);
-  }
-
-  static String _normalizedEventTitle(String title) =>
-      title.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
-
-  static String _timeKey(DateTime time) =>
-      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
-
-  static int _eventDisplayScore(EventModel event) {
-    var score = 0;
-    final normalizedTitle = event.title.trim().toLowerCase();
-    final generic = RegExp(r'^(lecture|section|lab|discussion)(\s+[a-z])?$')
-        .hasMatch(normalizedTitle);
-    if (!generic) score += 100;
-    if (event.description.trim().isNotEmpty) score += 20;
-    score += event.title.length > 80 ? 80 : event.title.length;
-    return score;
-  }
-
-  List<EventModel> _timedEventsOnDay(DateTime day) => _dedupeCalendarEvents(
-        _allEvents()
-            .where((e) => isSameDay(e.startTime, day))
-            .where((e) => !e.isDateOnlyCourseEvent)
-            .where((e) => !e.isCourseAssignment)
-            .where((e) => e.source != 'canvas' || _canvasShowsInTimeGrid(e)),
-      );
+  List<EventModel> _courseAllDayOnDay(DateTime day) =>
+      CalendarDisplayUtils.courseAllDayOnDay(_allEvents(), day);
 
   List<ScheduleBlockModel> _blocksOnDay(DateTime day) =>
       _scheduleStore.blocks.where((b) => isSameDay(b.startTime, day)).toList();
 
-  /// Sidebar / month markers — timed grid Canvas is included only via [_timedEventsOnDay].
-  List<dynamic> _eventsForDay(DateTime day) {
-    final timed = _timedEventsOnDay(day);
-    final canvasChipsOnly =
-        _canvasOnDay(day).where((c) => !_canvasShowsInTimeGrid(c)).toList();
-    final courseAllDay = _courseAllDayOnDay(day);
-    final blocks = _blocksOnDay(day);
-    return [...timed, ...canvasChipsOnly, ...courseAllDay, ...blocks];
-  }
+  /// Sidebar / month markers — timed grid Canvas is included only via timedEventsOnDay.
+  List<dynamic> _eventsForDay(DateTime day) => CalendarDisplayUtils.entriesForDay(
+        allEvents: _allEvents(),
+        blocks: _scheduleStore.blocks,
+        day: day,
+      );
 
   DateTime _startOfWeek(DateTime d) {
     final day = DateTime(d.year, d.month, d.day);
@@ -485,23 +376,41 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
   }
 
-  void _openAssignmentSheet(EventModel assignment) {
+  void _openCalendarEntry(Object item) {
+    if (item is ScheduleBlockModel) {
+      _openBlockSheet(item);
+    } else if (item is EventModel) {
+      _openEventDetail(item);
+    }
+  }
+
+  void _openEventDetail(EventModel event) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetCtx) => _AssignmentDetailSheet(
-        event: assignment,
+      builder: (sheetCtx) => _CalendarEventDetailSheet(
+        event: event,
+        canDelete: _canDeleteEvent(event),
+        canEdit: _canEditEvent(event),
+        showScheduleStudy:
+            event.source == 'canvas' || event.isCourseAssignment,
+        onEdit: () {
+          Navigator.pop(sheetCtx);
+          _openEditEvent(event);
+        },
         onScheduleStudy: () {
           Navigator.pop(sheetCtx);
-          final mins = assignment.estimatedMinutes ??
-              assignment.endTime.difference(assignment.startTime).inMinutes;
+          final mins = event.estimatedMinutes ??
+              event.endTime.difference(event.startTime).inMinutes;
           final hours = (mins / 60.0).clamp(0.5, 4.0);
           final msg =
               GetIt.instance<ScheduleChatCoordinator>().scheduleStudyForDueItem(
-            taskId: 'cv-${assignment.id}',
-            title: assignment.title,
-            dueDate: assignment.startTime,
+            taskId: event.source == 'canvas'
+                ? 'cv-${event.id.replaceFirst('canvas-', '')}'
+                : 'cv-${event.id}',
+            title: event.title,
+            dueDate: event.startTime,
             hours: hours < 0.5 ? 1.5 : hours,
           );
           if (mounted) {
@@ -509,8 +418,94 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 .showSnackBar(SnackBar(content: Text(msg)));
           }
         },
+        onDelete: () => _confirmDeleteEvent(event, sheetCtx),
       ),
     );
+  }
+
+  bool _canDeleteEvent(EventModel event) => event.source != 'synctra_preview';
+
+  bool _canEditEvent(EventModel event) => event.source != 'synctra_preview';
+
+  String _deleteEventMessage(EventModel event) {
+    switch (event.source) {
+      case 'canvas':
+        return 'Remove this assignment from Synctra? It stays on Canvas until you sync again.';
+      case 'course':
+        return 'Remove this from your imported course and the Tasks tab?';
+      case 'manual':
+        return 'Delete this event from your calendar?';
+      default:
+        if (event.source.startsWith('ical')) {
+          return 'Remove this feed event from Synctra? It may return when the feed syncs.';
+        }
+        return 'Remove this from Synctra?';
+    }
+  }
+
+  Future<void> _confirmDeleteEvent(
+    EventModel event,
+    BuildContext sheetCtx,
+  ) async {
+    Navigator.pop(sheetCtx);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove from Synctra?'),
+        content: Text(_deleteEventMessage(event)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    await _removeEventFromSynctra(event);
+    if (!mounted) return;
+
+    setState(() {});
+    _pushExternalBusyToStore();
+
+    if (event.source == 'canvas') {
+      await _canvasTasks.reloadFromCache();
+    } else if (event.source == 'course') {
+      CourseImportTasksBridge.instance.refresh();
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Removed from Synctra.')),
+    );
+  }
+
+  Future<void> _removeEventFromSynctra(EventModel event) async {
+    switch (event.source) {
+      case 'manual':
+        _fixedEvents.removeWhere((e) => e.id == event.id);
+        await _persistManualEvents();
+      case 'canvas':
+        final taskId = event.id.startsWith('canvas-')
+            ? event.id.substring('canvas-'.length)
+            : event.id;
+        final tasks = await _canvasTasks.loadCached();
+        await _canvasTasks.saveCache(tasks.where((t) => t.id != taskId).toList());
+        await _reloadCanvasEvents();
+      case 'course':
+        await _courseImportService.removeEventForCalendar(event);
+        _fixedEvents.removeWhere((e) => e.id == event.id);
+      default:
+        if (event.source.startsWith('ical')) {
+          for (final list in _feedEvents.values) {
+            list.removeWhere((e) => e.id == event.id);
+          }
+        }
+    }
   }
 
   void _openBlockSheet(ScheduleBlockModel block) {
@@ -568,7 +563,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final seen = <String>{};
     for (var i = 0; i < 7; i++) {
       final day = weekStart.add(Duration(days: i));
-      for (final e in _canvasOnDay(day)) {
+      for (final e in CalendarDisplayUtils.canvasOnDay(_allEvents(), day)) {
         if (!seen.add(e.id)) continue;
         final minutes = e.endTime.difference(e.startTime).inMinutes;
         final hours = (minutes / 60.0).clamp(0.5, 3.0);
@@ -640,143 +635,114 @@ class _CalendarScreenState extends State<CalendarScreen> {
     }
   }
 
-  Future<void> _openQuickAddSheet() async {
-    final titleCtrl = TextEditingController();
-    final descCtrl = TextEditingController();
-    DateTime day =
-        DateTime(_focusedDay.year, _focusedDay.month, _focusedDay.day);
-    var startT = const TimeOfDay(hour: 14, minute: 0);
-    var endT = const TimeOfDay(hour: 15, minute: 0);
-    final clock = DateTime.now();
-
-    final ok = await showModalBottomSheet<bool>(
+  Future<void> _openEditEvent(EventModel event) async {
+    final day = DateTime(
+      event.startTime.year,
+      event.startTime.month,
+      event.startTime.day,
+    );
+    final result = await showModalBottomSheet<_QuickAddEventResult>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(
-            left: 20,
-            right: 20,
-            top: 8,
-            bottom: MediaQuery.viewInsetsOf(ctx).bottom + 20,
-          ),
-          child: StatefulBuilder(
-            builder: (ctx, setModal) {
-              Future<void> pickDay() async {
-                final d = await showDatePicker(
-                  context: ctx,
-                  initialDate: day,
-                  firstDate: DateTime(clock.year - 1),
-                  lastDate: DateTime(clock.year + 2),
-                );
-                if (d != null) setModal(() => day = d);
-              }
+      builder: (ctx) => _QuickAddEventSheet(
+        initialDay: day,
+        existing: event,
+      ),
+    );
+    if (result == null || !mounted) return;
+    await _applyEventEdit(event, result);
+  }
 
-              Future<void> pickStart() async {
-                final t =
-                    await showTimePicker(context: ctx, initialTime: startT);
-                if (t != null) setModal(() => startT = t);
-              }
-
-              Future<void> pickEnd() async {
-                final t = await showTimePicker(context: ctx, initialTime: endT);
-                if (t != null) setModal(() => endT = t);
-              }
-
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text('Quick event',
-                      style: Theme.of(ctx).textTheme.titleLarge),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: titleCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Title',
-                      border: OutlineInputBorder(),
-                    ),
-                    textCapitalization: TextCapitalization.sentences,
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: descCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Description (optional)',
-                      hintText: 'Notes, location, links…',
-                      alignLabelWithHint: true,
-                      border: OutlineInputBorder(),
-                    ),
-                    textCapitalization: TextCapitalization.sentences,
-                    minLines: 2,
-                    maxLines: 4,
-                  ),
-                  const SizedBox(height: 8),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Date'),
-                    subtitle: Text(DateFormat.yMMMd().format(day)),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: pickDay,
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Starts'),
-                    subtitle: Text(startT.format(ctx)),
-                    trailing: const Icon(Icons.schedule),
-                    onTap: pickStart,
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Ends'),
-                    subtitle: Text(endT.format(ctx)),
-                    trailing: const Icon(Icons.schedule),
-                    onTap: pickEnd,
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton(
-                    onPressed: () {
-                      if (titleCtrl.text.trim().isEmpty) return;
-                      Navigator.pop(ctx, true);
-                    },
-                    child: const Text('Add to calendar'),
-                  ),
-                ],
-              );
-            },
-          ),
-        );
-      },
+  Future<void> _applyEventEdit(
+    EventModel original,
+    _QuickAddEventResult result,
+  ) async {
+    final updated = original.copyWith(
+      title: result.title,
+      description: result.description,
+      startTime: result.start,
+      endTime: result.end,
     );
 
-    if (ok != true || !mounted) {
-      titleCtrl.dispose();
-      descCtrl.dispose();
-      return;
+    switch (original.source) {
+      case 'manual':
+        final i = _fixedEvents.indexWhere((e) => e.id == original.id);
+        if (i >= 0) {
+          setState(() => _fixedEvents[i] = updated);
+          await _persistManualEvents();
+        }
+      case 'canvas':
+        final taskId = original.id.startsWith('canvas-')
+            ? original.id.substring('canvas-'.length)
+            : original.id;
+        final tasks = await _canvasTasks.loadCached();
+        final ti = tasks.indexWhere((t) => t.id == taskId);
+        if (ti >= 0) {
+          tasks[ti] = tasks[ti].copyWith(
+            title: result.title,
+            dueDate: result.start,
+            description: result.description,
+          );
+          await _canvasTasks.saveCache(tasks);
+          await _reloadCanvasEvents();
+          await _canvasTasks.reloadFromCache();
+        }
+      case 'course':
+        await _courseImportService.updateCalendarEvent(updated);
+        final fi = _fixedEvents.indexWhere((e) => e.id == original.id);
+        if (fi >= 0) {
+          setState(() => _fixedEvents[fi] = updated);
+        } else {
+          await _loadCourseImports();
+        }
+        CourseImportTasksBridge.instance.refresh();
+      default:
+        if (original.source.startsWith('ical')) {
+          for (final list in _feedEvents.values) {
+            final j = list.indexWhere((e) => e.id == original.id);
+            if (j >= 0) {
+              setState(() => list[j] = updated);
+              break;
+            }
+          }
+        }
     }
 
-    final start =
-        DateTime(day.year, day.month, day.day, startT.hour, startT.minute);
-    var end = DateTime(day.year, day.month, day.day, endT.hour, endT.minute);
-    final endResolved =
-        end.isAfter(start) ? end : start.add(const Duration(hours: 1));
+    if (!mounted) return;
+    setState(() {});
+    _pushExternalBusyToStore();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Event updated.')),
+    );
+  }
+
+  Future<void> _openQuickAddSheet() async {
+    final initialDay =
+        DateTime(_focusedDay.year, _focusedDay.month, _focusedDay.day);
+
+    final result = await showModalBottomSheet<_QuickAddEventResult>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) => _QuickAddEventSheet(initialDay: initialDay),
+    );
+
+    if (result == null || !mounted) return;
 
     setState(() {
       _fixedEvents.add(
         EventModel(
           id: const Uuid().v4(),
-          title: titleCtrl.text.trim(),
-          startTime: start,
-          endTime: endResolved,
+          title: result.title,
+          startTime: result.start,
+          endTime: result.end,
           source: 'manual',
           isFixed: true,
-          description: descCtrl.text.trim(),
+          description: result.description,
         ),
       );
     });
-    titleCtrl.dispose();
-    descCtrl.dispose();
     await _persistManualEvents();
     _pushExternalBusyToStore();
     if (mounted) {
@@ -817,10 +783,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
       lastHour: _lastHour,
       hourHeight: _hourHeight,
       timeScrollController: _timeScrollController,
-      onTapCanvas: _openAssignmentSheet,
+      onOpenEvent: _openEventDetail,
+      onOpenCalendarEntry: _openCalendarEntry,
       onTapBlock: _openBlockSheet,
       onEventTimeChanged: _onGridEventTimeChanged,
       onBlockTimeChanged: _onGridBlockTimeChanged,
+      eventsForDay: _eventsForDay,
     );
   }
 
@@ -925,14 +893,18 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final useDrawerLayout = MediaQuery.sizeOf(context).width < 1000;
+    final width = MediaQuery.sizeOf(context).width;
+    final useDrawerLayout = width < 1000;
+    final useDesktopSidebarToggle = width >= 1000;
 
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       body: SafeArea(
         child: _wrapCalendarWithChat(
           context,
-          _buildMainPanel(showMenuButton: useDrawerLayout),
+          _buildMainPanel(
+            showMenuButton: useDrawerLayout || useDesktopSidebarToggle,
+          ),
         ),
       ),
       floatingActionButton: _calendarChatOpen &&
@@ -980,12 +952,14 @@ class _CalendarMainPanel extends StatelessWidget {
   final int lastHour;
   final double hourHeight;
   final ScrollController timeScrollController;
-  final void Function(EventModel) onTapCanvas;
+  final void Function(EventModel) onOpenEvent;
+  final void Function(Object) onOpenCalendarEntry;
   final void Function(ScheduleBlockModel) onTapBlock;
   final void Function(EventModel event, DateTime start, DateTime end)
       onEventTimeChanged;
   final void Function(ScheduleBlockModel block, DateTime start, DateTime end)
       onBlockTimeChanged;
+  final List<dynamic> Function(DateTime) eventsForDay;
 
   const _CalendarMainPanel({
     required this.toolbarTitle,
@@ -1017,10 +991,12 @@ class _CalendarMainPanel extends StatelessWidget {
     required this.lastHour,
     required this.hourHeight,
     required this.timeScrollController,
-    required this.onTapCanvas,
+    required this.onOpenEvent,
+    required this.onOpenCalendarEntry,
     required this.onTapBlock,
     required this.onEventTimeChanged,
     required this.onBlockTimeChanged,
+    required this.eventsForDay,
   });
 
   @override
@@ -1047,20 +1023,15 @@ class _CalendarMainPanel extends StatelessWidget {
         ),
         Expanded(
           child: viewMode == _CalendarViewMode.month
-              ? _MonthTableCalendar(
+              ? _CalendarMonthView(
                   focusedDay: focusedDay,
                   selectedDay: selectedDay,
                   format: monthFormat,
                   onDaySelected: onDaySelected,
                   onFormatChanged: onMonthFormatChanged,
                   onPageChanged: onPageChanged,
-                  eventLoader: (d) {
-                    final t = timedEventsOnDay(d);
-                    final c = canvasOnDay(d);
-                    final a = courseAllDayOnDay(d);
-                    final b = blocksOnDay(d);
-                    return [...t, ...c, ...a, ...b];
-                  },
+                  eventsForDay: eventsForDay,
+                  onOpenCalendarEntry: onOpenCalendarEntry,
                 )
               : DecoratedBox(
                   decoration: BoxDecoration(
@@ -1087,7 +1058,7 @@ class _CalendarMainPanel extends StatelessWidget {
                     canvasOnDay: canvasOnDay,
                     courseAllDayOnDay: courseAllDayOnDay,
                     blocksOnDay: blocksOnDay,
-                    onTapCanvas: onTapCanvas,
+                    onOpenEvent: onOpenEvent,
                     onTapBlock: onTapBlock,
                     onEventTimeChanged: onEventTimeChanged,
                     onBlockTimeChanged: onBlockTimeChanged,
@@ -1134,17 +1105,36 @@ class _CalendarToolbar extends StatelessWidget {
 
   static const _compactToolbarBreakpoint = 720.0;
 
+  Widget _sidebarMenuButton(BuildContext context) {
+    final isDesktop =
+        MediaQuery.sizeOf(context).width >= ShellSidebarController.desktopBreakpoint;
+    if (!isDesktop) {
+      return _compactIconButton(
+        context,
+        tooltip: 'Navigation menu',
+        onPressed: onOpenMenu,
+        icon: Icons.menu,
+      );
+    }
+    return ListenableBuilder(
+      listenable: ShellSidebarController.instance,
+      builder: (context, _) {
+        final open = ShellSidebarController.instance.visible;
+        return _compactIconButton(
+          context,
+          tooltip: open ? 'Hide navigation' : 'Show navigation',
+          onPressed: onOpenMenu,
+          icon: Icons.menu,
+        );
+      },
+    );
+  }
+
   Widget _navCluster(BuildContext context) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (showMenuButton)
-          _compactIconButton(
-            context,
-            tooltip: 'Menu — nav & planner',
-            onPressed: onOpenMenu,
-            icon: Icons.menu,
-          ),
+        if (showMenuButton) _sidebarMenuButton(context),
         _compactIconButton(
           context,
           tooltip: 'Previous',
@@ -1415,241 +1405,573 @@ class _CalendarToolbar extends StatelessWidget {
 
 enum _ToolbarMenuAction { schedule, ical, course, settings }
 
-// ── Month + upcoming planner (desktop column or mobile sheet) ───────────────
+// ── Month view: calendar grid + selected-day agenda ───────────────────────────
 
-class _CalendarPlannerPanel extends StatelessWidget {
+class _DayAgendaItem {
+  final Object source;
+  final DateTime sortTime;
+  final String title;
+  final String timeLabel;
+  final String typeLabel;
+  final Color accent;
+  final Color accentSurface;
+
+  const _DayAgendaItem({
+    required this.source,
+    required this.sortTime,
+    required this.title,
+    required this.timeLabel,
+    required this.typeLabel,
+    required this.accent,
+    required this.accentSurface,
+  });
+
+  factory _DayAgendaItem.fromEvent(EventModel event) {
+    final (title, course) = _chipTitleParts(event.title);
+    final displayTitle =
+        course != null ? '$course · $title' : title.trim();
+
+    final accent = switch (event.source) {
+      'canvas' => AppColors.canvasAssignment,
+      'course' => AppColors.deadline,
+      'manual' => AppColors.fixedEvent,
+      _ when event.source.startsWith('ical') => AppColors.icalAccent,
+      _ => AppColors.primary,
+    };
+
+    final typeLabel = switch (event.source) {
+      'canvas' => 'Canvas',
+      'course' => 'Course',
+      'manual' => 'Event',
+      _ when event.source.startsWith('ical') => 'iCal',
+      _ => 'Calendar',
+    };
+
+    String timeLabel;
+    if (event.isDateOnlyCourseEvent) {
+      timeLabel = 'Due today';
+    } else {
+      final end = event.endTime;
+      timeLabel = end.isAfter(event.startTime)
+          ? '${DateFormat('h:mm a').format(event.startTime)} – ${DateFormat('h:mm a').format(end)}'
+          : DateFormat('h:mm a').format(event.startTime);
+    }
+
+    return _DayAgendaItem(
+      source: event,
+      sortTime: event.startTime,
+      title: displayTitle,
+      timeLabel: timeLabel,
+      typeLabel: typeLabel,
+      accent: accent,
+      accentSurface: accent.withValues(alpha: 0.12),
+    );
+  }
+
+  factory _DayAgendaItem.fromBlock(ScheduleBlockModel block) {
+    final end = block.endTime;
+    final timeLabel = end.isAfter(block.startTime)
+        ? '${DateFormat('h:mm a').format(block.startTime)} – ${DateFormat('h:mm a').format(end)}'
+        : DateFormat('h:mm a').format(block.startTime);
+
+    return _DayAgendaItem(
+      source: block,
+      sortTime: block.startTime,
+      title: block.taskTitle,
+      timeLabel: timeLabel,
+      typeLabel: 'Study block',
+      accent: AppColors.aiStudyBlock,
+      accentSurface: AppColors.aiStudyBlock.withValues(alpha: 0.12),
+    );
+  }
+}
+
+class _CalendarMonthView extends StatelessWidget {
+  static const _desktopFormatBreakpoint = 1000.0;
+
   final DateTime focusedDay;
   final DateTime selectedDay;
-  final List<dynamic> Function(DateTime) eventsForDay;
+  final CalendarFormat format;
   final void Function(DateTime, DateTime) onDaySelected;
+  final void Function(CalendarFormat) onFormatChanged;
   final void Function(DateTime) onPageChanged;
-  final VoidCallback onOpenIcal;
-  final VoidCallback onOpenCourseImport;
-  // Kept to preserve hot-reload shape for existing dev sessions.
-  // These are intentionally unused by the current sidebar planner.
-  final ScrollController? scrollController;
-  final bool showHeader;
+  final List<dynamic> Function(DateTime) eventsForDay;
+  final void Function(Object) onOpenCalendarEntry;
 
-  const _CalendarPlannerPanel({
+  const _CalendarMonthView({
     required this.focusedDay,
     required this.selectedDay,
-    required this.eventsForDay,
+    required this.format,
     required this.onDaySelected,
+    required this.onFormatChanged,
     required this.onPageChanged,
-    required this.onOpenIcal,
-    required this.onOpenCourseImport,
-    // ignore: unused_element_parameter
-    this.scrollController,
-    // ignore: unused_element_parameter
-    this.showHeader = false,
+    required this.eventsForDay,
+    required this.onOpenCalendarEntry,
   });
+
+  List<_DayAgendaItem> _itemsForSelectedDay() {
+    final day = DateTime(
+      selectedDay.year,
+      selectedDay.month,
+      selectedDay.day,
+    );
+    final items = <_DayAgendaItem>[];
+    for (final raw in eventsForDay(day)) {
+      if (raw is EventModel) {
+        items.add(_DayAgendaItem.fromEvent(raw));
+      } else if (raw is ScheduleBlockModel) {
+        items.add(_DayAgendaItem.fromBlock(raw));
+      }
+    }
+    items.sort((a, b) => a.sortTime.compareTo(b.sortTime));
+    return items;
+  }
+
+  static double _tableCalendarHeight(CalendarFormat format) {
+    final rowCount = switch (format) {
+      CalendarFormat.month => 6,
+      CalendarFormat.twoWeeks => 2,
+      CalendarFormat.week => 1,
+    };
+    const headerH = 56.0;
+    const daysOfWeekH = 20.0;
+    const rowH = 46.0;
+    const buffer = 8.0;
+    return headerH + daysOfWeekH + rowCount * rowH + buffer;
+  }
+
+  String _selectedDayHeading(DateTime day) {
+    final today = DateTime.now();
+    final todayOnly = DateTime(today.year, today.month, today.day);
+    final selectedOnly = DateTime(day.year, day.month, day.day);
+    final diff = selectedOnly.difference(todayOnly).inDays;
+    if (diff == 0) return 'Today';
+    if (diff == 1) return 'Tomorrow';
+    if (diff == -1) return 'Yesterday';
+    return DateFormat('EEEE').format(day);
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final items = _itemsForSelectedDay();
+    final bottomInset = MediaQuery.paddingOf(context).bottom + 88;
+    final heading = _selectedDayHeading(selectedDay);
+    final dateLine = DateFormat('MMMM d, yyyy').format(selectedDay);
+    final isDesktop =
+        MediaQuery.sizeOf(context).width >= _desktopFormatBreakpoint;
+    final calendarFormat = isDesktop ? format : CalendarFormat.month;
 
-    final upcoming = <_UpcomingItem>[];
-    final today = DateTime.now();
-    for (var i = 0; i < 14; i++) {
-      final d =
-          DateTime(today.year, today.month, today.day).add(Duration(days: i));
-      for (final raw in eventsForDay(d)) {
-        if (raw is EventModel) {
-          upcoming.add(
-            _UpcomingItem(
-              date: d,
-              label: raw.title,
-              time: raw.startTime,
-              endTime: raw.endTime,
-              showTime: !raw.isDateOnlyCourseEvent,
-            ),
-          );
-        } else if (raw is ScheduleBlockModel) {
-          upcoming.add(
-            _UpcomingItem(
-              date: d,
-              label: raw.taskTitle,
-              time: raw.startTime,
-            ),
-          );
-        }
-      }
-    }
-    upcoming.sort((a, b) => a.time.compareTo(b.time));
-    final slice = upcoming.take(24).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
-          child: TableCalendar<dynamic>(
-            firstDay: DateTime.utc(2024, 1, 1),
-            lastDay: DateTime.utc(2030, 12, 31),
-            focusedDay: focusedDay,
-            selectedDayPredicate: (d) => isSameDay(selectedDay, d),
-            calendarFormat: CalendarFormat.month,
-            startingDayOfWeek: StartingDayOfWeek.monday,
-            eventLoader: eventsForDay,
-            onDaySelected: onDaySelected,
-            onPageChanged: onPageChanged,
-            rowHeight: 32,
-            daysOfWeekHeight: 16,
-            headerStyle: HeaderStyle(
-              formatButtonVisible: false,
-              titleCentered: true,
-              headerPadding: const EdgeInsets.symmetric(vertical: 4),
-              leftChevronPadding: EdgeInsets.zero,
-              rightChevronPadding: EdgeInsets.zero,
-              titleTextStyle: textTheme.labelLarge!,
-            ),
-            calendarStyle: CalendarStyle(
-              cellMargin: const EdgeInsets.all(1),
-              outsideDaysVisible: true,
-              weekendTextStyle:
-                  TextStyle(color: scheme.onSurfaceVariant, fontSize: 12),
-              defaultTextStyle:
-                  TextStyle(color: scheme.onSurface, fontSize: 12),
-              todayDecoration: BoxDecoration(
-                color: scheme.primary.withValues(alpha: 0.16),
-                shape: BoxShape.circle,
+    return CustomScrollView(
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: scheme.surface,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: scheme.outlineVariant.withValues(alpha: 0.55),
+                ),
               ),
-              selectedDecoration: BoxDecoration(
-                color: scheme.primary,
-                shape: BoxShape.circle,
-              ),
-              selectedTextStyle:
-                  TextStyle(color: scheme.onPrimary, fontSize: 12),
-              todayTextStyle: TextStyle(
-                  color: scheme.primary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 12),
-              markersMaxCount: 3,
-              markerDecoration: BoxDecoration(
-                color: scheme.secondary,
-                shape: BoxShape.circle,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: SizedBox(
+                  height: _tableCalendarHeight(calendarFormat),
+                  child: _MonthTableCalendar(
+                    focusedDay: focusedDay,
+                    selectedDay: selectedDay,
+                    format: calendarFormat,
+                    showFormatButton: isDesktop,
+                    onDaySelected: onDaySelected,
+                    onFormatChanged: onFormatChanged,
+                    onPageChanged: onPageChanged,
+                    eventLoader: eventsForDay,
+                  ),
+                ),
               ),
             ),
           ),
         ),
-        const Divider(height: 1),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-          child: Text('Upcoming', style: textTheme.titleSmall),
-        ),
-        Expanded(
-          child: slice.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Text(
-                      'No events yet.\nLink an iCal feed to see classes here.',
-                      textAlign: TextAlign.center,
-                      style: textTheme.bodySmall,
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        heading,
+                        style: textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        dateLine,
+                        style: textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: scheme.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    items.isEmpty
+                        ? 'Free day'
+                        : '${items.length} ${items.length == 1 ? 'item' : 'items'}',
+                    style: textTheme.labelMedium?.copyWith(
+                      color: scheme.primary,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                )
-              : ListView.separated(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  itemCount: slice.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 4),
-                  itemBuilder: (_, i) {
-                    final u = slice[i];
-                    return ListTile(
-                      dense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 0),
-                      title: Text(u.label,
-                          maxLines: 2, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(
-                        u.showTime
-                            ? '${DateFormat('EEE M/d').format(u.date)} · ${DateFormat('jm').format(u.time)}${u.endTime != null && u.endTime!.isAfter(u.time) ? ' - ${DateFormat('jm').format(u.endTime!)}' : ''}'
-                            : DateFormat('EEE M/d').format(u.date),
-                        style: textTheme.bodySmall,
-                      ),
-                    );
-                  },
                 ),
-        ),
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              FilledButton.icon(
-                onPressed: onOpenCourseImport,
-                icon: const Icon(Icons.school_outlined, size: 18),
-                label: const Text('Course import'),
-              ),
-              const SizedBox(height: 8),
-              OutlinedButton.icon(
-                onPressed: onOpenIcal,
-                icon: const Icon(Icons.link, size: 18),
-                label: const Text('iCal feeds'),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
+        if (items.isEmpty)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 20),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: scheme.outlineVariant.withValues(alpha: 0.5),
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    Icon(
+                      Icons.event_available_outlined,
+                      size: 32,
+                      color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'Nothing scheduled',
+                      style: textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Tap another day or use + to add an event.',
+                      textAlign: TextAlign.center,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+        else
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            sliver: SliverList(
+              delegate: SliverChildBuilderDelegate(
+                (context, i) {
+                  final item = items[i];
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _MonthDayAgendaCard(
+                      item: item,
+                      onTap: () => onOpenCalendarEntry(item.source),
+                    ),
+                  );
+                },
+                childCount: items.length,
+              ),
+            ),
+          ),
+        SliverToBoxAdapter(child: SizedBox(height: bottomInset)),
       ],
     );
   }
 }
 
-class _UpcomingItem {
-  final DateTime date;
-  final String label;
-  final DateTime time;
-  final DateTime? endTime;
-  final bool showTime;
-  _UpcomingItem({
-    required this.date,
-    required this.label,
-    required this.time,
-    this.endTime,
-    this.showTime = true,
+class _MonthDayAgendaCard extends StatelessWidget {
+  final _DayAgendaItem item;
+  final VoidCallback onTap;
+
+  const _MonthDayAgendaCard({
+    required this.item,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context).textTheme;
+
+    return Material(
+      color: item.accentSurface,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: item.accent.withValues(alpha: 0.28)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Container(width: 4, color: item.accent),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 7,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: item.accent.withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            item.typeLabel,
+                            style: theme.labelSmall?.copyWith(
+                              color: item.accent,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          item.timeLabel,
+                          style: theme.labelSmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      item.title,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        height: 1.25,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickAddEventResult {
+  final String title;
+  final String description;
+  final DateTime start;
+  final DateTime end;
+
+  const _QuickAddEventResult({
+    required this.title,
+    required this.description,
+    required this.start,
+    required this.end,
   });
 }
 
-void _showTimedEventPeek(BuildContext context, EventModel e) {
-  showModalBottomSheet<void>(
-    context: context,
-    showDragHandle: true,
-    builder: (ctx) {
-      return Padding(
-        padding: EdgeInsets.fromLTRB(
-            24, 8, 24, MediaQuery.paddingOf(ctx).bottom + 24),
+class _QuickAddEventSheet extends StatefulWidget {
+  final DateTime initialDay;
+  final EventModel? existing;
+
+  const _QuickAddEventSheet({
+    required this.initialDay,
+    this.existing,
+  });
+
+  @override
+  State<_QuickAddEventSheet> createState() => _QuickAddEventSheetState();
+}
+
+class _QuickAddEventSheetState extends State<_QuickAddEventSheet> {
+  late final TextEditingController _titleCtrl;
+  late final TextEditingController _descCtrl;
+  late DateTime _day;
+  late TimeOfDay _startT;
+  late TimeOfDay _endT;
+
+  bool get _isEdit => widget.existing != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _titleCtrl = TextEditingController(text: e?.title ?? '');
+    _descCtrl = TextEditingController(text: e?.description ?? '');
+    if (e != null) {
+      _day = DateTime(e.startTime.year, e.startTime.month, e.startTime.day);
+      _startT = TimeOfDay.fromDateTime(e.startTime);
+      _endT = TimeOfDay.fromDateTime(e.endTime);
+    } else {
+      _day = widget.initialDay;
+      _startT = const TimeOfDay(hour: 14, minute: 0);
+      _endT = const TimeOfDay(hour: 15, minute: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _descCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDay() async {
+    final clock = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _day,
+      firstDate: DateTime(clock.year - 1),
+      lastDate: DateTime(clock.year + 2),
+    );
+    if (picked != null && mounted) setState(() => _day = picked);
+  }
+
+  Future<void> _pickStart() async {
+    final picked = await showTimePicker(context: context, initialTime: _startT);
+    if (picked != null && mounted) setState(() => _startT = picked);
+  }
+
+  Future<void> _pickEnd() async {
+    final picked = await showTimePicker(context: context, initialTime: _endT);
+    if (picked != null && mounted) setState(() => _endT = picked);
+  }
+
+  void _submit() {
+    final title = _titleCtrl.text.trim();
+    if (title.isEmpty) return;
+
+    final start =
+        DateTime(_day.year, _day.month, _day.day, _startT.hour, _startT.minute);
+    final end =
+        DateTime(_day.year, _day.month, _day.day, _endT.hour, _endT.minute);
+    final endResolved =
+        end.isAfter(start) ? end : start.add(const Duration(hours: 1));
+
+    Navigator.pop(
+      context,
+      _QuickAddEventResult(
+        title: title,
+        description: _descCtrl.text.trim(),
+        start: start,
+        end: endResolved,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 8,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
+      ),
+      child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(e.title, style: Theme.of(ctx).textTheme.titleMedium),
-            const SizedBox(height: 8),
             Text(
-              e.isDateOnlyCourseEvent
-                  ? DateFormat('EEE, MMM d').format(e.startTime)
-                  : '${DateFormat('EEE, MMM d').format(e.startTime)} · '
-                      '${DateFormat('jm').format(e.startTime)} – ${DateFormat('jm').format(e.endTime)}',
-              style: Theme.of(ctx).textTheme.bodyMedium,
+              _isEdit ? 'Edit event' : 'Quick event',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
-            const SizedBox(height: 16),
-            Text('Description', style: Theme.of(ctx).textTheme.labelLarge),
-            const SizedBox(height: 6),
-            if (e.description.trim().isNotEmpty)
-              Text(e.description.trim(),
-                  style: Theme.of(ctx).textTheme.bodyMedium)
-            else
-              Text(
-                'No notes for this event.',
-                style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                    ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _titleCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Title',
+                border: OutlineInputBorder(),
               ),
+              textCapitalization: TextCapitalization.sentences,
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _descCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+                hintText: 'Notes, location, links…',
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+              ),
+              textCapitalization: TextCapitalization.sentences,
+              minLines: 2,
+              maxLines: 4,
+            ),
+            const SizedBox(height: 8),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Date'),
+              subtitle: Text(DateFormat.yMMMd().format(_day)),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _pickDay,
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Starts'),
+              subtitle: Text(_startT.format(context)),
+              trailing: const Icon(Icons.schedule),
+              onTap: _pickStart,
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Ends'),
+              subtitle: Text(_endT.format(context)),
+              trailing: const Icon(Icons.schedule),
+              onTap: _pickEnd,
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: _submit,
+              child: Text(_isEdit ? 'Save changes' : 'Add to calendar'),
+            ),
           ],
         ),
-      );
-    },
-  );
+      ),
+    );
+  }
 }
 
 // ── Month view (TableCalendar) ───────────────────────────────────────────────
@@ -1658,6 +1980,7 @@ class _MonthTableCalendar extends StatelessWidget {
   final DateTime focusedDay;
   final DateTime selectedDay;
   final CalendarFormat format;
+  final bool showFormatButton;
   final void Function(DateTime, DateTime) onDaySelected;
   final void Function(CalendarFormat) onFormatChanged;
   final void Function(DateTime) onPageChanged;
@@ -1667,6 +1990,7 @@ class _MonthTableCalendar extends StatelessWidget {
     required this.focusedDay,
     required this.selectedDay,
     required this.format,
+    required this.showFormatButton,
     required this.onDaySelected,
     required this.onFormatChanged,
     required this.onPageChanged,
@@ -1676,6 +2000,8 @@ class _MonthTableCalendar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
     return TableCalendar<dynamic>(
       firstDay: DateTime.utc(2024, 1, 1),
       lastDay: DateTime.utc(2030, 12, 31),
@@ -1687,25 +2013,64 @@ class _MonthTableCalendar extends StatelessWidget {
       onFormatChanged: onFormatChanged,
       onPageChanged: onPageChanged,
       startingDayOfWeek: StartingDayOfWeek.monday,
+      rowHeight: 46,
+      daysOfWeekHeight: 20,
       calendarStyle: CalendarStyle(
         outsideDaysVisible: true,
-        cellMargin: const EdgeInsets.all(2),
+        cellMargin: const EdgeInsets.all(3),
+        weekendTextStyle: TextStyle(color: scheme.onSurfaceVariant),
+        defaultTextStyle: TextStyle(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w500,
+        ),
         todayDecoration: BoxDecoration(
-          color: scheme.primary.withValues(alpha: 0.16),
+          color: scheme.surfaceContainerHighest,
           shape: BoxShape.circle,
+          border: Border.all(color: scheme.outlineVariant),
         ),
         selectedDecoration: BoxDecoration(
-          color: scheme.primary,
+          color: Colors.transparent,
+          shape: BoxShape.circle,
+          border: Border.all(color: scheme.onSurface, width: 2),
+        ),
+        selectedTextStyle: TextStyle(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w700,
+        ),
+        todayTextStyle: TextStyle(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w600,
+        ),
+        markersMaxCount: 4,
+        markerSize: 5,
+        markerMargin: const EdgeInsets.symmetric(horizontal: 0.5),
+        markerDecoration: BoxDecoration(
+          color: AppColors.secondary,
           shape: BoxShape.circle,
         ),
-        selectedTextStyle: TextStyle(color: scheme.onPrimary),
-        todayTextStyle:
-            TextStyle(color: scheme.primary, fontWeight: FontWeight.w600),
-        markerDecoration:
-            BoxDecoration(color: scheme.secondary, shape: BoxShape.circle),
       ),
-      headerStyle:
-          const HeaderStyle(titleCentered: true, formatButtonVisible: true),
+      headerStyle: HeaderStyle(
+        titleCentered: true,
+        formatButtonVisible: showFormatButton,
+        formatButtonDecoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: scheme.outlineVariant),
+        ),
+        formatButtonTextStyle: (textTheme.labelMedium ?? const TextStyle())
+            .copyWith(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w600,
+        ),
+        titleTextStyle: (textTheme.titleSmall ?? const TextStyle()).copyWith(
+          fontWeight: FontWeight.w700,
+          letterSpacing: -0.2,
+        ),
+        leftChevronIcon:
+            Icon(Icons.chevron_left_rounded, color: scheme.onSurfaceVariant),
+        rightChevronIcon:
+            Icon(Icons.chevron_right_rounded, color: scheme.onSurfaceVariant),
+      ),
     );
   }
 }
@@ -1872,7 +2237,7 @@ class _WeekDayTimeGrid extends StatefulWidget {
   final List<EventModel> Function(DateTime) canvasOnDay;
   final List<EventModel> Function(DateTime) courseAllDayOnDay;
   final List<ScheduleBlockModel> Function(DateTime) blocksOnDay;
-  final void Function(EventModel) onTapCanvas;
+  final void Function(EventModel) onOpenEvent;
   final void Function(ScheduleBlockModel) onTapBlock;
   final void Function(EventModel event, DateTime start, DateTime end)
       onEventTimeChanged;
@@ -1891,7 +2256,7 @@ class _WeekDayTimeGrid extends StatefulWidget {
     required this.canvasOnDay,
     required this.courseAllDayOnDay,
     required this.blocksOnDay,
-    required this.onTapCanvas,
+    required this.onOpenEvent,
     required this.onTapBlock,
     required this.onEventTimeChanged,
     required this.onBlockTimeChanged,
@@ -1904,6 +2269,15 @@ class _WeekDayTimeGrid extends StatefulWidget {
 class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
   double get _gridHeight =>
       (widget.lastHour - widget.firstHour + 1) * widget.hourHeight;
+
+  void _scheduleWhenVisible(VoidCallback action) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final route = ModalRoute.of(context);
+      if (route != null && !route.isCurrent) return;
+      action();
+    });
+  }
 
   /// Scroll to the first visible timed event, falling back to ~7:00.
   void _scrollToRelevantTime() {
@@ -1951,8 +2325,7 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => _scrollToRelevantTime());
+    _scheduleWhenVisible(_scrollToRelevantTime);
   }
 
   @override
@@ -1961,8 +2334,7 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
     if (oldWidget.days.first != widget.days.first ||
         oldWidget.days.length != widget.days.length ||
         _timedEventSignature(oldWidget) != _timedEventSignature(widget)) {
-      WidgetsBinding.instance
-          .addPostFrameCallback((_) => _scrollToRelevantTime());
+      _scheduleWhenVisible(_scrollToRelevantTime);
     }
   }
 
@@ -1979,10 +2351,8 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
         _AllDayAssignmentStrip(
           days: widget.days,
           canvasOnDay: widget.canvasOnDay,
-          onTap: widget.onTapCanvas,
           courseAllDayOnDay: widget.courseAllDayOnDay,
-          onTapCanvas: widget.onTapCanvas,
-          onTapCourse: (event) => _showTimedEventPeek(context, event),
+          onOpenEvent: widget.onOpenEvent,
         ),
         Expanded(
           child: Scrollbar(
@@ -2015,7 +2385,7 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
                                 timedEvents: widget.timedEventsOnDay(d),
                                 blocks: widget.blocksOnDay(d),
                                 now: now,
-                                onTapCanvas: widget.onTapCanvas,
+                                onOpenEvent: widget.onOpenEvent,
                                 onTapBlock: widget.onTapBlock,
                                 onEventTimeChanged: widget.onEventTimeChanged,
                                 onBlockTimeChanged: widget.onBlockTimeChanged,
@@ -2038,19 +2408,14 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
 class _AllDayAssignmentStrip extends StatelessWidget {
   final List<DateTime> days;
   final List<EventModel> Function(DateTime) canvasOnDay;
-  // Kept to preserve hot-reload shape for existing dev sessions.
-  final void Function(EventModel) onTap;
   final List<EventModel> Function(DateTime) courseAllDayOnDay;
-  final void Function(EventModel) onTapCanvas;
-  final void Function(EventModel) onTapCourse;
+  final void Function(EventModel) onOpenEvent;
 
   const _AllDayAssignmentStrip({
     required this.days,
     required this.canvasOnDay,
-    required this.onTap,
     required this.courseAllDayOnDay,
-    required this.onTapCanvas,
-    required this.onTapCourse,
+    required this.onOpenEvent,
   });
 
   @override
@@ -2098,7 +2463,7 @@ class _AllDayAssignmentStrip extends StatelessWidget {
                         child: _AllDayEventChip(
                           event: a,
                           color: AppColors.deadline,
-                          onTap: () => onTapCourse(a),
+                          onTap: () => onOpenEvent(a),
                         ),
                       ),
                     for (final a in canvasOnDay(d))
@@ -2107,7 +2472,7 @@ class _AllDayAssignmentStrip extends StatelessWidget {
                         child: _AllDayEventChip(
                           event: a,
                           color: AppColors.canvasAssignment,
-                          onTap: () => onTapCanvas(a),
+                          onTap: () => onOpenEvent(a),
                         ),
                       ),
                   ],
@@ -2291,7 +2656,7 @@ class _DayTimeColumn extends StatelessWidget {
   final List<EventModel> timedEvents;
   final List<ScheduleBlockModel> blocks;
   final DateTime now;
-  final void Function(EventModel) onTapCanvas;
+  final void Function(EventModel) onOpenEvent;
   final void Function(ScheduleBlockModel) onTapBlock;
   final void Function(EventModel event, DateTime start, DateTime end)
       onEventTimeChanged;
@@ -2308,7 +2673,7 @@ class _DayTimeColumn extends StatelessWidget {
     required this.timedEvents,
     required this.blocks,
     required this.now,
-    required this.onTapCanvas,
+    required this.onOpenEvent,
     required this.onTapBlock,
     required this.onEventTimeChanged,
     required this.onBlockTimeChanged,
@@ -2502,9 +2867,7 @@ class _DayTimeColumn extends StatelessWidget {
       final color = e.source == 'canvas'
           ? AppColors.canvasAssignment
           : (e.source == 'ical' ? AppColors.icalAccent : AppColors.fixedEvent);
-      final onTap = e.source == 'canvas'
-          ? () => onTapCanvas(e)
-          : () => _showTimedEventPeek(context, e);
+      final onTap = () => onOpenEvent(e);
       final ht = chipHeight(20);
       if (ht <= 0) return const SizedBox.shrink();
       final canDrag = e.source != 'synctra_preview';
@@ -2878,36 +3241,51 @@ class _StudyBlockChip extends StatelessWidget {
 
 // ── Bottom sheets ─────────────────────────────────────────────────────────────
 
-class _AssignmentDetailSheet extends StatelessWidget {
+class _CalendarEventDetailSheet extends StatelessWidget {
   final EventModel event;
+  final bool canDelete;
+  final bool canEdit;
+  final bool showScheduleStudy;
+  final VoidCallback onEdit;
   final VoidCallback onScheduleStudy;
+  final VoidCallback onDelete;
 
-  const _AssignmentDetailSheet({
+  const _CalendarEventDetailSheet({
     required this.event,
+    required this.canDelete,
+    required this.canEdit,
+    required this.showScheduleStudy,
+    required this.onEdit,
     required this.onScheduleStudy,
+    required this.onDelete,
   });
 
-  (String course, String title) _splitTitle(String t) {
-    final i = t.indexOf(':');
-    if (i > 0 && i < t.length - 1) {
-      return (t.substring(0, i).trim(), t.substring(i + 1).trim());
+  String _sourceLabel() {
+    switch (event.source) {
+      case 'canvas':
+        return 'Canvas';
+      case 'course':
+        return 'Course import';
+      case 'manual':
+        return 'Your event';
+      default:
+        if (event.source.startsWith('ical')) return 'iCal feed';
+        return 'Calendar';
     }
-    return ('—', t);
-  }
-
-  String _formatEstimatedDuration(int minutes) {
-    final hours = minutes ~/ 60;
-    final mins = minutes % 60;
-    if (hours == 0) return '$mins min';
-    if (mins == 0) return '$hours hr';
-    return '$hours hr $mins min';
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
-    final parts = _splitTitle(event.title);
+    final (title, course) = _chipTitleParts(event.title);
+    final displayTitle =
+        course != null ? '$course · $title' : event.title.trim();
+
+    final whenText = event.isDateOnlyCourseEvent
+        ? DateFormat('EEE, MMM d').format(event.startTime)
+        : '${DateFormat('EEE, MMM d').format(event.startTime)} · '
+            '${DateFormat('jm').format(event.startTime)} – ${DateFormat('jm').format(event.endTime)}';
 
     return Padding(
       padding: EdgeInsets.only(
@@ -2920,27 +3298,37 @@ class _AssignmentDetailSheet extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(parts.$2, style: textTheme.titleMedium),
+          Row(
+            children: [
+              Expanded(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    _sourceLabel(),
+                    style: textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              if (canEdit)
+                IconButton(
+                  tooltip: 'Edit',
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: onEdit,
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(displayTitle, style: textTheme.titleMedium),
           const SizedBox(height: 8),
-          _SheetRow(
-              icon: Icons.school_outlined, label: 'Course', value: parts.$1),
-          _SheetRow(
-            icon: Icons.event_outlined,
-            label: 'Due',
-            value: DateFormat('EEEE, MMM d, y · jm').format(event.startTime),
-          ),
-          _SheetRow(
-            icon: Icons.timer_outlined,
-            label: 'Estimated duration',
-            value: _formatEstimatedDuration(
-              event.estimatedMinutes ??
-                  event.endTime
-                      .difference(event.startTime)
-                      .inMinutes
-                      .clamp(1, 9999)
-                      .toInt(),
-            ),
-          ),
+          Text(whenText, style: textTheme.bodyMedium),
           const SizedBox(height: 16),
           Text('Description', style: textTheme.labelLarge),
           const SizedBox(height: 6),
@@ -2954,33 +3342,38 @@ class _AssignmentDetailSheet extends StatelessWidget {
             ),
             child: Text(
               event.description.trim().isEmpty
-                  ? 'No description.'
+                  ? 'No notes for this event.'
                   : event.description.trim(),
               style: textTheme.bodyMedium?.copyWith(
+                height: 1.35,
                 color: event.description.trim().isEmpty
                     ? scheme.onSurfaceVariant
                     : null,
-                height: 1.35,
               ),
             ),
           ),
-          const SizedBox(height: 12),
-          Text('Priority', style: textTheme.labelLarge),
-          const SizedBox(height: 6),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Chip(
-              label: const Text('Not set'),
-              backgroundColor: scheme.surfaceContainerHighest,
-              side: BorderSide.none,
+          if (showScheduleStudy) ...[
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: onScheduleStudy,
+              icon: const Icon(Icons.schedule),
+              label: const Text('Schedule study time'),
             ),
-          ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: onScheduleStudy,
-            icon: const Icon(Icons.schedule),
-            label: const Text('Schedule study time'),
-          ),
+          ],
+          if (canDelete) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: onDelete,
+              icon: Icon(Icons.delete_outline, color: scheme.error),
+              label: Text(
+                'Remove from Synctra',
+                style: TextStyle(color: scheme.error),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: scheme.error.withValues(alpha: 0.5)),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -3152,39 +3545,6 @@ class _BlockDetailSheetState extends State<_BlockDetailSheet> {
             leading: Icon(Icons.delete_outline, color: scheme.error),
             title: Text('Delete', style: TextStyle(color: scheme.error)),
             onTap: () => _delete(context),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SheetRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-
-  const _SheetRow(
-      {required this.icon, required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon,
-              size: 20, color: Theme.of(context).colorScheme.onSurfaceVariant),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: Theme.of(context).textTheme.labelSmall),
-                Text(value, style: Theme.of(context).textTheme.bodyMedium),
-              ],
-            ),
           ),
         ],
       ),
