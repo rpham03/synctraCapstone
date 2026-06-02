@@ -41,7 +41,7 @@ async def post_message(body: ChatMessageIn) -> dict:
     service = ChatService()
     events = list(body.calendar_events)
     tasks = list(body.tasks)
-    reply = await service.process_message(
+    reply, proposals = await service.process_message(
         body.message,
         body.user_id,
         calendar_events=events,
@@ -50,4 +50,4 @@ async def post_message(body: ChatMessageIn) -> dict:
         timezone_offset_minutes=body.timezone_offset_minutes,
         timezone_name=body.timezone_name.strip() or None,
     )
-    return {"reply": reply}
+    return {"reply": reply, "schedule_proposals": proposals}

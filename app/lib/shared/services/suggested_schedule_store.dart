@@ -124,6 +124,13 @@ class SuggestedScheduleStore extends ChangeNotifier {
     _previewFixed.clear();
     notifyListeners();
   }
+
+  /// Study blocks proposed by Sync It chat (Calendar + Chat tab).
+  void addStudyBlocks(List<ScheduleBlockModel> blocks) {
+    if (blocks.isEmpty) return;
+    _blocks.addAll(blocks);
+    notifyListeners();
+  }
 }
 
 void registerSuggestedScheduleStore() {

@@ -172,7 +172,7 @@ def test_chat_service_fallback_without_llm(monkeypatch):
         "_provider",
         lambda: "disabled",
     )
-    reply = asyncio.run(service.process_message("What is due this week?", "u1"))
+    reply, _ = asyncio.run(service.process_message("What is due this week?", "u1"))
     assert "Tasks" in reply or "Ollama" in reply
 
 
@@ -190,8 +190,8 @@ def test_chat_service_ollama_mocked(monkeypatch):
         "app.services.chat_service.OllamaAgentService.run_turn",
         side_effect=_fake_run_turn,
     ):
-        reply = asyncio.run(service.process_message("Plan my week", "u2"))
-    assert reply == "Here is your plan."
+        reply, _ = asyncio.run(service.process_message("Plan my week", "u2"))
+        assert reply == "Here is your plan."
 
 
 def test_chat_service_openai_mocked(monkeypatch):
@@ -204,5 +204,5 @@ def test_chat_service_openai_mocked(monkeypatch):
         "app.services.chat_service.OpenAIAgentService.run_turn",
         side_effect=_fake_run_turn,
     ):
-        reply = asyncio.run(service.process_message("Plan my week", "u3"))
-    assert reply == "Here is your plan."
+        reply, _ = asyncio.run(service.process_message("Plan my week", "u3"))
+        assert reply == "Here is your plan."

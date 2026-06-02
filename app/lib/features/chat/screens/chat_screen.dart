@@ -1,6 +1,7 @@
 // Full-screen chat tab — same engine as the embedded panel on Tasks week view.
 import 'package:flutter/material.dart';
 
+import '../../../shared/services/synctra_chat_constants.dart';
 import '../../../shared/widgets/synctra_chat_panel.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
 
@@ -16,7 +17,10 @@ class ChatScreen extends StatelessWidget {
         subtitle: 'Ask about your schedule',
         showSettings: true,
       ),
-      body: const SynctraChatPanel(showHeader: false),
+      body: const SynctraChatPanel(
+        showHeader: false,
+        suggestionChips: SynctraChatConstants.suggestionChips,
+      ),
     );
   }
 }

@@ -20,6 +20,9 @@ _timezone_offset: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 _timezone_name: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "chat_timezone_name", default=None
 )
+_schedule_proposals: contextvars.ContextVar[list[dict[str, Any]] | None] = (
+    contextvars.ContextVar("chat_schedule_proposals", default=None)
+)
 
 
 def set_calendar_events(events: list[dict[str, Any]] | None) -> None:
@@ -88,9 +91,25 @@ def effective_today() -> date:
     return today_local()
 
 
+def append_schedule_proposals(items: list[dict[str, Any]]) -> None:
+    if not items:
+        return
+    current = list(_schedule_proposals.get() or [])
+    current.extend(items)
+    _schedule_proposals.set(current)
+
+
+def get_schedule_proposals() -> list[dict[str, Any]]:
+    raw = _schedule_proposals.get()
+    if not raw:
+        return []
+    return [p for p in raw if isinstance(p, dict)]
+
+
 def clear_client_context() -> None:
     _calendar_events.set(None)
     _tasks.set(None)
     _client_today.set(None)
     _timezone_offset.set(None)
     _timezone_name.set(None)
+    _schedule_proposals.set(None)
