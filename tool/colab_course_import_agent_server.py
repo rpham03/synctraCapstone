@@ -451,7 +451,11 @@ def shutil_which(command: str) -> str | None:
     return None
 
 
-def start_cloudflared_tunnel(port: int) -> subprocess.Popen[str]:
+def start_cloudflared_tunnel(
+    port: int,
+    *,
+    wait_for_url_s: float = 60,
+) -> subprocess.Popen[str]:
     binary = ensure_cloudflared()
     proc = subprocess.Popen(
         [
@@ -466,6 +470,7 @@ def start_cloudflared_tunnel(port: int) -> subprocess.Popen[str]:
         text=True,
         bufsize=1,
     )
+    url_ready = threading.Event()
 
     def read_output() -> None:
         assert proc.stdout is not None
@@ -476,9 +481,25 @@ def start_cloudflared_tunnel(port: int) -> subprocess.Popen[str]:
             if match:
                 url = match.group(0)
                 print("\n[tunnel] public URL:", url, flush=True)
-                print("[tunnel] set OLLAMA_HOST to this URL in backend/.env\n", flush=True)
+                print(
+                    "[flutter] run with: "
+                    f"flutter run -d chrome --dart-define=API_BASE_URL={url}",
+                    flush=True,
+                )
+                print(
+                    "[backend .env] COLAB_AI_AGENT_HOST="
+                    f"{url}\n[backend .env] COLAB_COURSE_IMPORT_HOST={url}\n",
+                    flush=True,
+                )
+                url_ready.set()
 
     threading.Thread(target=read_output, daemon=True).start()
+    if not url_ready.wait(wait_for_url_s):
+        print(
+            "[tunnel] no trycloudflare.com URL printed yet. "
+            "Make sure the backend is running on the requested port, then rerun this cell.",
+            flush=True,
+        )
     return proc
 
 
