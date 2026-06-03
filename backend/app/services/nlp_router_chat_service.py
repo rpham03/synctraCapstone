@@ -45,6 +45,7 @@ class NlpRouterChatService:
             or os.getenv("COLAB_COURSE_IMPORT_HOST")
             or settings.colab_course_import_host
             or os.getenv("OLLAMA_HOST")
+            or self._configured_ollama_host()
             or os.getenv("COLAB_NLP_ROUTER_HOST")
             or settings.colab_nlp_router_host
             or ""
@@ -55,6 +56,12 @@ class NlpRouterChatService:
                 "COLAB_COURSE_IMPORT_HOST to an /api/generate server."
             )
         return host.rstrip("/")
+
+    def _configured_ollama_host(self) -> str:
+        host = (settings.ollama_host or "").strip().rstrip("/")
+        if host in {"http://localhost:11434", "http://127.0.0.1:11434"}:
+            return ""
+        return host
 
     def _ai_agent_model(self) -> str:
         return (

@@ -1,7 +1,10 @@
 """Tests for chat agent tools and OpenAI wiring."""
 
 import asyncio
+import json
 from unittest.mock import patch
+
+import httpx
 
 from app.services import chat_agent_tools
 from app.services.chat_service import ChatService
@@ -233,6 +236,77 @@ def test_nlp_router_ai_agent_host_falls_back_to_router(monkeypatch):
     monkeypatch.setattr(settings_mod.settings, "colab_nlp_router_host", "https://router.example")
 
     assert NlpRouterChatService()._ai_agent_host() == "https://router.example"
+
+
+def test_nlp_router_ai_agent_host_uses_configured_ollama(monkeypatch):
+    import app.core.config.settings as settings_mod
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    for key in (
+        "COLAB_AI_AGENT_HOST",
+        "COLAB_COURSE_IMPORT_HOST",
+        "OLLAMA_HOST",
+        "COLAB_NLP_ROUTER_HOST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(settings_mod.settings, "colab_ai_agent_host", "")
+    monkeypatch.setattr(settings_mod.settings, "colab_course_import_host", "")
+    monkeypatch.setattr(settings_mod.settings, "ollama_host", "https://ollama.example")
+    monkeypatch.setattr(settings_mod.settings, "colab_nlp_router_host", "https://router.example")
+
+    assert NlpRouterChatService()._ai_agent_host() == "https://ollama.example"
+
+
+def test_nlp_router_calls_ollama_generate_for_ai_agent(monkeypatch):
+    import app.core.config.settings as settings_mod
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    monkeypatch.setattr(settings_mod.settings, "colab_ai_agent_host", "")
+    monkeypatch.setattr(settings_mod.settings, "colab_course_import_host", "")
+    monkeypatch.setattr(settings_mod.settings, "colab_nlp_router_host", "")
+    monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example")
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["headers"] = dict(request.headers)
+        seen["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"response": "Hello from ai_agent"})
+
+    async def run() -> dict[str, object]:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await NlpRouterChatService()._call_ai_agent(client, "hi")
+
+    result = asyncio.run(run())
+
+    assert result["assistant_message"] == "Hello from ai_agent"
+    assert seen["url"] == "https://ollama.example/api/generate"
+    assert seen["headers"]["ngrok-skip-browser-warning"] == "true"
+    assert seen["payload"]["prompt"] == "hi"
+    assert seen["payload"]["options"]["syntra_mode"] == "ai_agent"
+
+
+def test_nlp_router_run_turn_uses_ai_agent_plan(monkeypatch):
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+    seen: dict[str, str] = {}
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "hi"}}]
+
+    async def fake_call_ai_agent(_client, message: str):
+        seen["message"] = message
+        return {"assistant_message": "Hello from the Ollama ai_agent"}
+
+    monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+    monkeypatch.setattr(service, "_call_ai_agent", fake_call_ai_agent)
+
+    reply = asyncio.run(service.run_turn("hi"))
+
+    assert seen["message"] == "hi"
+    assert reply == "Hello from the Ollama ai_agent"
 
 
 def test_chat_service_openai_mocked(monkeypatch):
