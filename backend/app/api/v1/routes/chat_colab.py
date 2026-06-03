@@ -46,6 +46,10 @@ router = APIRouter(tags=["chat-colab"])
 CLARIFICATION_ACTION = "clarification"
 DEFAULT_TIMEOUT_S = 60.0
 AI_AGENT_TIMEOUT_S = 120.0
+TUNNEL_REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "ngrok-skip-browser-warning": "true",
+}
 
 
 def _shared_colab_host() -> str:
@@ -150,7 +154,11 @@ async def _fetch_plan(
         payload["today"] = today
 
     try:
-        response = await client.post(f"{_nlp_router_host()}/plan", json=payload)
+        response = await client.post(
+            f"{_nlp_router_host()}/plan",
+            json=payload,
+            headers=TUNNEL_REQUEST_HEADERS,
+        )
         response.raise_for_status()
     except httpx.ConnectError as exc:
         raise HTTPException(
@@ -172,7 +180,17 @@ async def _fetch_plan(
             detail=f"Colab NLP router error: {exc.response.text}",
         ) from exc
 
-    body = response.json()
+    try:
+        body = response.json()
+    except ValueError as exc:
+        detail = response.text[:400]
+        if "ngrok" in detail.lower() or "<!doctype html" in detail.lower():
+            detail = (
+                "Colab NLP router returned an HTML tunnel page instead of JSON. "
+                "If you are using ngrok, restart the backend with the latest code "
+                "so requests include ngrok-skip-browser-warning, or use cloudflared."
+            )
+        raise HTTPException(status_code=502, detail=detail) from exc
     calls = body.get("tool_calls") or body.get("plan") or []
     if not isinstance(calls, list):
         raise HTTPException(
@@ -206,6 +224,7 @@ async def _call_ai_agent(client: httpx.AsyncClient, message: str) -> dict[str, A
         response = await client.post(
             f"{host}/api/generate",
             json=payload,
+            headers=TUNNEL_REQUEST_HEADERS,
             timeout=AI_AGENT_TIMEOUT_S,
         )
         response.raise_for_status()

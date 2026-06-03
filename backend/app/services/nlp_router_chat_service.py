@@ -13,6 +13,10 @@ from app.services.chat_agent_common import execute_tool, sanitize_chat_reply
 
 
 CLARIFICATION_ACTION = "clarification"
+TUNNEL_REQUEST_HEADERS = {
+    "Accept": "application/json",
+    "ngrok-skip-browser-warning": "true",
+}
 
 
 class NlpRouterChatService:
@@ -93,7 +97,11 @@ class NlpRouterChatService:
             "today": datetime.now().date().isoformat(),
         }
         try:
-            response = await client.post(f"{self._router_host()}/plan", json=payload)
+            response = await client.post(
+                f"{self._router_host()}/plan",
+                json=payload,
+                headers=TUNNEL_REQUEST_HEADERS,
+            )
             response.raise_for_status()
         except httpx.RequestError as exc:
             raise RuntimeError(
@@ -104,7 +112,18 @@ class NlpRouterChatService:
             detail = exc.response.text[:400] if exc.response is not None else str(exc)
             raise RuntimeError(f"Colab NLP router error: {detail}") from exc
 
-        body = response.json()
+        try:
+            body = response.json()
+        except ValueError as exc:
+            detail = response.text[:400]
+            if "ngrok" in detail.lower() or "<!doctype html" in detail.lower():
+                raise RuntimeError(
+                    "Colab NLP router returned an HTML tunnel page instead of JSON. "
+                    "If you are using ngrok, restart the backend with the latest code "
+                    "so requests include ngrok-skip-browser-warning, or use a "
+                    "cloudflared tunnel for the NLP router."
+                ) from exc
+            raise RuntimeError(f"Colab NLP router returned non-JSON response: {detail}") from exc
         calls = body.get("tool_calls") or body.get("plan") or []
         if not isinstance(calls, list):
             raise RuntimeError(f"Colab NLP router returned an unexpected payload: {body!r}")
@@ -125,6 +144,7 @@ class NlpRouterChatService:
             response = await client.post(
                 f"{self._ai_agent_host()}/api/generate",
                 json=payload,
+                headers=TUNNEL_REQUEST_HEADERS,
                 timeout=120.0,
             )
             response.raise_for_status()

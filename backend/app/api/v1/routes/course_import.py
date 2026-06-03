@@ -135,6 +135,7 @@ ASSIGNMENT_PAGE_CANDIDATES = [
 ]
 MAX_RELATED_PAGES = 10
 COURSE_REQUEST_HEADERS = {
+    "ngrok-skip-browser-warning": "true",
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) SyntraCourseImport/1.0"

@@ -1024,7 +1024,10 @@ def colab_ai_agent_handler(
         req = urlrequest.Request(
             f"{resolved_host}/api/generate",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "true",
+            },
             method="POST",
         )
         try:
