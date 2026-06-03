@@ -126,9 +126,9 @@ _DEBUG_ONLY = re.compile(
     r"^\s*Busy:\s*\[\]\s*,?\s*Tasks:\s*\[\]\s*,?\s*Assignments:\s*\[\]\s*$",
     re.IGNORECASE | re.DOTALL,
 )
-# Standalone 24-hour times (not ISO dates like 2026-06-01).
+# Standalone 24-hour times (not ISO dates like 2026-06-01, and not already 12-hour with AM/PM).
 _MILITARY_TIME = re.compile(
-    r"\b(?<![:/-])([01]?\d|2[0-3]):([0-5]\d)\b(?!\d)",
+    r"\b(?<![:/-])([01]?\d|2[0-3]):([0-5]\d)\b(?!\d)(?!\s*[AaPp][Mm]\b)",
 )
 
 
