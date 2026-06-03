@@ -89,9 +89,9 @@ class ChatService:
                 reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)
-                return reply
+                return reply, []
             except Exception as e:
-                return f"{str(e)[:500]}"
+                return f"{str(e)[:500]}", []
 
         use_ollama = provider == "ollama" or (
             provider == "auto" and not (settings.openai_api_key or "").strip()

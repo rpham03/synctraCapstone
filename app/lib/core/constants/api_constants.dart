@@ -4,13 +4,28 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 class ApiConstants {
-  /// Backend API — `localhost` on web/desktop; Android emulator uses `10.0.2.2`.
+  static const String _apiBaseUrlOverride =
+      String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'https://eden-script-rings-commented.trycloudflare.com',
+  );
+
+  /// Backend API — override with `--dart-define=API_BASE_URL=...`.
   static String get baseUrl {
+    final override = _apiBaseUrlOverride.trim();
+    if (override.isNotEmpty) return _withApiV1(override);
+
     if (kIsWeb) return 'http://localhost:8000/api/v1';
     try {
       if (Platform.isAndroid) return 'http://10.0.2.2:8000/api/v1';
     } catch (_) {}
     return 'http://localhost:8000/api/v1';
+  }
+
+  static String _withApiV1(String url) {
+    final normalized = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    if (normalized.endsWith('/api/v1')) return normalized;
+    return '$normalized/api/v1';
   }
 
   /// Canvas web UI — dashboard, courses, assignments (browser / WebView).

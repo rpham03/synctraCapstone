@@ -207,8 +207,11 @@ def test_chat_service_nlp_mocked(monkeypatch):
         run_turn = _fake_nlp_turn
 
     monkeypatch.setattr(service, "_nlp_agent", lambda: FakeNlpAgent())
-    reply = asyncio.run(service.process_message("What is due this week?", "u-nlp"))
+    reply, proposals = asyncio.run(
+        service.process_message("What is due this week?", "u-nlp")
+    )
     assert reply == "Here is your NLP-routed answer."
+    assert proposals == []
 
 
 def test_chat_service_openai_mocked(monkeypatch):
