@@ -16,8 +16,8 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
-    # Chat agent: ollama (local, free) | openai | auto (OpenAI if key set, else Ollama)
-    chat_llm_provider: str = "ollama"
+    # Chat agent: nlp (trained router) | ollama | openai | auto
+    chat_llm_provider: str = "nlp"
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
     # Dedicated model for course HTML -> unified JSON extraction.
@@ -28,5 +28,9 @@ class Settings(BaseSettings):
     colab_course_import_host: str = ""
     colab_course_import_model: str = "Qwen/Qwen2.5-3B-Instruct"
     colab_course_import_timeout: float = 120.0
+    # Optional Colab NLP tool-router and ai_agent endpoints for the app chat box.
+    colab_nlp_router_host: str = ""
+    colab_ai_agent_host: str = ""
+    colab_ai_agent_model: str = "Qwen/Qwen2.5-3B-Instruct"
 
 settings = Settings()

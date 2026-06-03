@@ -69,6 +69,11 @@ COURSE_SYSTEM_PROMPT = (
     "You are a strict JSON extraction service for a course calendar app. "
     "Return exactly one JSON object and no markdown, commentary, or code fences."
 )
+AI_AGENT_SYSTEM_PROMPT = (
+    "You are Synctra's helpful academic assistant. "
+    "Answer the student's request directly and clearly. "
+    "Do not return JSON unless the user asks for JSON."
+)
 
 TOOL_CALL_BLOCK_RE = re.compile(
     r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
@@ -279,6 +284,8 @@ class MockBackend:
     model_name = "mock-synctra-colab-llm"
 
     def generate(self, prompt: str, options: dict[str, Any]) -> str:
+        if str(options.get("syntra_mode") or options.get("mode") or "") == "ai_agent":
+            return f"(Mock Colab ai_agent) I received: {prompt[:200]}"
         return json.dumps({"class_events": [], "assignments": []})
 
     def chat(
@@ -381,16 +388,26 @@ class TransformersBackend:
         self._load()
         assert self._tokenizer is not None
 
+        mode = str(options.get("syntra_mode") or options.get("mode") or "course_import")
+        is_ai_agent = mode == "ai_agent"
         messages = [
-            {"role": "system", "content": COURSE_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": AI_AGENT_SYSTEM_PROMPT if is_ai_agent else COURSE_SYSTEM_PROMPT,
+            },
             {"role": "user", "content": prompt},
         ]
         encoded = self._encode_messages(messages, tools=None)
         max_new = int(
             options.get("num_predict")
-            or os.getenv("COLAB_COURSE_MAX_NEW_TOKENS", self.course_max_tokens)
+            or os.getenv(
+                "COLAB_CHAT_MAX_NEW_TOKENS" if is_ai_agent else "COLAB_COURSE_MAX_NEW_TOKENS",
+                self.chat_max_tokens if is_ai_agent else self.course_max_tokens,
+            )
         )
         text = self._run_generate(encoded, max_new_tokens=max_new, options=options)
+        if is_ai_agent:
+            return text.strip()
         return normalize_json_response(text)
 
     def chat(

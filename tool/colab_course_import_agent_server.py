@@ -1,40 +1,46 @@
 #!/usr/bin/env python3
-"""Synctra Google Colab LLM server (course import + chat).
+"""Google Colab course-import AI server.
 
-Standalone script — copy into a Colab notebook or upload this file.
-Exposes Ollama-compatible endpoints so your **local** Synctra backend can use
-Colab GPU instead of local Ollama:
+Standalone script — copy this file into a Colab notebook cell or upload it.
+It does not import from the Synctra FastAPI app; run it on Colab GPU and exposes
+two endpoints behind one tunnel:
 
-- ``POST /api/generate`` — course-import JSON extraction (course_import.py)
-- ``POST /api/chat`` — schedule assistant with tool calling (chat tab)
+  * POST /api/generate  — Ollama-compatible, used by course_import.py
+  * POST /plan          — trained NLP tool router, used by chat_colab.py
 
-Canonical copy: ``backend/scripts/colab_course_import_agent_server.py``
+Canonical copy in repo: ``backend/scripts/colab_course_import_agent_server.py``
 
-Colab quick start::
+Colab quick start (course import only)::
 
     !pip -q install fastapi uvicorn transformers accelerate torch
-    !python colab_course_import_agent_server.py --tunnel cloudflared --preload
+    !python colab_course_import_agent_server.py --tunnel cloudflared
 
-When cloudflared prints a public URL, set in **local** ``backend/.env``::
+Colab quick start with the trained chat router enabled::
+
+    !pip -q install fastapi uvicorn transformers accelerate torch
+    !python colab_course_import_agent_server.py \\
+        --tunnel cloudflared \\
+        --nlp-router-model-dir /content/syntra_tool_router \\
+        --nlp-agent-path /content
+
+When the server prints a public tunnel URL, put it in your **local** backend
+``backend/.env``::
 
     OLLAMA_HOST=https://your-tunnel-url.trycloudflare.com
-    OLLAMA_MODEL=qwen2.5:3b
 
-Restart the local backend (``uvicorn app.main:app --reload``).
-Tool execution (Canvas, calendar, tasks) still runs locally; Colab only
-runs the Hugging Face model.
+Then restart the Synctra backend. ``course_import.py`` posts to
+``{OLLAMA_HOST}/api/generate`` and ``chat_colab.py`` posts to
+``{OLLAMA_HOST}/plan``. One tunnel, two routes.
 
-Default model (free on Hugging Face, fits Colab T4):
+Optional Colab env vars::
 
-    Qwen/Qwen2.5-3B-Instruct
-
-Optional env vars::
-
-    COLAB_LLM_MODEL=Qwen/Qwen2.5-3B-Instruct
+    COLAB_COURSE_MODEL=Qwen/Qwen2.5-3B-Instruct
     COLAB_COURSE_MAX_NEW_TOKENS=4096
-    COLAB_CHAT_MAX_NEW_TOKENS=1024
-    COLAB_AGENT_BACKEND=transformers   # or mock
-    COLAB_TUNNEL=cloudflared
+    COLAB_AGENT_BACKEND=transformers   # or mock for tunnel testing
+    COLAB_TUNNEL=cloudflared           # or ngrok
+    SYNTRA_TOOL_ROUTER_MODEL=/content/syntra_tool_router
+    SYNTRA_AGENT_PATH=/content
+    SYNTRA_TOOL_ROUTER_THRESHOLD=0.80
 """
 
 from __future__ import annotations
@@ -60,24 +66,22 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 
-# Free HF instruct model — strong tool use for calendar/scheduling on Colab T4.
 DEFAULT_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-DEFAULT_COURSE_MAX_TOKENS = 4096
-DEFAULT_CHAT_MAX_TOKENS = 1024
-
+DEFAULT_MAX_NEW_TOKENS = 4096
 COURSE_SYSTEM_PROMPT = (
     "You are a strict JSON extraction service for a course calendar app. "
     "Return exactly one JSON object and no markdown, commentary, or code fences."
 )
-
-TOOL_CALL_BLOCK_RE = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-    re.DOTALL | re.IGNORECASE,
+AI_AGENT_SYSTEM_PROMPT = (
+    "You are Synctra's helpful academic assistant. "
+    "Answer the student's request directly and clearly. "
+    "Do not return JSON unless the user asks for JSON."
 )
+SYSTEM_PROMPT = COURSE_SYSTEM_PROMPT
 
 
 class GenerateRequest(BaseModel):
-    """Ollama /api/generate — used by course_import.py."""
+    """Subset of Ollama /api/generate used by course_import.py."""
 
     model: str | None = None
     prompt: str
@@ -93,39 +97,15 @@ class GenerateResponse(BaseModel):
     done: bool = True
 
 
-class ChatRequest(BaseModel):
-    """Ollama /api/chat — used by the Synctra chat agent."""
-
-    model: str | None = None
-    messages: list[dict[str, Any]]
-    tools: list[dict[str, Any]] = Field(default_factory=list)
-    stream: bool = False
-    options: dict[str, Any] = Field(default_factory=dict)
-
-
-class ChatResponse(BaseModel):
-    model: str
-    created_at: str
-    message: dict[str, Any]
-    done: bool = True
-
-
-class LlmBackend(Protocol):
+class AgentBackend(Protocol):
     model_name: str
 
     def generate(self, prompt: str, options: dict[str, Any]) -> str:
-        """Course-import JSON string."""
-
-    def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        options: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Ollama-shaped assistant message (content and/or tool_calls)."""
+        """Return course-import JSON or an ai_agent assistant response."""
 
 
 def extract_json_object(text: str) -> str | None:
+    """Extract the first balanced JSON object from an LLM response."""
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
@@ -163,6 +143,7 @@ def extract_json_object(text: str) -> str | None:
 
 
 def normalize_json_response(text: str) -> str:
+    """Return compact JSON when possible, otherwise pass through raw text."""
     json_text = extract_json_object(text)
     if not json_text:
         return text.strip()
@@ -181,139 +162,23 @@ def normalize_json_response(text: str) -> str:
     return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
 
 
-def ollama_tools_to_hf(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    converted: list[dict[str, Any]] = []
-    for tool in tools:
-        fn = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-        if not isinstance(fn, dict):
-            continue
-        name = fn.get("name")
-        if not name:
-            continue
-        converted.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
-                },
-            }
-        )
-    return converted
+class MockAgent:
+    """Fast startup mode for checking tunnels and local request wiring."""
 
-
-def normalize_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Map Ollama chat messages to HF chat-template roles."""
-    out: list[dict[str, Any]] = []
-    for msg in messages:
-        role = str(msg.get("role", "user"))
-        content = msg.get("content", "")
-        if role == "tool":
-            name = msg.get("name") or msg.get("tool_name") or "tool"
-            text = content if isinstance(content, str) else json.dumps(content)
-            out.append(
-                {
-                    "role": "tool",
-                    "name": name,
-                    "content": text,
-                }
-            )
-            continue
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, dict):
-                    parts.append(str(part.get("text") or part.get("content") or ""))
-                else:
-                    parts.append(str(part))
-            content = "\n".join(p for p in parts if p)
-        out.append({"role": role, "content": str(content)})
-    return out
-
-
-def parse_tool_calls_from_text(text: str) -> tuple[str, list[dict[str, Any]]]:
-    """Parse Qwen-style <tool_call>{...}</tool_call> blocks into Ollama tool_calls."""
-    tool_calls: list[dict[str, Any]] = []
-    for match in TOOL_CALL_BLOCK_RE.finditer(text):
-        raw = match.group(1).strip()
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        name = payload.get("name") or payload.get("tool") or ""
-        arguments = payload.get("arguments") or payload.get("parameters") or {}
-        if not name:
-            continue
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-        tool_calls.append(
-            {
-                "function": {
-                    "name": str(name),
-                    "arguments": arguments if isinstance(arguments, dict) else {},
-                }
-            }
-        )
-
-    content = TOOL_CALL_BLOCK_RE.sub("", text).strip()
-    return content, tool_calls
-
-
-def build_ollama_message(text: str) -> dict[str, Any]:
-    content, tool_calls = parse_tool_calls_from_text(text)
-    message: dict[str, Any] = {"role": "assistant", "content": content}
-    if tool_calls:
-        message["tool_calls"] = tool_calls
-        if not content:
-            message["content"] = ""
-    return message
-
-
-class MockBackend:
-    """Tunnel / wiring test without loading a model."""
-
-    model_name = "mock-synctra-colab-llm"
+    model_name = "mock-course-import-agent"
 
     def generate(self, prompt: str, options: dict[str, Any]) -> str:
+        if str(options.get("syntra_mode") or options.get("mode") or "") == "ai_agent":
+            return f"(Mock Colab ai_agent) I received: {prompt[:200]}"
         return json.dumps({"class_events": [], "assignments": []})
 
-    def chat(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        options: dict[str, Any],
-    ) -> dict[str, Any]:
-        last_user = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                last_user = str(msg.get("content", ""))
-                break
-        return {
-            "role": "assistant",
-            "content": (
-                f"(Mock Colab agent) I received: {last_user[:200]}. "
-                "Switch COLAB_AGENT_BACKEND=transformers to use the real model."
-            ),
-        }
 
+class TransformersAgent:
+    """Small instruct-model backend suitable for Colab T4/L4 runtimes."""
 
-class TransformersBackend:
-    """Qwen2.5 (or any HF instruct model) on Colab GPU."""
-
-    def __init__(
-        self,
-        model_name: str,
-        *,
-        course_max_tokens: int,
-        chat_max_tokens: int,
-    ) -> None:
+    def __init__(self, model_name: str, max_new_tokens: int) -> None:
         self.model_name = model_name
-        self.course_max_tokens = course_max_tokens
-        self.chat_max_tokens = chat_max_tokens
+        self.max_new_tokens = max_new_tokens
         self._tokenizer = None
         self._model = None
 
@@ -322,14 +187,15 @@ class TransformersBackend:
             return
 
         try:
+            import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
-                "Missing dependencies. In Colab run: "
+                "Missing model dependencies. In Colab run: "
                 "!pip -q install transformers accelerate torch"
             ) from exc
 
-        print(f"[agent] loading Hugging Face model: {self.model_name}", flush=True)
+        print(f"[agent] loading model: {self.model_name}", flush=True)
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             trust_remote_code=True,
@@ -341,20 +207,45 @@ class TransformersBackend:
             trust_remote_code=True,
         )
         self._model.eval()
-        print("[agent] model ready", flush=True)
 
-    def _run_generate(
+    def _render_prompt(
         self,
-        encoded: dict[str, Any],
+        prompt: str,
         *,
-        max_new_tokens: int,
-        options: dict[str, Any],
-    ) -> str:
-        import torch
+        system_prompt: str,
+        expects_json: bool,
+    ) -> dict[str, Any]:
+        assert self._tokenizer is not None
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        if getattr(self._tokenizer, "chat_template", None):
+            return self._tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
 
+        suffix = "JSON:" if expects_json else "Assistant:"
+        rendered = f"{system_prompt}\n\nUser request:\n{prompt}\n\n{suffix}"
+        return self._tokenizer(rendered, return_tensors="pt")
+
+    def generate(self, prompt: str, options: dict[str, Any]) -> str:
+        self._load()
         assert self._model is not None
         assert self._tokenizer is not None
 
+        import torch
+
+        mode = str(options.get("syntra_mode") or options.get("mode") or "course_import")
+        is_ai_agent = mode == "ai_agent"
+        encoded = self._render_prompt(
+            prompt,
+            system_prompt=AI_AGENT_SYSTEM_PROMPT if is_ai_agent else COURSE_SYSTEM_PROMPT,
+            expects_json=not is_ai_agent,
+        )
         first_device = next(self._model.parameters()).device
         encoded = {
             key: value.to(first_device) if torch.is_tensor(value) else value
@@ -362,6 +253,13 @@ class TransformersBackend:
         }
 
         temperature = float(options.get("temperature", 0) or 0)
+        max_new_tokens = int(
+            options.get("num_predict")
+            or os.getenv(
+                "COLAB_CHAT_MAX_NEW_TOKENS" if is_ai_agent else "COLAB_COURSE_MAX_NEW_TOKENS",
+                self.max_new_tokens,
+            )
+        )
         generation_kwargs: dict[str, Any] = {
             "max_new_tokens": max_new_tokens,
             "do_sample": temperature > 0,
@@ -375,127 +273,144 @@ class TransformersBackend:
 
         input_len = encoded["input_ids"].shape[-1]
         new_tokens = output_ids[0][input_len:]
-        return self._tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-    def generate(self, prompt: str, options: dict[str, Any]) -> str:
-        self._load()
-        assert self._tokenizer is not None
-
-        messages = [
-            {"role": "system", "content": COURSE_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
-        encoded = self._encode_messages(messages, tools=None)
-        max_new = int(
-            options.get("num_predict")
-            or os.getenv("COLAB_COURSE_MAX_NEW_TOKENS", self.course_max_tokens)
-        )
-        text = self._run_generate(encoded, max_new_tokens=max_new, options=options)
+        text = self._tokenizer.decode(new_tokens, skip_special_tokens=True)
+        if is_ai_agent:
+            return text.strip()
         return normalize_json_response(text)
 
-    def chat(
+
+class NlpRouterBackend:
+    """Wraps the trained NlpToolCallingAgent for the /plan endpoint.
+
+    Loaded lazily so the rest of the server still works if the trained
+    model directory is missing.
+    """
+
+    def __init__(
         self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-        options: dict[str, Any],
-    ) -> dict[str, Any]:
-        self._load()
-        normalized = normalize_ollama_messages(messages)
-        hf_tools = ollama_tools_to_hf(tools)
-        encoded = self._encode_messages(normalized, tools=hf_tools or None)
-        max_new = int(
-            options.get("num_predict")
-            or os.getenv("COLAB_CHAT_MAX_NEW_TOKENS", self.chat_max_tokens)
-        )
-        text = self._run_generate(encoded, max_new_tokens=max_new, options=options)
-        return build_ollama_message(text)
+        *,
+        model_dir: str,
+        agent_path: str,
+        confidence_threshold: float,
+    ) -> None:
+        if agent_path and agent_path not in sys.path:
+            sys.path.insert(0, agent_path)
+        try:
+            from nlp_tool_calling_agent import NlpToolCallingAgent  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Cannot import nlp_tool_calling_agent from {agent_path}. "
+                "Use --nlp-agent-path to point at the directory containing "
+                "nlp_tool_calling_agent.py."
+            ) from exc
 
-    def _encode_messages(
+        from datetime import date as _date
+
+        self.model_dir = model_dir
+        self.confidence_threshold = confidence_threshold
+        self._lock = threading.Lock()
+        self._agent = NlpToolCallingAgent(
+            today=_date.today(),
+            model_dir=model_dir,
+            confidence_threshold=confidence_threshold,
+        )
+        self.has_trained_model = self._agent.intent_model is not None
+
+    def plan(
         self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]:
-        assert self._tokenizer is not None
-        template_kwargs: dict[str, Any] = {
-            "add_generation_prompt": True,
-            "return_dict": True,
-            "return_tensors": "pt",
-        }
-        if tools and getattr(self._tokenizer, "chat_template", None):
-            template_kwargs["tools"] = tools
-            try:
-                return self._tokenizer.apply_chat_template(messages, **template_kwargs)
-            except TypeError:
-                pass
+        message: str,
+        *,
+        clarification_pending: bool,
+        today: str | None,
+    ) -> list[dict[str, Any]]:
+        from dataclasses import asdict
+        from datetime import date as _date
 
-        if getattr(self._tokenizer, "chat_template", None):
-            return self._tokenizer.apply_chat_template(messages, **template_kwargs)
-
-        rendered = "\n".join(
-            f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in messages
-        )
-        rendered += "\nASSISTANT:"
-        return self._tokenizer(rendered, return_tensors="pt")
+        with self._lock:
+            if today:
+                try:
+                    self._agent.today = datetime.strptime(today, "%Y-%m-%d").date()
+                except ValueError as exc:
+                    raise ValueError(f"today must be YYYY-MM-DD: {exc}") from exc
+            else:
+                self._agent.today = _date.today()
+            calls = self._agent.plan(
+                message,
+                clarification_pending=clarification_pending,
+            )
+        return [asdict(call) for call in calls]
 
 
-def create_app(backend: LlmBackend) -> FastAPI:
-    app = FastAPI(title="Synctra Colab LLM Server", version="0.2.0")
+class PlanRequest(BaseModel):
+    """Body for POST /plan, consumed by backend/.../chat_colab.py."""
+
+    message: str
+    clarification_pending: bool = False
+    today: str | None = None  # Optional YYYY-MM-DD override.
+
+
+def create_app(
+    agent: AgentBackend,
+    *,
+    nlp_router: NlpRouterBackend | None = None,
+) -> FastAPI:
+    app = FastAPI(title="Colab Synctra Agent", version="0.2.0")
+
+    endpoints = ["/api/generate"]
+    if nlp_router is not None:
+        endpoints.append("/plan")
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "ok": True,
-            "model": backend.model_name,
+            "model": agent.model_name,
             "ollama_compatible": True,
-            "endpoints": ["/api/generate", "/api/chat"],
-            "provider": "huggingface-transformers-colab",
+            "endpoints": endpoints,
         }
-
-    @app.get("/api/tags")
-    def tags() -> dict[str, Any]:
-        """Minimal Ollama tags stub so health probes succeed."""
-        return {
-            "models": [
-                {
-                    "name": backend.model_name,
-                    "model": backend.model_name,
-                    "modified_at": datetime.now(timezone.utc).isoformat(),
-                    "size": 0,
-                }
-            ]
-        }
+        if nlp_router is not None:
+            body["nlp_router"] = {
+                "model_dir": nlp_router.model_dir,
+                "has_trained_model": nlp_router.has_trained_model,
+                "confidence_threshold": nlp_router.confidence_threshold,
+            }
+        return body
 
     @app.post("/api/generate", response_model=GenerateResponse)
     def generate(request: GenerateRequest) -> GenerateResponse:
         if request.stream:
-            raise HTTPException(status_code=400, detail="Streaming not supported.")
+            raise HTTPException(
+                status_code=400,
+                detail="Streaming is not supported by this Colab adapter.",
+            )
+
         try:
-            response_text = backend.generate(request.prompt, request.options)
+            response_text = agent.generate(request.prompt, request.options)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         return GenerateResponse(
-            model=request.model or backend.model_name,
+            model=request.model or agent.model_name,
             created_at=datetime.now(timezone.utc).isoformat(),
             response=response_text,
             done=True,
         )
 
-    @app.post("/api/chat", response_model=ChatResponse)
-    def chat(request: ChatRequest) -> ChatResponse:
-        if request.stream:
-            raise HTTPException(status_code=400, detail="Streaming not supported.")
-        try:
-            message = backend.chat(request.messages, request.tools, request.options)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if nlp_router is not None:
 
-        return ChatResponse(
-            model=request.model or backend.model_name,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            message=message,
-            done=True,
-        )
+        @app.post("/plan")
+        def plan(request: PlanRequest) -> dict[str, Any]:
+            if not request.message.strip():
+                raise HTTPException(status_code=400, detail="message is required")
+            try:
+                calls = nlp_router.plan(
+                    request.message,
+                    clarification_pending=request.clarification_pending,
+                    today=request.today,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {"tool_calls": calls}
 
     return app
 
@@ -561,8 +476,7 @@ def start_cloudflared_tunnel(port: int) -> subprocess.Popen[str]:
             if match:
                 url = match.group(0)
                 print("\n[tunnel] public URL:", url, flush=True)
-                print("[tunnel] set OLLAMA_HOST in backend/.env to this URL", flush=True)
-                print("[tunnel] then restart: uvicorn app.main:app --reload\n", flush=True)
+                print("[tunnel] set OLLAMA_HOST to this URL in backend/.env\n", flush=True)
 
     threading.Thread(target=read_output, daemon=True).start()
     return proc
@@ -572,19 +486,21 @@ def start_ngrok_tunnel(port: int, token: str | None) -> Any:
     try:
         from pyngrok import ngrok
     except ImportError as exc:
-        raise RuntimeError("Install ngrok: !pip -q install pyngrok") from exc
+        raise RuntimeError(
+            "Install ngrok support first: !pip -q install pyngrok"
+        ) from exc
 
     if token:
         ngrok.set_auth_token(token)
     tunnel = ngrok.connect(port, "http")
     print("\n[tunnel] public URL:", tunnel.public_url, flush=True)
-    print("[tunnel] set OLLAMA_HOST in backend/.env to this URL\n", flush=True)
+    print("[tunnel] set OLLAMA_HOST to this URL in backend/.env\n", flush=True)
     return tunnel
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Synctra Colab LLM server (course import + chat)."
+        description="Run an Ollama-compatible course-import AI server in Colab."
     )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8001")))
@@ -592,23 +508,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--backend",
         choices=["transformers", "mock"],
         default=os.getenv("COLAB_AGENT_BACKEND", "transformers"),
-        help="mock = test tunnel without GPU model load",
+        help="Use mock to test the tunnel without loading a model.",
     )
     parser.add_argument(
-        "--model",
-        default=os.getenv("COLAB_LLM_MODEL", os.getenv("COLAB_COURSE_MODEL", DEFAULT_MODEL)),
+        "--model", default=os.getenv("COLAB_COURSE_MODEL", DEFAULT_MODEL)
     )
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=int(os.getenv("COLAB_COURSE_MAX_NEW_TOKENS", DEFAULT_COURSE_MAX_TOKENS)),
-        help="Max tokens for /api/generate (course import).",
-    )
-    parser.add_argument(
-        "--chat-max-new-tokens",
-        type=int,
-        default=int(os.getenv("COLAB_CHAT_MAX_NEW_TOKENS", DEFAULT_CHAT_MAX_TOKENS)),
-        help="Max tokens per /api/chat turn.",
+        default=int(os.getenv("COLAB_COURSE_MAX_NEW_TOKENS", DEFAULT_MAX_NEW_TOKENS)),
     )
     parser.add_argument(
         "--tunnel",
@@ -619,7 +527,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preload",
         action="store_true",
-        help="Load the HF model before starting uvicorn (recommended).",
+        help="Load the model before starting uvicorn.",
+    )
+    parser.add_argument(
+        "--nlp-router-model-dir",
+        default=os.getenv("SYNTRA_TOOL_ROUTER_MODEL"),
+        help=(
+            "Directory written by one_click_train_nlp_router_colab.py. "
+            "When set, exposes POST /plan for the chat_colab.py backend route."
+        ),
+    )
+    parser.add_argument(
+        "--nlp-agent-path",
+        default=os.getenv("SYNTRA_AGENT_PATH"),
+        help=(
+            "Directory containing nlp_tool_calling_agent.py. Defaults to the "
+            "folder this script lives in."
+        ),
+    )
+    parser.add_argument(
+        "--nlp-confidence-threshold",
+        type=float,
+        default=float(os.getenv("SYNTRA_TOOL_ROUTER_THRESHOLD", "0.80")),
+        help="Minimum classifier confidence before trusting a model label.",
     )
     args, unknown = parser.parse_known_args(argv)
     if unknown:
@@ -631,15 +561,39 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     if args.backend == "mock":
-        backend: LlmBackend = MockBackend()
+        agent: AgentBackend = MockAgent()
     else:
-        backend = TransformersBackend(
-            args.model,
-            course_max_tokens=args.max_new_tokens,
-            chat_max_tokens=args.chat_max_new_tokens,
-        )
+        agent = TransformersAgent(args.model, args.max_new_tokens)
         if args.preload:
-            backend._load()
+            agent._load()
+
+    nlp_router: NlpRouterBackend | None = None
+    if args.nlp_router_model_dir:
+        agent_path = args.nlp_agent_path or str(Path(__file__).resolve().parent)
+        try:
+            nlp_router = NlpRouterBackend(
+                model_dir=args.nlp_router_model_dir,
+                agent_path=agent_path,
+                confidence_threshold=args.nlp_confidence_threshold,
+            )
+            print(
+                f"[nlp] loaded tool router from {args.nlp_router_model_dir} "
+                f"(trained_model={nlp_router.has_trained_model}); "
+                "POST /plan is enabled.",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[nlp] failed to load NLP router: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            nlp_router = None
+    else:
+        print(
+            "[nlp] no --nlp-router-model-dir; /plan endpoint disabled.",
+            flush=True,
+        )
 
     if args.tunnel == "cloudflared":
         start_cloudflared_tunnel(args.port)
@@ -648,20 +602,23 @@ def main(argv: list[str] | None = None) -> None:
         start_ngrok_tunnel(args.port, args.ngrok_token)
 
     print(
-        f"[server] Synctra Colab LLM on http://{args.host}:{args.port} "
-        f"backend={args.backend} model={backend.model_name}",
+        f"[server] starting on http://{args.host}:{args.port} "
+        f"with backend={args.backend} model={agent.model_name}",
         flush=True,
     )
-    print("[server] GET  /health", flush=True)
-    print("[server] POST /api/generate  (course import)", flush=True)
-    print("[server] POST /api/chat      (schedule chat + tools)", flush=True)
+    print("[server] health check: GET /health", flush=True)
+    print("[server] Ollama-compatible endpoint: POST /api/generate", flush=True)
+    if nlp_router is not None:
+        print("[server] NLP tool router endpoint: POST /plan", flush=True)
 
     try:
         import uvicorn
     except ImportError as exc:
-        raise RuntimeError("Install uvicorn: !pip -q install uvicorn") from exc
+        raise RuntimeError(
+            "Install server dependency first: !pip -q install uvicorn"
+        ) from exc
 
-    app = create_app(backend)
+    app = create_app(agent, nlp_router=nlp_router)
     config = uvicorn.Config(app, host=args.host, port=args.port)
 
     try:
@@ -671,7 +628,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     print(
-        "[server] notebook event loop detected; uvicorn running in background thread",
+        "[server] detected notebook event loop; running uvicorn in a background thread",
         flush=True,
     )
     server = uvicorn.Server(config)

@@ -194,6 +194,23 @@ def test_chat_service_ollama_mocked(monkeypatch):
         assert reply == "Here is your plan."
 
 
+def test_chat_service_nlp_mocked(monkeypatch):
+    import app.core.config.settings as settings_mod
+
+    monkeypatch.setattr(settings_mod.settings, "chat_llm_provider", "nlp")
+    service = ChatService()
+
+    async def _fake_nlp_turn(*_args, **_kwargs):
+        return "Here is your NLP-routed answer."
+
+    class FakeNlpAgent:
+        run_turn = _fake_nlp_turn
+
+    monkeypatch.setattr(service, "_nlp_agent", lambda: FakeNlpAgent())
+    reply = asyncio.run(service.process_message("What is due this week?", "u-nlp"))
+    assert reply == "Here is your NLP-routed answer."
+
+
 def test_chat_service_openai_mocked(monkeypatch):
     import app.core.config.settings as settings_mod
 
