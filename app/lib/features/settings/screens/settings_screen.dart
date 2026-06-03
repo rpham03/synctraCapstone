@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/constants/api_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/services/auth_service.dart';
+import '../../../shared/services/theme_mode_notifier.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -34,6 +35,49 @@ class SettingsScreen extends StatelessWidget {
             ),
             title: const Text('Account'),
             subtitle: Text(email),
+          ),
+          const Divider(),
+          ListenableBuilder(
+            listenable: ThemeModeNotifier.instance,
+            builder: (context, _) {
+              final mode = ThemeModeNotifier.instance.themeMode;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.brightness_6_outlined),
+                    title: const Text('Appearance'),
+                    subtitle: const Text('Light, dark, or match your device'),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: SegmentedButton<ThemeMode>(
+                      segments: const [
+                        ButtonSegment(
+                          value: ThemeMode.light,
+                          icon: Icon(Icons.light_mode_outlined, size: 18),
+                          label: Text('Light'),
+                        ),
+                        ButtonSegment(
+                          value: ThemeMode.dark,
+                          icon: Icon(Icons.dark_mode_outlined, size: 18),
+                          label: Text('Dark'),
+                        ),
+                        ButtonSegment(
+                          value: ThemeMode.system,
+                          icon: Icon(Icons.settings_brightness_outlined, size: 18),
+                          label: Text('System'),
+                        ),
+                      ],
+                      selected: {mode},
+                      onSelectionChanged: (selection) {
+                        ThemeModeNotifier.instance.setThemeMode(selection.first);
+                      },
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
           const Divider(),
           ListTile(
