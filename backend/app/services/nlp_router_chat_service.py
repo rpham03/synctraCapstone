@@ -77,6 +77,8 @@ class NlpRouterChatService:
                 if name == "ai_agent":
                     message = str(arguments.get("message") or user_message)
                     ai_result = await self._call_ai_agent(client, message)
+                    if ai_result.get("error"):
+                        return sanitize_chat_reply(str(ai_result["error"]))
                     assistant = str(ai_result.get("assistant_message") or "").strip()
                     return sanitize_chat_reply(assistant) or "I could not generate a reply."
 
@@ -134,27 +136,41 @@ class NlpRouterChatService:
         client: httpx.AsyncClient,
         message: str,
     ) -> dict[str, Any]:
+        try:
+            host = self._ai_agent_host()
+        except RuntimeError as exc:
+            return {"error": str(exc), "message": message}
+
+        url = f"{host}/api/generate"
         payload = {
             "model": self._ai_agent_model(),
             "prompt": message,
             "stream": False,
             "options": {"temperature": 0.2, "syntra_mode": "ai_agent"},
         }
+        print(f"[ai_agent] POST {url} prompt={message[:80]!r}", flush=True)
         try:
             response = await client.post(
-                f"{self._ai_agent_host()}/api/generate",
+                url,
                 json=payload,
                 headers=TUNNEL_REQUEST_HEADERS,
                 timeout=120.0,
             )
             response.raise_for_status()
         except httpx.RequestError as exc:
+            print(f"[ai_agent] request error: {exc}", flush=True)
             return {"error": f"Colab ai_agent request failed: {exc}", "message": message}
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:400] if exc.response is not None else str(exc)
+            print(f"[ai_agent] http error {exc.response.status_code}: {detail}", flush=True)
             return {"error": f"Colab ai_agent error: {detail}", "message": message}
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            preview = response.text[:200]
+            print(f"[ai_agent] non-JSON response: {preview!r}", flush=True)
+            return {"error": f"Colab ai_agent returned non-JSON: {preview}", "message": message}
         return {
             "assistant_message": str(data.get("response") or "").strip(),
             "raw": data,
