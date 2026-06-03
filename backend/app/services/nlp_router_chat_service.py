@@ -38,8 +38,6 @@ class NlpRouterChatService:
             or settings.colab_ai_agent_host
             or os.getenv("COLAB_COURSE_IMPORT_HOST")
             or settings.colab_course_import_host
-            or os.getenv("OLLAMA_HOST")
-            or settings.ollama_host
             or ""
         ).strip()
         if not host:
