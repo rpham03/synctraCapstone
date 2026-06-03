@@ -322,6 +322,22 @@ class _CalendarScreenState extends State<CalendarScreen> {
     });
   }
 
+  bool _isViewingToday() {
+    final now = DateTime.now();
+    switch (_viewMode) {
+      case _CalendarViewMode.day:
+        return isSameDay(_focusedDay, now);
+      case _CalendarViewMode.week:
+        return _visibleDays().any((d) => isSameDay(d, now));
+      case _CalendarViewMode.month:
+        return _focusedDay.year == now.year && _focusedDay.month == now.month;
+    }
+  }
+
+  String _todayChipLabel() {
+    return 'Today · ${DateFormat('MMM d').format(DateTime.now())}';
+  }
+
   void _shiftPeriod(int delta) {
     setState(() {
       switch (_viewMode) {
@@ -936,25 +952,87 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final useDrawerLayout = width < 1000;
     final useDesktopSidebarToggle = width >= 1000;
 
+    final showTodayChip = !_isViewingToday();
+    final showAddFab = !(_calendarChatOpen &&
+        MediaQuery.sizeOf(context).width < _chatSideBySideMinWidth);
+
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       body: SafeArea(
-        child: _wrapCalendarWithChat(
-          context,
-          _buildMainPanel(
-            showMenuButton: useDrawerLayout || useDesktopSidebarToggle,
-          ),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            _wrapCalendarWithChat(
+              context,
+              _buildMainPanel(
+                showMenuButton: useDrawerLayout || useDesktopSidebarToggle,
+              ),
+            ),
+            if (showTodayChip)
+              Positioned(
+                left: 16,
+                right: 16,
+                bottom: showAddFab ? 88 : 16,
+                child: Center(
+                  child: _TodayReturnChip(
+                    label: _todayChipLabel(),
+                    onTap: _goToday,
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
-      floatingActionButton: _calendarChatOpen &&
-              MediaQuery.sizeOf(context).width < _chatSideBySideMinWidth
-          ? null
-          : FloatingActionButton(
+      floatingActionButton: showAddFab
+          ? FloatingActionButton(
               heroTag: 'synctra_add_event',
               onPressed: _openQuickAddSheet,
               tooltip: 'Add event',
               child: const Icon(Icons.add),
-            ),
+            )
+          : null,
+    );
+  }
+}
+
+class _TodayReturnChip extends StatelessWidget {
+  const _TodayReturnChip({
+    required this.label,
+    required this.onTap,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      elevation: 3,
+      shadowColor: Colors.black.withValues(alpha: 0.18),
+      color: scheme.primaryContainer,
+      borderRadius: BorderRadius.circular(24),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(24),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.today_outlined, size: 18, color: scheme.onPrimaryContainer),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  color: scheme.onPrimaryContainer,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

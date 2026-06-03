@@ -7,6 +7,7 @@ import 'shared/services/canvas_tasks_service.dart';
 import 'shared/services/synctra_chat_service.dart';
 import 'shared/services/synctra_chat_store.dart';
 import 'shared/services/suggested_schedule_store.dart';
+import 'shared/services/theme_mode_notifier.dart';
 import 'theme.dart';
 
 Future<void> main() async {
@@ -16,6 +17,7 @@ Future<void> main() async {
   registerCanvasTasksService();
   registerSynctraChatStore();
   registerSynctraChatService();
+  await ThemeModeNotifier.load();
 
   // Initialize Supabase — replace the placeholders with your project values
   // from https://supabase.com/dashboard → Settings → API
@@ -32,13 +34,18 @@ class SynctraApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp.router(
-      title: 'Synctra',
-      theme: AppTheme.light,
-      darkTheme: AppTheme.dark,
-      themeMode: ThemeMode.system,
-      routerConfig: AppRouter.router,
-      debugShowCheckedModeBanner: false,
+    return ListenableBuilder(
+      listenable: ThemeModeNotifier.instance,
+      builder: (context, _) {
+        return MaterialApp.router(
+          title: 'Synctra',
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          themeMode: ThemeModeNotifier.instance.themeMode,
+          routerConfig: AppRouter.router,
+          debugShowCheckedModeBanner: false,
+        );
+      },
     );
   }
 }
