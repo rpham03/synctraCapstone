@@ -89,7 +89,7 @@ class ChatService:
                 reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)
-                return reply, []
+                return reply, get_schedule_proposals()
             except Exception as e:
                 return f"{str(e)[:500]}", []
 

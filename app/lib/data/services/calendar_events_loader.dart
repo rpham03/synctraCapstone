@@ -47,7 +47,7 @@ class CalendarEventsLoader {
     return out;
   }
 
-  /// Tasks due today or later — manual, Canvas cache, and course import cache.
+  /// Incomplete Tasks-tab items. The backend filters by the requested due range.
   static Future<List<Map<String, dynamic>>> loadTasksForChat() async {
     final manual = <TaskModel>[];
     final canvas = <TaskModel>[];
@@ -61,7 +61,7 @@ class CalendarEventsLoader {
     final all = [...manual, ...merged];
     final out = <Map<String, dynamic>>[];
     for (final t in all) {
-      if (!t.isDueTodayOrLater || t.isCompleted) continue;
+      if (t.isCompleted) continue;
       out.add(_taskPayload(t));
     }
     return out;

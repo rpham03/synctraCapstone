@@ -166,6 +166,51 @@ def test_propose_schedule_change_splits_long_sessions():
     assert sum(p["duration_minutes"] for p in result["proposal"]) == 180
 
 
+def test_propose_schedule_change_uses_client_local_window_start(monkeypatch):
+    from datetime import datetime, timedelta
+
+    from app.services.scheduler_service import ScheduleBlock
+
+    local_now = datetime(2026, 6, 3, 21, 30, 0)
+    captured: dict[str, object] = {}
+
+    def fake_suggest_task_sessions(
+        self,
+        task,
+        fixed_events,
+        look_ahead_days=7,
+        *,
+        window_start=None,
+        max_block_minutes=90,
+    ):
+        captured["window_start"] = window_start
+        return [
+            ScheduleBlock(
+                id="block-1",
+                task_id=task.id,
+                task_title=task.title,
+                start=local_now,
+                end=local_now + timedelta(minutes=60),
+            )
+        ]
+
+    monkeypatch.setattr(chat_agent_tools, "effective_now", lambda: local_now)
+    monkeypatch.setattr(
+        chat_agent_tools.SchedulerService,
+        "suggest_task_sessions",
+        fake_suggest_task_sessions,
+    )
+
+    result = chat_agent_tools.propose_schedule_change(
+        "Plan this week",
+        1.0,
+        "2026-06-05T23:59:00",
+    )
+
+    assert captured["window_start"] == local_now
+    assert result["proposal"][0]["start_time"] == local_now.isoformat()
+
+
 def test_chat_service_fallback_without_llm(monkeypatch):
     import app.core.config.settings as settings_mod
 
@@ -218,6 +263,45 @@ def test_chat_service_nlp_mocked(monkeypatch):
     )
     assert reply == "Here is your NLP-routed answer."
     assert proposals == []
+
+
+def test_chat_service_nlp_returns_schedule_proposals(monkeypatch):
+    import app.core.config.settings as settings_mod
+    from app.services.chat_client_context import append_schedule_proposals
+
+    monkeypatch.setattr(settings_mod.settings, "chat_llm_provider", "nlp")
+    service = ChatService()
+
+    async def _fake_nlp_turn(*_args, **_kwargs):
+        append_schedule_proposals(
+            [
+                {
+                    "task_title": "Problem set",
+                    "start_time": "2026-06-03T09:00:00",
+                    "end_time": "2026-06-03T10:00:00",
+                    "duration_minutes": 60,
+                    "is_ai_generated": True,
+                }
+            ]
+        )
+        return "I added this study block to your calendar preview."
+
+    class FakeNlpAgent:
+        run_turn = _fake_nlp_turn
+
+    monkeypatch.setattr(service, "_nlp_agent", lambda: FakeNlpAgent())
+    reply, proposals = asyncio.run(service.process_message("Plan this week", "u-nlp"))
+
+    assert reply == "I added this study block to your calendar preview."
+    assert proposals == [
+        {
+            "task_title": "Problem set",
+            "start_time": "2026-06-03T09:00:00",
+            "end_time": "2026-06-03T10:00:00",
+            "duration_minutes": 60,
+            "is_ai_generated": True,
+        }
+    ]
 
 
 def test_nlp_router_ai_agent_host_falls_back_to_router(monkeypatch):

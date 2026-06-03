@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import contextvars
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 _calendar_events: contextvars.ContextVar[list[dict[str, Any]] | None] = (
@@ -89,6 +89,24 @@ def effective_today() -> date:
         except ValueError:
             pass
     return today_local()
+
+
+def effective_now() -> datetime:
+    """Current client-local wall time, falling back to server local time."""
+    offset = get_timezone_offset_minutes()
+    if offset is not None:
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        return utc_now + timedelta(minutes=offset)
+
+    raw = _client_today.get()
+    if raw:
+        try:
+            today = date.fromisoformat(str(raw).strip()[:10])
+            server_now = datetime.now()
+            return datetime.combine(today, server_now.time()).replace(microsecond=0)
+        except ValueError:
+            pass
+    return datetime.now().replace(microsecond=0)
 
 
 def append_schedule_proposals(items: list[dict[str, Any]]) -> None:

@@ -24,6 +24,15 @@ def test_greeting_routes_to_ai_agent_without_trained_model():
     assert call.arguments["message"] == "hi"
 
 
+def test_emotional_support_routes_to_ai_agent_without_trained_model():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("i feel stressed")[0]
+
+    assert call.name == "ai_agent"
+    assert call.arguments["message"] == "i feel stressed"
+
+
 def test_plan_this_week_routes_to_schedule_without_trained_model():
     agent = NlpToolCallingAgent(today=date(2026, 6, 3))
 

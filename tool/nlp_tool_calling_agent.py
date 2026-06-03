@@ -389,6 +389,30 @@ class NlpToolCallingAgent:
         if any(
             phrase in text
             for phrase in (
+                "i feel stressed",
+                "i'm stressed",
+                "i am stressed",
+                "feeling stressed",
+                "i feel overwhelmed",
+                "i'm overwhelmed",
+                "i am overwhelmed",
+                "feeling overwhelmed",
+                "i feel anxious",
+                "i'm anxious",
+                "i am anxious",
+                "feeling anxious",
+                "i feel tired",
+                "i'm tired",
+                "i am tired",
+                "i need a break",
+                "i need encouragement",
+                "i need motivation",
+            )
+        ):
+            return True
+        if any(
+            phrase in text
+            for phrase in (
                 "write ",
                 "rewrite ",
                 "draft ",

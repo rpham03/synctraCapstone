@@ -10,6 +10,7 @@ import httpx
 
 from app.core.config.settings import settings
 from app.services.chat_agent_common import execute_tool, sanitize_chat_reply
+from app.services.chat_client_context import effective_today
 
 
 CLARIFICATION_ACTION = "clarification"
@@ -108,7 +109,7 @@ class NlpRouterChatService:
         payload = {
             "message": message,
             "clarification_pending": False,
-            "today": datetime.now().date().isoformat(),
+            "today": effective_today().isoformat(),
         }
         try:
             response = await client.post(
@@ -274,7 +275,12 @@ class NlpRouterChatService:
         proposal = result.get("proposal") if isinstance(result.get("proposal"), list) else []
         if not proposal:
             return message or "I could not find a schedule proposal."
-        lines = [message or "Proposal only — not saved to your calendar yet."]
+        if "not saved to your calendar yet" in message.lower():
+            message = message.replace(
+                "Proposal only — not saved to your calendar yet.",
+                "I added this study block to your calendar preview.",
+            )
+        lines = [message or "I added this study block to your calendar preview."]
         for block in proposal[:8]:
             if not isinstance(block, dict):
                 continue

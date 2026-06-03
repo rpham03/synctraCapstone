@@ -9,6 +9,7 @@ from dateutil import parser as date_parser
 from app.core.config.settings import settings
 from app.integrations.canvas.canvas_client import CanvasClient
 from app.services.chat_client_context import (
+    effective_now,
     effective_today,
     get_calendar_events,
     get_tasks,
@@ -516,12 +517,14 @@ def propose_schedule_change(
         estimated_minutes=minutes,
     )
     service = SchedulerService()
-    look_ahead = max(1, min(60, (due.date() - date.today()).days + 1))
+    window_start = effective_now()
+    look_ahead = max(1, min(60, (due.date() - effective_today()).days + 1))
     fixed = _calendar_fixed_events()
     blocks = service.suggest_task_sessions(
         task,
         fixed_events=fixed,
         look_ahead_days=look_ahead,
+        window_start=window_start,
     )
     if not blocks:
         return {
