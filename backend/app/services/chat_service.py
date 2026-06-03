@@ -1,4 +1,4 @@
-# Chat service — routes messages to Ollama, OpenAI, or a keyword fallback.
+# Chat service — routes messages to the trained NLP router, Ollama, OpenAI, or a keyword fallback.
 """Natural language chat handler for the Synctra schedule assistant."""
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from app.services.chat_client_context import (
 )
 from app.services.ollama_agent_service import OllamaAgentService
 from app.services.openai_agent_service import OpenAIAgentService
+from app.services.nlp_router_chat_service import NlpRouterChatService
 
 # In-memory conversation per user_id (resets when the API restarts).
 _history: dict[str, list[dict[str, str]]] = {}
@@ -22,8 +23,14 @@ _MAX_HISTORY_TURNS = 20
 
 class ChatService:
     def __init__(self) -> None:
+        self._nlp: NlpRouterChatService | None = None
         self._ollama: OllamaAgentService | None = None
         self._openai: OpenAIAgentService | None = None
+
+    def _nlp_agent(self) -> NlpRouterChatService:
+        if self._nlp is None:
+            self._nlp = NlpRouterChatService()
+        return self._nlp
 
     def _ollama_agent(self) -> OllamaAgentService:
         if self._ollama is None:
@@ -42,8 +49,8 @@ class ChatService:
             _history[user_id] = hist[-(_MAX_HISTORY_TURNS * 2) :]
 
     def _provider(self) -> str:
-        """ollama | openai | auto"""
-        return (settings.chat_llm_provider or "ollama").strip().lower()
+        """nlp | ollama | openai | auto"""
+        return (settings.chat_llm_provider or "nlp").strip().lower()
 
     async def process_message(
         self,
@@ -66,6 +73,16 @@ class ChatService:
 
     async def _process_message_inner(self, text: str, user_id: str) -> str:
         provider = self._provider()
+        if provider in ("nlp", "nlp-router", "colab-nlp", "colab_nlp"):
+            try:
+                reply = await self._nlp_agent().run_turn(text)
+                reply = sanitize_chat_reply(reply)
+                self._append_history(user_id, "user", text)
+                self._append_history(user_id, "assistant", reply)
+                return reply
+            except Exception as e:
+                return f"{str(e)[:500]}"
+
         use_ollama = provider == "ollama" or (
             provider == "auto" and not (settings.openai_api_key or "").strip()
         )
