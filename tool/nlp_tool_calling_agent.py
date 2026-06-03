@@ -381,6 +381,11 @@ class NlpToolCallingAgent:
         return False
 
     def _explicit_ai_agent_request(self, text: str) -> bool:
+        if re.fullmatch(
+            r"(hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|maybe|good morning|good afternoon|good evening)[.!?]*",
+            text,
+        ):
+            return True
         if any(
             phrase in text
             for phrase in (
@@ -734,6 +739,20 @@ class NlpToolCallingAgent:
         return results
 
     def _wants_schedule_proposal(self, text: str) -> bool:
+        if any(
+            phrase in text
+            for phrase in (
+                "plan this week",
+                "plan my week",
+                "plan the week",
+                "help me plan this week",
+                "help me plan my week",
+                "help me plan the week",
+                "set up a plan for this week",
+                "make a plan for this week",
+            )
+        ):
+            return True
         has_plan_word = any(
             word in text
             for word in (

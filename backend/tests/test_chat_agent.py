@@ -12,6 +12,9 @@ def test_normalize_reply_times_converts_military():
 
     assert "6:45 PM" in normalize_reply_times("from 18:45 to 19:45")
     assert "18:45" not in normalize_reply_times("from 18:45 to 19:45")
+    assert normalize_reply_times("from 12:30 PM to 1:20 PM") == (
+        "from 12:30 PM to 1:20 PM"
+    )
 
 
 def test_sanitize_chat_reply_strips_debug_dump():
@@ -212,6 +215,24 @@ def test_chat_service_nlp_mocked(monkeypatch):
     )
     assert reply == "Here is your NLP-routed answer."
     assert proposals == []
+
+
+def test_nlp_router_ai_agent_host_falls_back_to_router(monkeypatch):
+    import app.core.config.settings as settings_mod
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    for key in (
+        "COLAB_AI_AGENT_HOST",
+        "COLAB_COURSE_IMPORT_HOST",
+        "OLLAMA_HOST",
+        "COLAB_NLP_ROUTER_HOST",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(settings_mod.settings, "colab_ai_agent_host", "")
+    monkeypatch.setattr(settings_mod.settings, "colab_course_import_host", "")
+    monkeypatch.setattr(settings_mod.settings, "colab_nlp_router_host", "https://router.example")
+
+    assert NlpRouterChatService()._ai_agent_host() == "https://router.example"
 
 
 def test_chat_service_openai_mocked(monkeypatch):
