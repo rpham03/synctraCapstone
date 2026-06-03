@@ -37,11 +37,16 @@ class NlpRouterChatService:
         return host.rstrip("/")
 
     def _ai_agent_host(self) -> str:
+        # The Colab all-in-one stack serves /plan AND /api/generate on the
+        # same port, so the NLP router host is always a valid fallback.
         host = (
             os.getenv("COLAB_AI_AGENT_HOST")
             or settings.colab_ai_agent_host
             or os.getenv("COLAB_COURSE_IMPORT_HOST")
             or settings.colab_course_import_host
+            or os.getenv("OLLAMA_HOST")
+            or os.getenv("COLAB_NLP_ROUTER_HOST")
+            or settings.colab_nlp_router_host
             or ""
         ).strip()
         if not host:
