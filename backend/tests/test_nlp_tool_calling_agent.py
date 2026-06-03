@@ -41,3 +41,28 @@ def test_plan_this_week_routes_to_schedule_without_trained_model():
     assert call.name == "propose_schedule_change"
     assert call.arguments["task_name"]
     assert call.arguments["estimated_minutes"] >= 15
+
+
+def test_add_calendar_block_routes_to_schedule_without_trained_model():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("add a block to my calendar tomorrow")[0]
+
+    assert call.name == "propose_schedule_change"
+    assert call.arguments["task_name"]
+    assert call.arguments["estimated_minutes"] >= 15
+    assert call.arguments["deadline"].startswith("2026-06-04")
+
+
+def test_add_calendar_block_overrides_trained_calendar_prediction():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    class FakeIntentModel:
+        def predict(self, message: str) -> tuple[str, float]:
+            return "get_calendar_events", 0.99
+
+    agent.intent_model = FakeIntentModel()  # type: ignore[assignment]
+
+    call = agent.plan("add a block to my calendar tomorrow")[0]
+
+    assert call.name == "propose_schedule_change"
