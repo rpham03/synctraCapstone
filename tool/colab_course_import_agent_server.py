@@ -455,6 +455,7 @@ def start_cloudflared_tunnel(
     port: int,
     *,
     wait_for_url_s: float = 60,
+    backend_app: bool = False,
 ) -> subprocess.Popen[str]:
     binary = ensure_cloudflared()
     proc = subprocess.Popen(
@@ -481,16 +482,18 @@ def start_cloudflared_tunnel(
             if match:
                 url = match.group(0)
                 print("\n[tunnel] public URL:", url, flush=True)
-                print(
-                    "[flutter] run with: "
-                    f"flutter run -d chrome --dart-define=API_BASE_URL={url}",
-                    flush=True,
-                )
-                print(
-                    "[backend .env] COLAB_AI_AGENT_HOST="
-                    f"{url}\n[backend .env] COLAB_COURSE_IMPORT_HOST={url}\n",
-                    flush=True,
-                )
+                if backend_app:
+                    print(
+                        "[flutter] run with: "
+                        f"flutter run -d chrome --dart-define=API_BASE_URL={url}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[backend .env] COLAB_AI_AGENT_HOST="
+                        f"{url}\n[backend .env] COLAB_COURSE_IMPORT_HOST={url}\n",
+                        flush=True,
+                    )
                 url_ready.set()
 
     threading.Thread(target=read_output, daemon=True).start()

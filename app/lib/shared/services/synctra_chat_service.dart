@@ -68,7 +68,9 @@ class SynctraChatService {
           e.error?.toString().contains('Connection refused') == true) {
         return SynctraChatResult(
           reply: 'Cannot reach the Synctra backend at ${ApiConstants.baseUrl}. '
-              'Start it on your Mac with:\n'
+              'If you are using Colab, keep the backend uvicorn cell and the '
+              'Cloudflare tunnel cell running, then restart Flutter with the '
+              'latest API_BASE_URL. For local backend:\n'
               'cd backend && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000',
         );
       }
