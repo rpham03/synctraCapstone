@@ -45,6 +45,7 @@ TOOL_LABEL_ORDER = [
 ]
 TOOL_LABELS = set(TOOL_LABEL_ORDER)
 CLARIFICATION_ACTION = "clarification"
+ADD_CALENDAR_BLOCK_ACTION = "add_calendar_block"
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,11 @@ class NlpToolCallingAgent:
     _ISO_DATE_RE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
     _HOURS_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b")
     _MINUTES_RE = re.compile(r"\b(\d+)\s*(?:m|min|mins|minute|minutes)\b")
+    _TIME_TEXT = r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?"
+    _TIME_RANGE_RE = re.compile(
+        rf"\b(?:from\s+)?({_TIME_TEXT})\s*(?:-|to|until|through)\s*({_TIME_TEXT})\b",
+        re.IGNORECASE,
+    )
 
     _WEEKDAYS = {
         "monday": 0,
@@ -206,6 +212,13 @@ class NlpToolCallingAgent:
             return []
 
         start, end, date_reason = self._date_range(lower)
+        calendar_block_call = self._calendar_block_call_or_clarification(
+            text=text,
+            lower=lower,
+            date_value=start,
+        )
+        if calendar_block_call is not None:
+            return [calendar_block_call]
         calls: list[ToolCall] = []
 
         if self.intent_model is not None:
@@ -366,24 +379,11 @@ class NlpToolCallingAgent:
                 "find time and schedule",
                 "schedule ",
                 "plan ",
-                "add a block to my calendar",
-                "add a block in my calendar",
-                "add a block on my calendar",
-                "add a block to calendar",
-                "add a block in calendar",
-                "add block to my calendar",
-                "add block to calendar",
-                "add calendar block",
-                "create a calendar block",
-                "put a block on my calendar",
-                "put a block in my calendar",
                 "add a study block",
                 "add time",
                 "block time",
                 "reserve time",
                 "create calendar time",
-                "add study time to my calendar",
-                "add study time in my calendar",
                 "put study time",
                 "put homework time",
                 "make time to finish",
@@ -621,6 +621,173 @@ class NlpToolCallingAgent:
             reason=reason,
         )
 
+    def _calendar_block_call_or_clarification(
+        self,
+        *,
+        text: str,
+        lower: str,
+        date_value: date,
+    ) -> ToolCall | None:
+        if not self._wants_calendar_block_creation(lower):
+            return None
+
+        title = self._extract_calendar_block_title(text)
+        time_range = self._extract_time_range(lower)
+        has_date = self._has_explicit_date_text(lower)
+
+        missing: list[str] = []
+        if not title:
+            missing.append("event name")
+        if not has_date:
+            missing.append("date")
+        if time_range is None:
+            missing.append("start and end time")
+
+        if missing:
+            missing_text = ", ".join(missing)
+            return ToolCall(
+                name=CLARIFICATION_ACTION,
+                arguments={
+                    "message": text,
+                    "question": (
+                        f"What {missing_text} should I use for this calendar block? "
+                        "For example: Study for math tomorrow from 2 PM to 3 PM."
+                    ),
+                    "options": [ADD_CALENDAR_BLOCK_ACTION, "ai_agent"],
+                    "predicted_tool": ADD_CALENDAR_BLOCK_ACTION,
+                    "next_step": (
+                        "Ask for the missing calendar block details before adding a block."
+                    ),
+                },
+                confidence=0.94,
+                reason="Calendar block creation is missing required details.",
+            )
+
+        start_time, end_time = time_range
+        start_dt = datetime.combine(date_value, start_time)
+        end_dt = datetime.combine(date_value, end_time)
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+
+        return ToolCall(
+            name=ADD_CALENDAR_BLOCK_ACTION,
+            arguments={
+                "title": title,
+                "start_time": start_dt.isoformat(),
+                "end_time": end_dt.isoformat(),
+            },
+            confidence=0.95,
+            reason="User provided a calendar block title, date, and time range.",
+        )
+
+    def _wants_calendar_block_creation(self, text: str) -> bool:
+        return any(
+            phrase in text
+            for phrase in (
+                "add a block to my calendar",
+                "add a block in my calendar",
+                "add a block on my calendar",
+                "add a block to calendar",
+                "add a block in calendar",
+                "add block to my calendar",
+                "add block to calendar",
+                "add calendar block",
+                "create a calendar block",
+                "put a block on my calendar",
+                "put a block in my calendar",
+                "add a study block to my calendar",
+                "add a study block in my calendar",
+                "add study block to my calendar",
+                "add study time to my calendar",
+                "add study time in my calendar",
+            )
+        )
+
+    def _has_explicit_date_text(self, text: str) -> bool:
+        if self._ISO_DATE_RE.search(text) or self._MONTH_DAY_RE.search(text):
+            return True
+        if any(word in text for word in ("today", "tomorrow", "weekend")):
+            return True
+        tokens = set(re.findall(r"\b[a-z]+\b", text.lower()))
+        return any(token in tokens for token in self._WEEKDAYS)
+
+    def _extract_time_range(self, text: str) -> tuple[Any, Any] | None:
+        match = self._TIME_RANGE_RE.search(text)
+        if not match:
+            return None
+        start_raw, end_raw = match.groups()
+        end_ampm = self._time_ampm(end_raw)
+        start_time = self._parse_time_token(start_raw, default_ampm=end_ampm)
+        end_time = self._parse_time_token(end_raw)
+        if start_time is None or end_time is None:
+            return None
+        return start_time, end_time
+
+    def _time_ampm(self, raw: str) -> str | None:
+        match = re.search(r"(a\.?m\.?|p\.?m\.?)", raw, flags=re.IGNORECASE)
+        if not match:
+            return None
+        value = match.group(1).lower().replace(".", "")
+        return "am" if value.startswith("a") else "pm"
+
+    def _parse_time_token(self, raw: str, *, default_ampm: str | None = None) -> Any | None:
+        from datetime import time
+
+        match = re.search(
+            r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b",
+            raw,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or "0")
+        ampm = self._time_ampm(match.group(3) or "") or default_ampm
+        if minute > 59:
+            return None
+        if ampm:
+            if hour < 1 or hour > 12:
+                return None
+            if ampm == "pm" and hour != 12:
+                hour += 12
+            if ampm == "am" and hour == 12:
+                hour = 0
+        elif hour > 23:
+            return None
+        elif hour < 13:
+            return None
+        return time(hour, minute)
+
+    def _extract_calendar_block_title(self, text: str) -> str:
+        cleaned = self._TIME_RANGE_RE.sub(" ", text)
+        cleaned = self._ISO_DATE_RE.sub(" ", cleaned)
+        cleaned = self._MONTH_DAY_RE.sub(" ", cleaned)
+        cleaned = re.sub(
+            r"\b(?:today|tomorrow|monday|mon|tuesday|tue|wednesday|wed|"
+            r"thursday|thu|friday|fri|saturday|sat|sunday|sun|weekend)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:please\s+)?(?:add|create|put)\s+(?:a\s+)?"
+            r"(?:(?:calendar|study)\s+)?block"
+            r"(?:\s*(?:to|in|on)?\s*(?:my\s+)?calendar)?\s*",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:called|named|for)\s+",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        title = " ".join(cleaned.strip(" .,:;-").split())
+        if title.lower() in {"calendar", "block", "calendar block", "event"}:
+            return ""
+        return title[:120]
+
     def _clarification_question(
         self,
         message: str,
@@ -787,19 +954,6 @@ class NlpToolCallingAgent:
                 "help me plan the week",
                 "set up a plan for this week",
                 "make a plan for this week",
-                "add a block to my calendar",
-                "add a block in my calendar",
-                "add a block on my calendar",
-                "add a block to calendar",
-                "add a block in calendar",
-                "add block to my calendar",
-                "add block to calendar",
-                "add calendar block",
-                "create a calendar block",
-                "put a block on my calendar",
-                "put a block in my calendar",
-                "add study time to my calendar",
-                "add study time in my calendar",
             )
         ):
             return True

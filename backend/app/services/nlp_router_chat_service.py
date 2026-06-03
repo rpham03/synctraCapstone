@@ -202,6 +202,8 @@ class NlpRouterChatService:
             return self._format_assignments(result)
         if name == "propose_schedule_change":
             return self._format_proposal(result)
+        if name == "add_calendar_block":
+            return self._format_calendar_block(result)
         return str(result)
 
     def _format_tasks(self, result: dict[str, Any]) -> str:
@@ -285,6 +287,21 @@ class NlpRouterChatService:
             if not isinstance(block, dict):
                 continue
             title = block.get("task_title") or "Study block"
+            start = self._short_time(block.get("start_time"))
+            end = self._short_time(block.get("end_time"))
+            lines.append(f"- {title}: {start} to {end}")
+        return "\n".join(lines)
+
+    def _format_calendar_block(self, result: dict[str, Any]) -> str:
+        message = str(result.get("message") or "").strip()
+        proposal = result.get("proposal") if isinstance(result.get("proposal"), list) else []
+        if not proposal:
+            return message or "I could not add that calendar block."
+        lines = [message or "I added this calendar block to your calendar preview."]
+        for block in proposal[:8]:
+            if not isinstance(block, dict):
+                continue
+            title = block.get("task_title") or "Calendar block"
             start = self._short_time(block.get("start_time"))
             end = self._short_time(block.get("end_time"))
             lines.append(f"- {title}: {start} to {end}")

@@ -34,6 +34,7 @@ Calendar vs tasks:
 - get_calendar_events — classes, meetings, iCal feeds, course imports, manual calendar events, study blocks (what is ON the calendar).
 - get_tasks — due items from the Tasks tab (manual + cached Canvas + course import), including estimated_minutes when set.
 - get_assignments — live Canvas API sync (due today or later); use for homework when Tasks may be stale.
+- add_calendar_block — add a named calendar block only when the user provides title, date, start time, and end time.
 
 When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events with today's date.
 When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments for the same date range.
@@ -41,6 +42,7 @@ If get_calendar_events returns zero events for today, say they have nothing sche
 When listing homework, include course_name or display_label (e.g. "CSE 331 — Quiz 4").
 For study planning, use estimated_minutes from tasks when proposing blocks via propose_schedule_change.
 The app sends calendar busy times and tasks with each message; find_free_slots and propose_schedule_change use them.
+For generic requests like "add a block to my calendar", ask for the event name, date, start time, and end time before adding anything.
 Do not invent assignment due dates or calendar events.
 Never print debug summaries, raw JSON, or empty lists like "Busy: []" or "Tasks: []" to the user — answer in natural language only.
 When you propose schedule changes, the app adds those study blocks to the calendar right away.
@@ -90,6 +92,16 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": ["task_name", "hours", "deadline"],
         "additionalProperties": False,
     },
+    "add_calendar_block": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "start_time": {"type": "string"},
+            "end_time": {"type": "string"},
+        },
+        "required": ["title", "start_time", "end_time"],
+        "additionalProperties": False,
+    },
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -112,6 +124,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "propose_schedule_change": (
         "Propose proportional study blocks sized by hours or estimated_minutes, "
         "split into sessions and avoiding calendar busy times. Not saved until confirmed."
+    ),
+    "add_calendar_block": (
+        "Add a named calendar preview block with exact start_time and end_time. "
+        "Only use after the user has provided event name, date, start time, and end time."
     ),
 }
 
@@ -193,7 +209,17 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
     """Coerce tool argument values to types our handlers expect."""
     out: dict[str, Any] = {}
     for key, val in args.items():
-        if key in ("start_date", "end_date", "deadline", "task_name", "due_start", "due_end"):
+        if key in (
+            "start_date",
+            "end_date",
+            "deadline",
+            "task_name",
+            "due_start",
+            "due_end",
+            "title",
+            "start_time",
+            "end_time",
+        ):
             out[key] = coerce_text(val, default="")
         elif key == "hours":
             if isinstance(val, (int, float)):
@@ -290,4 +316,28 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         if isinstance(proposal, list):
             append_schedule_proposals(proposal)
         return result
+    if tool == "add_calendar_block":
+        title = (params.get("title") or "").strip()
+        start_time = (params.get("start_time") or "").strip()
+        end_time = (params.get("end_time") or "").strip()
+        if not title or not start_time or not end_time:
+            return {
+                "error": "title, start_time, and end_time are required.",
+                "proposal": [],
+            }
+        proposal = [
+            {
+                "task_title": title,
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_minutes": None,
+                "is_ai_generated": False,
+                "written_to_calendar": False,
+            }
+        ]
+        append_schedule_proposals(proposal)
+        return {
+            "proposal": proposal,
+            "message": "I added this calendar block to your calendar preview.",
+        }
     return {"error": f"Unknown tool: {tool}"}

@@ -304,6 +304,75 @@ def test_chat_service_nlp_returns_schedule_proposals(monkeypatch):
     ]
 
 
+def test_add_calendar_block_tool_appends_preview_block():
+    from app.services.chat_agent_common import execute_tool
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+    )
+
+    async def run_add_block():
+        result = await execute_tool(
+            "add_calendar_block",
+            {
+                "title": "Study for math",
+                "start_time": "2026-06-04T14:00:00",
+                "end_time": "2026-06-04T15:00:00",
+            },
+        )
+        return result, get_schedule_proposals()
+
+    try:
+        result, proposals = asyncio.run(run_add_block())
+    finally:
+        clear_client_context()
+
+    assert result["message"] == "I added this calendar block to your calendar preview."
+    assert proposals == [
+        {
+            "task_title": "Study for math",
+            "start_time": "2026-06-04T14:00:00",
+            "end_time": "2026-06-04T15:00:00",
+            "duration_minutes": None,
+            "is_ai_generated": False,
+            "written_to_calendar": False,
+        }
+    ]
+
+
+def test_nlp_router_run_turn_adds_calendar_block(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Study for math",
+                    "start_time": "2026-06-04T14:00:00",
+                    "end_time": "2026-06-04T15:00:00",
+                },
+            }
+        ]
+
+    async def run_turn():
+        reply = await service.run_turn("add calendar block")
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "I added this calendar block" in reply
+    assert "Study for math" in reply
+    assert proposals[0]["task_title"] == "Study for math"
+
+
 def test_nlp_router_ai_agent_host_falls_back_to_router(monkeypatch):
     import app.core.config.settings as settings_mod
     from app.services.nlp_router_chat_service import NlpRouterChatService
