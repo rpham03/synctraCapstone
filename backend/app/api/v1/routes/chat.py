@@ -41,6 +41,11 @@ async def post_message(body: ChatMessageIn) -> dict:
     service = ChatService()
     events = list(body.calendar_events)
     tasks = list(body.tasks)
+    print(
+        f"[chat] msg={body.message!r} tasks_in={len(tasks)} "
+        f"events_in={len(events)} client_today={body.client_today!r}",
+        flush=True,
+    )
     reply, proposals = await service.process_message(
         body.message,
         body.user_id,

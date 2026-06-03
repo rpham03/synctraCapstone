@@ -62,6 +62,10 @@ DEFAULT_TEST_PROMPTS = [
     "when am I free tomorrow",
     "schedule 2 hours for lab 7 by Friday",
     "explain how I should study for finals",
+    "when is summer",
+    "hi",
+    "plan this week",
+    "make a study time at 7pm",
 ]
 
 
@@ -207,6 +211,21 @@ def manual_eval_examples() -> list[TrainingExample]:
             "add a focused work session for lab 3",
             "plan three hours for the final paper",
             "move some free time into a study block",
+            "plan this week",
+            "plan my week",
+            "help me plan the week",
+            "set up a plan for this week",
+            "make a study time at 7pm",
+            "block 7pm for studying",
+            "schedule studying tonight",
+            "make a study block tomorrow",
+            "add a study session",
+            "create a study block",
+            "i want a study block tonight",
+            "set aside study time today",
+            "plan my study time",
+            "give me a study block",
+            "make me a focus block this evening",
         ],
         "ai_agent": [
             "help me write an email about missing class",
@@ -234,6 +253,52 @@ def manual_eval_examples() -> list[TrainingExample]:
             "explain this assignment prompt",
             "give me tips for staying focused",
             "translate this sentence into Spanish",
+            "when is summer",
+            "when does summer start",
+            "when is winter break",
+            "when does the semester end",
+            "when is spring break",
+            "when is thanksgiving",
+            "when does fall start",
+            "what is the capital of France",
+            "what is photosynthesis",
+            "what is a black hole",
+            "what is machine learning",
+            "what is the meaning of life",
+            "who is the president",
+            "who wrote hamlet",
+            "how does gravity work",
+            "how do airplanes fly",
+            "tell me a joke",
+            "tell me about World War 2",
+            "what time is it in tokyo",
+            "what day of the week is it",
+            "how many days until christmas",
+            "what is the weather like",
+            "hi",
+            "hello",
+            "how are you",
+            "thanks",
+            "thank you",
+            "good morning",
+            "what can you do",
+            "who are you",
+            "yes",
+            "no",
+            "ok",
+            "sure",
+            "maybe",
+            "i don't know",
+            "tell me something interesting",
+            "give me motivation",
+            "i feel stressed",
+            "i'm tired",
+            "i need a break",
+            "what should i eat for dinner",
+            "recommend a movie",
+            "give me a study tip",
+            "is the moon a planet",
+            "why is the sky blue",
         ],
     }
 
@@ -242,8 +307,8 @@ def manual_eval_examples() -> list[TrainingExample]:
         "find_free_slots": 84,
         "get_calendar_events": 84,
         "get_tasks": 83,
-        "propose_schedule_change": 83,
-        "ai_agent": 83,
+        "propose_schedule_change": 95,
+        "ai_agent": 130,
     }
     seen = {
         " ".join(text.lower().split())
@@ -395,8 +460,9 @@ def manual_eval_examples() -> list[TrainingExample]:
                 f"manual eval label {label} has {len(texts)} examples, expected at least {expected}"
             )
         examples.extend(TrainingExample(text=text, label=label) for text in texts[:expected])
-    if len(examples) != 500:
-        raise ValueError(f"manual eval set has {len(examples)} examples, expected 500")
+    expected_total = sum(target_counts.values())
+    if len(examples) != expected_total:
+        raise ValueError(f"manual eval set has {len(examples)} examples, expected {expected_total}")
     return examples
 
 
