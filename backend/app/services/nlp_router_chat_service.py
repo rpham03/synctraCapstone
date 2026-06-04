@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -104,6 +105,14 @@ class NlpRouterChatService:
                     message = str(arguments.get("message") or user_message)
                     return await self._ai_agent_reply(client, message)
 
+                verification_question = self._verify_local_tool_call(
+                    name,
+                    arguments,
+                    user_message,
+                )
+                if verification_question:
+                    return verification_question
+
                 result = await execute_tool(name, arguments)
                 parts.append(self._format_tool_result(name, result))
 
@@ -118,6 +127,144 @@ class NlpRouterChatService:
             return sanitize_chat_reply(str(ai_result["error"]))
         assistant = str(ai_result.get("assistant_message") or "").strip()
         return sanitize_chat_reply(assistant) or "I could not generate a reply."
+
+    def _verify_local_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        user_message: str,
+    ) -> str | None:
+        """Second-pass guard before executing local tools.
+
+        Verification 1: make sure the chosen tool matches the user's wording.
+        Verification 2: make sure all required arguments are specific enough.
+        """
+
+        lower = user_message.lower()
+        if name == "add_calendar_block":
+            return self._verify_add_calendar_block(arguments)
+        if name == "propose_schedule_change":
+            if self._looks_like_calendar_block_details(lower):
+                return (
+                    "I see an event name, date, and time range. Should I add this "
+                    "as a calendar block? Send it like: Study for CSE 369 on "
+                    "Thursday from 7 PM to 9 PM."
+                )
+            task_name = str(arguments.get("task_name") or "").strip().lower()
+            if task_name in {
+                "",
+                "study block",
+                "this week",
+                "today",
+                "tomorrow",
+                "weekend",
+                "this weekend",
+                "plan",
+            }:
+                return (
+                    "Before I add anything, what event name, date, start time, "
+                    "and end time should I use?"
+                )
+            if not (
+                self._has_any(lower, ("schedule", "study", "homework", "assignment"))
+                or self._has_duration(lower)
+            ):
+                return (
+                    "Do you want me to schedule study time, or add a calendar block? "
+                    "For a calendar block, send event name, date, start time, and end time."
+                )
+            return None
+        if name == "get_tasks":
+            if not self._has_any(
+                lower,
+                ("due", "deadline", "homework", "assignment", "task", "submit"),
+            ):
+                return (
+                    "Do you want me to check tasks and due dates, or something else?"
+                )
+            return self._require_args(arguments, ("due_start", "due_end"), "due date range")
+        if name == "get_calendar_events":
+            if not self._has_any(
+                lower,
+                ("calendar", "schedule", "class", "meeting", "event", "lecture", "lab"),
+            ):
+                return (
+                    "Do you want me to show calendar events, or add something to the calendar?"
+                )
+            return self._require_args(
+                arguments,
+                ("start_date", "end_date"),
+                "calendar date range",
+            )
+        return None
+
+    def _verify_add_calendar_block(self, arguments: dict[str, Any]) -> str | None:
+        title = str(arguments.get("title") or "").strip()
+        start_raw = str(arguments.get("start_time") or "").strip()
+        end_raw = str(arguments.get("end_time") or "").strip()
+        generic_titles = {"", "calendar", "block", "calendar block", "event", "study block"}
+        if title.lower() in generic_titles:
+            return "What event name should I use for this calendar block?"
+        if not start_raw or not end_raw:
+            return "What start time and end time should I use for this calendar block?"
+        try:
+            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        except ValueError:
+            return (
+                "I could not read that date or time. Please send the event name, "
+                "date, start time, and end time."
+            )
+        if end <= start:
+            return "The end time must be after the start time. What time should it end?"
+        return None
+
+    def _require_args(
+        self,
+        arguments: dict[str, Any],
+        keys: tuple[str, ...],
+        label: str,
+    ) -> str | None:
+        if all(str(arguments.get(key) or "").strip() for key in keys):
+            return None
+        return f"What {label} should I use?"
+
+    def _looks_like_calendar_block_details(self, text: str) -> bool:
+        has_time_range = bool(
+            re.search(
+                r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*"
+                r"(?:-|to|until|through)\s*"
+                r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        has_date = self._has_any(
+            text,
+            (
+                "today",
+                "tomorrow",
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+                "sunday",
+            ),
+        ) or bool(re.search(r"\b\d{1,2}(?:st|nd|rd|th)\b", text))
+        return has_time_range and has_date
+
+    def _has_duration(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b\d+(?:\.\d+)?\s*(?:h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b",
+                text,
+            )
+        )
+
+    def _has_any(self, text: str, terms: tuple[str, ...]) -> bool:
+        return any(term in text for term in terms)
 
     async def _fetch_plan(
         self,

@@ -511,6 +511,99 @@ def test_nlp_router_empty_plan_falls_back_to_ai_agent(monkeypatch):
     assert reply == "Qwen fallback"
 
 
+def test_nlp_router_verifies_generic_schedule_before_executing(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "propose_schedule_change",
+                "arguments": {
+                    "task_name": "this week",
+                    "hours": 1,
+                    "deadline": "2026-06-05T23:59:00",
+                    "estimated_minutes": 60,
+                },
+            }
+        ]
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply = asyncio.run(service.run_turn("plan this week"))
+        proposals = get_schedule_proposals()
+    finally:
+        clear_client_context()
+
+    assert "what event name" in reply.lower()
+    assert proposals == []
+
+
+def test_nlp_router_verifies_calendar_block_times_before_executing(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Study for CSE 369",
+                    "start_time": "2026-06-04T21:00:00",
+                    "end_time": "2026-06-04T19:00:00",
+                },
+            }
+        ]
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply = asyncio.run(
+            service.run_turn("study for cse 369 thursday from 9pm to 7pm")
+        )
+        proposals = get_schedule_proposals()
+    finally:
+        clear_client_context()
+
+    assert "end time must be after" in reply.lower()
+    assert proposals == []
+
+
+def test_nlp_router_verifies_calendar_details_misrouted_to_schedule(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "propose_schedule_change",
+                "arguments": {
+                    "task_name": "study for cse 369",
+                    "hours": 1,
+                    "deadline": "2026-06-04T23:59:00",
+                    "estimated_minutes": 60,
+                },
+            }
+        ]
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply = asyncio.run(
+            service.run_turn("study for cse 369 on thursday 4th at 7pm to 9 pm")
+        )
+        proposals = get_schedule_proposals()
+    finally:
+        clear_client_context()
+
+    assert "calendar block" in reply.lower()
+    assert proposals == []
+
+
 def test_chat_service_openai_mocked(monkeypatch):
     import app.core.config.settings as settings_mod
 
