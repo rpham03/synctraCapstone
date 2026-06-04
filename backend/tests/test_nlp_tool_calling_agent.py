@@ -37,14 +37,40 @@ def test_emotional_support_routes_to_ai_agent_without_trained_model():
     assert call.arguments["message"] == "i feel stressed"
 
 
-def test_plan_this_week_routes_to_schedule_without_trained_model():
+def test_plan_this_week_asks_for_calendar_block_details_without_trained_model():
     agent = NlpToolCallingAgent(today=date(2026, 6, 3))
 
     call = agent.plan("plan this week")[0]
 
-    assert call.name == "propose_schedule_change"
-    assert call.arguments["task_name"]
-    assert call.arguments["estimated_minutes"] >= 15
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == ADD_CALENDAR_BLOCK_ACTION
+    assert "event name" in call.arguments["question"]
+    assert "date" in call.arguments["question"]
+    assert "start and end time" in call.arguments["question"]
+
+
+def test_plan_today_asks_for_event_name_and_time_without_trained_model():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("plan today")[0]
+
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == ADD_CALENDAR_BLOCK_ACTION
+    assert "event name" in call.arguments["question"]
+    assert "date" not in call.arguments["question"]
+    assert "start and end time" in call.arguments["question"]
+
+
+def test_plan_weekend_asks_for_exact_date_without_trained_model():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("plan weekend")[0]
+
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == ADD_CALENDAR_BLOCK_ACTION
+    assert "event name" in call.arguments["question"]
+    assert "date" in call.arguments["question"]
+    assert "start and end time" in call.arguments["question"]
 
 
 def test_incomplete_calendar_block_asks_for_details_without_trained_model():
@@ -73,6 +99,28 @@ def test_complete_calendar_block_routes_to_add_block_without_trained_model():
     }
 
 
+def test_complete_plan_request_routes_to_add_block_without_trained_model():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("plan study for math tomorrow from 2 PM to 3 PM")[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "study for math",
+        "start_time": "2026-06-04T14:00:00",
+        "end_time": "2026-06-04T15:00:00",
+    }
+
+
+def test_specific_schedule_request_still_routes_to_schedule_proposal():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("schedule 2 hours for homework by Friday")[0]
+
+    assert call.name == "propose_schedule_change"
+    assert call.arguments["estimated_minutes"] == 120
+
+
 def test_calendar_block_overrides_trained_calendar_prediction():
     agent = NlpToolCallingAgent(today=date(2026, 6, 3))
 
@@ -82,8 +130,6 @@ def test_calendar_block_overrides_trained_calendar_prediction():
 
     agent.intent_model = FakeIntentModel()  # type: ignore[assignment]
 
-    call = agent.plan(
-        "add calendar block study for math tomorrow from 2 PM to 3 PM"
-    )[0]
+    call = agent.plan("plan study for math tomorrow from 2 PM to 3 PM")[0]
 
     assert call.name == ADD_CALENDAR_BLOCK_ACTION

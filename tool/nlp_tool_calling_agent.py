@@ -633,7 +633,7 @@ class NlpToolCallingAgent:
 
         title = self._extract_calendar_block_title(text)
         time_range = self._extract_time_range(lower)
-        has_date = self._has_explicit_date_text(lower)
+        has_date = self._has_exact_calendar_block_date_text(lower)
 
         missing: list[str] = []
         if not title:
@@ -681,6 +681,20 @@ class NlpToolCallingAgent:
         )
 
     def _wants_calendar_block_creation(self, text: str) -> bool:
+        if re.fullmatch(
+            r"(?:please\s+)?(?:help me\s+)?plan\s+(?:today|tomorrow|"
+            r"this week|next week|the week|my week|"
+            r"this weekend|next weekend|the weekend|my weekend|weekend)[.!?]*",
+            text,
+        ):
+            return True
+        if re.search(
+            r"\b(?:please\s+)?(?:help me\s+)?plan\s+.+\b(?:today|tomorrow|"
+            r"monday|mon|tuesday|tue|wednesday|wed|thursday|thu|friday|fri|"
+            r"saturday|sat|sunday|sun|this weekend|next weekend|weekend)\b",
+            text,
+        ):
+            return True
         return any(
             phrase in text
             for phrase in (
@@ -703,10 +717,10 @@ class NlpToolCallingAgent:
             )
         )
 
-    def _has_explicit_date_text(self, text: str) -> bool:
+    def _has_exact_calendar_block_date_text(self, text: str) -> bool:
         if self._ISO_DATE_RE.search(text) or self._MONTH_DAY_RE.search(text):
             return True
-        if any(word in text for word in ("today", "tomorrow", "weekend")):
+        if any(word in text for word in ("today", "tomorrow")):
             return True
         tokens = set(re.findall(r"\b[a-z]+\b", text.lower()))
         return any(token in tokens for token in self._WEEKDAYS)
@@ -763,8 +777,10 @@ class NlpToolCallingAgent:
         cleaned = self._ISO_DATE_RE.sub(" ", cleaned)
         cleaned = self._MONTH_DAY_RE.sub(" ", cleaned)
         cleaned = re.sub(
-            r"\b(?:today|tomorrow|monday|mon|tuesday|tue|wednesday|wed|"
-            r"thursday|thu|friday|fri|saturday|sat|sunday|sun|weekend)\b",
+            r"\b(?:today|tomorrow|this week|next week|the week|my week|"
+            r"this weekend|next weekend|the weekend|my weekend|weekend|"
+            r"monday|mon|tuesday|tue|wednesday|wed|"
+            r"thursday|thu|friday|fri|saturday|sat|sunday|sun)\b",
             " ",
             cleaned,
             flags=re.IGNORECASE,
@@ -773,6 +789,12 @@ class NlpToolCallingAgent:
             r"^\s*(?:please\s+)?(?:add|create|put)\s+(?:a\s+)?"
             r"(?:(?:calendar|study)\s+)?block"
             r"(?:\s*(?:to|in|on)?\s*(?:my\s+)?calendar)?\s*",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:please\s+)?(?:help me\s+)?plan\s+",
             " ",
             cleaned,
             flags=re.IGNORECASE,
