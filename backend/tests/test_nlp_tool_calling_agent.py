@@ -112,6 +112,33 @@ def test_complete_plan_request_routes_to_add_block_without_trained_model():
     }
 
 
+def test_clarification_reply_with_details_routes_to_add_block():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("study for cse 369 on thursday 4th at 7pm to 9 pm")[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "study for cse 369",
+        "start_time": "2026-06-04T19:00:00",
+        "end_time": "2026-06-04T21:00:00",
+    }
+
+
+def test_clarification_reply_with_details_overrides_schedule_prediction():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    class FakeIntentModel:
+        def predict(self, message: str) -> tuple[str, float]:
+            return "propose_schedule_change", 0.99
+
+    agent.intent_model = FakeIntentModel()  # type: ignore[assignment]
+
+    call = agent.plan("study for cse 369 on thursday 4th at 7pm to 9 pm")[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+
+
 def test_specific_schedule_request_still_routes_to_schedule_proposal():
     agent = NlpToolCallingAgent(today=date(2026, 6, 3))
 

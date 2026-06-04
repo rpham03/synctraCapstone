@@ -219,6 +219,13 @@ class NlpToolCallingAgent:
         )
         if calendar_block_call is not None:
             return [calendar_block_call]
+        calendar_block_details_call = self._calendar_block_details_call(
+            text=text,
+            lower=lower,
+            date_value=start,
+        )
+        if calendar_block_details_call is not None:
+            return [calendar_block_details_call]
         calls: list[ToolCall] = []
 
         if self.intent_model is not None:
@@ -680,6 +687,38 @@ class NlpToolCallingAgent:
             reason="User provided a calendar block title, date, and time range.",
         )
 
+    def _calendar_block_details_call(
+        self,
+        *,
+        text: str,
+        lower: str,
+        date_value: date,
+    ) -> ToolCall | None:
+        time_range = self._extract_time_range(lower)
+        if time_range is None or not self._has_exact_calendar_block_date_text(lower):
+            return None
+
+        title = self._extract_calendar_block_title(text)
+        if not title:
+            return None
+
+        start_time, end_time = time_range
+        start_dt = datetime.combine(date_value, start_time)
+        end_dt = datetime.combine(date_value, end_time)
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+
+        return ToolCall(
+            name=ADD_CALENDAR_BLOCK_ACTION,
+            arguments={
+                "title": title,
+                "start_time": start_dt.isoformat(),
+                "end_time": end_dt.isoformat(),
+            },
+            confidence=0.94,
+            reason="User provided calendar block details after a clarification.",
+        )
+
     def _wants_calendar_block_creation(self, text: str) -> bool:
         if re.fullmatch(
             r"(?:please\s+)?(?:help me\s+)?plan\s+(?:today|tomorrow|"
@@ -776,6 +815,7 @@ class NlpToolCallingAgent:
         cleaned = self._TIME_RANGE_RE.sub(" ", text)
         cleaned = self._ISO_DATE_RE.sub(" ", cleaned)
         cleaned = self._MONTH_DAY_RE.sub(" ", cleaned)
+        cleaned = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\b", " ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(
             r"\b(?:today|tomorrow|this week|next week|the week|my week|"
             r"this weekend|next weekend|the weekend|my weekend|weekend|"
@@ -785,6 +825,7 @@ class NlpToolCallingAgent:
             cleaned,
             flags=re.IGNORECASE,
         )
+        cleaned = re.sub(r"\b(?:on|at)\b", " ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(
             r"^\s*(?:please\s+)?(?:add|create|put)\s+(?:a\s+)?"
             r"(?:(?:calendar|study)\s+)?block"
