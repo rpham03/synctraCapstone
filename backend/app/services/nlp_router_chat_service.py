@@ -184,6 +184,10 @@ class NlpRouterChatService:
                 )
             return self._require_args(arguments, ("due_start", "due_end"), "due date range")
         if name == "get_calendar_events":
+            if self._looks_like_calendar_block_request(lower):
+                return (
+                    "What event name should I use for this calendar block?"
+                )
             if not self._has_any(
                 lower,
                 ("calendar", "schedule", "class", "meeting", "event", "lecture", "lab"),
@@ -254,6 +258,30 @@ class NlpRouterChatService:
             ),
         ) or bool(re.search(r"\b\d{1,2}(?:st|nd|rd|th)\b", text))
         return has_time_range and has_date
+
+    def _looks_like_calendar_block_request(self, text: str) -> bool:
+        return any(
+            phrase in text
+            for phrase in (
+                "add a block to my calendar",
+                "add a block in my calendar",
+                "add a block on my calendar",
+                "add a block to calendar",
+                "add a block in calendar",
+                "add block to my calendar",
+                "add block to calendar",
+                "add a calendar block",
+                "add calendar block",
+                "create a calendar block",
+                "put a block on my calendar",
+                "put a block in my calendar",
+                "add a study block to my calendar",
+                "add a study block in my calendar",
+                "add study block to my calendar",
+                "add study time to my calendar",
+                "add study time in my calendar",
+            )
+        )
 
     def _has_duration(self, text: str) -> bool:
         return bool(

@@ -84,6 +84,17 @@ def test_incomplete_calendar_block_asks_for_details_without_trained_model():
     assert "start and end time" in call.arguments["question"]
 
 
+def test_incomplete_calendar_block_with_a_asks_for_event_name():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("add a calendar block tomorrow from 2 pm to 3 pm")[0]
+
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == ADD_CALENDAR_BLOCK_ACTION
+    assert "event name" in call.arguments["question"]
+    assert "start and end time" not in call.arguments["question"]
+
+
 def test_complete_calendar_block_routes_to_add_block_without_trained_model():
     agent = NlpToolCallingAgent(today=date(2026, 6, 3))
 

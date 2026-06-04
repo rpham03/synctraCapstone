@@ -604,6 +604,36 @@ def test_nlp_router_verifies_calendar_details_misrouted_to_schedule(monkeypatch)
     assert proposals == []
 
 
+def test_nlp_router_verifies_add_block_misrouted_to_calendar_lookup(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "get_calendar_events",
+                "arguments": {
+                    "start_date": "2026-06-04",
+                    "end_date": "2026-06-04",
+                },
+            }
+        ]
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply = asyncio.run(
+            service.run_turn("add a calendar block tomorrow from 2 pm to 3 pm")
+        )
+        proposals = get_schedule_proposals()
+    finally:
+        clear_client_context()
+
+    assert "what event name" in reply.lower()
+    assert proposals == []
+
+
 def test_chat_service_openai_mocked(monkeypatch):
     import app.core.config.settings as settings_mod
 

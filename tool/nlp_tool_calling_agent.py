@@ -744,6 +744,7 @@ class NlpToolCallingAgent:
                 "add a block in calendar",
                 "add block to my calendar",
                 "add block to calendar",
+                "add a calendar block",
                 "add calendar block",
                 "create a calendar block",
                 "put a block on my calendar",
