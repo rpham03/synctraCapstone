@@ -462,6 +462,55 @@ def test_nlp_router_run_turn_uses_ai_agent_plan(monkeypatch):
     assert reply == "Hello from the Ollama ai_agent"
 
 
+def test_nlp_router_unsupported_tool_falls_back_to_ai_agent(monkeypatch):
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+    seen: dict[str, str] = {}
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "find_free_slots",
+                "arguments": {"start_date": "2026-06-03", "end_date": "2026-06-03"},
+            }
+        ]
+
+    async def fake_call_ai_agent(_client, message: str):
+        seen["message"] = message
+        return {"assistant_message": "Qwen handled this generally"}
+
+    monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+    monkeypatch.setattr(service, "_call_ai_agent", fake_call_ai_agent)
+
+    reply = asyncio.run(service.run_turn("when am I free today"))
+
+    assert seen["message"] == "when am I free today"
+    assert reply == "Qwen handled this generally"
+
+
+def test_nlp_router_empty_plan_falls_back_to_ai_agent(monkeypatch):
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+    seen: dict[str, str] = {}
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return []
+
+    async def fake_call_ai_agent(_client, message: str):
+        seen["message"] = message
+        return {"assistant_message": "Qwen fallback"}
+
+    monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+    monkeypatch.setattr(service, "_call_ai_agent", fake_call_ai_agent)
+
+    reply = asyncio.run(service.run_turn("tell me a joke"))
+
+    assert seen["message"] == "tell me a joke"
+    assert reply == "Qwen fallback"
+
+
 def test_chat_service_openai_mocked(monkeypatch):
     import app.core.config.settings as settings_mod
 

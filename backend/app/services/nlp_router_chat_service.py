@@ -14,6 +14,12 @@ from app.services.chat_client_context import effective_today
 
 
 CLARIFICATION_ACTION = "clarification"
+LOCAL_TOOL_NAMES = {
+    "get_tasks",
+    "get_calendar_events",
+    "propose_schedule_change",
+    "add_calendar_block",
+}
 TUNNEL_REQUEST_HEADERS = {
     "Accept": "application/json",
     "ngrok-skip-browser-warning": "true",
@@ -76,6 +82,9 @@ class NlpRouterChatService:
     async def run_turn(self, user_message: str) -> str:
         async with httpx.AsyncClient(timeout=60.0) as client:
             planned = await self._fetch_plan(client, user_message)
+            if not planned:
+                return await self._ai_agent_reply(client, user_message)
+
             parts: list[str] = []
 
             for raw_call in planned:
@@ -89,17 +98,26 @@ class NlpRouterChatService:
 
                 if name == "ai_agent":
                     message = str(arguments.get("message") or user_message)
-                    ai_result = await self._call_ai_agent(client, message)
-                    if ai_result.get("error"):
-                        return sanitize_chat_reply(str(ai_result["error"]))
-                    assistant = str(ai_result.get("assistant_message") or "").strip()
-                    return sanitize_chat_reply(assistant) or "I could not generate a reply."
+                    return await self._ai_agent_reply(client, message)
+
+                if name not in LOCAL_TOOL_NAMES:
+                    message = str(arguments.get("message") or user_message)
+                    return await self._ai_agent_reply(client, message)
 
                 result = await execute_tool(name, arguments)
                 parts.append(self._format_tool_result(name, result))
 
             reply = "\n\n".join(part for part in parts if part).strip()
-            return sanitize_chat_reply(reply) or "I routed the request, but there was no result to show."
+            return sanitize_chat_reply(reply) or await self._ai_agent_reply(
+                client, user_message
+            )
+
+    async def _ai_agent_reply(self, client: httpx.AsyncClient, message: str) -> str:
+        ai_result = await self._call_ai_agent(client, message)
+        if ai_result.get("error"):
+            return sanitize_chat_reply(str(ai_result["error"]))
+        assistant = str(ai_result.get("assistant_message") or "").strip()
+        return sanitize_chat_reply(assistant) or "I could not generate a reply."
 
     async def _fetch_plan(
         self,
