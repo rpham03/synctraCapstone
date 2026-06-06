@@ -16,6 +16,7 @@ if str(TOOL_DIR) not in sys.path:
 from nlp_tool_calling_agent import (
     ADD_CALENDAR_BLOCK_ACTION,
     CLARIFICATION_ACTION,
+    MOVE_CALENDAR_BLOCK_ACTION,
     NlpToolCallingAgent,
 )
 from generate_structured_nlu_dataset import (
@@ -136,6 +137,46 @@ def test_greeting_routes_to_ai_agent_without_trained_model():
 
     assert call.name == "ai_agent"
     assert call.arguments["message"] == "hi"
+
+
+def test_move_study_block_routes_before_trained_model():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    class WrongIntentModel:
+        def predict(self, message: str) -> tuple[str, float]:
+            return "find_free_slots", 0.99
+
+    agent.intent_model = WrongIntentModel()  # type: ignore[assignment]
+
+    call = agent.plan("Move my study block to Friday")[0]
+
+    assert call.name == MOVE_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title_query": "study block",
+        "target_date": "2026-06-05",
+    }
+
+
+def test_move_study_block_without_target_date_asks_followup():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan("Move my study block")[0]
+
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == MOVE_CALENDAR_BLOCK_ACTION
+    assert call.arguments["missing_slots"] == ["date"]
+
+
+def test_move_followup_title_is_used_when_multiple_blocks_exist():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 3))
+
+    call = agent.plan(
+        "Move my study block to Friday CSE 369 review",
+        clarification_pending=True,
+    )[0]
+
+    assert call.name == MOVE_CALENDAR_BLOCK_ACTION
+    assert call.arguments["title_query"] == "CSE 369 review"
 
 
 def test_emotional_support_routes_to_ai_agent_without_trained_model():

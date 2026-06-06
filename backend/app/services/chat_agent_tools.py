@@ -1,6 +1,7 @@
 # Tool implementations invoked by the OpenAI schedule agent.
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
 
 import httpx
@@ -556,4 +557,112 @@ def propose_schedule_change(
         "total_estimated_minutes": minutes,
         "session_count": len(blocks),
         "message": f"Proposal only — not saved to your calendar yet. {session_note}",
+    }
+
+
+def matching_study_blocks(title_query: object) -> list[dict]:
+    """Return preview study blocks matching a natural-language title query."""
+
+    query = re.sub(
+        r"\b(?:my|the|this|a|an)\b",
+        " ",
+        _as_str(title_query).lower(),
+    )
+    query = " ".join(query.split())
+    generic = query in {"", "block", "study block", "calendar block", "study time"}
+    blocks = [
+        raw
+        for raw in get_calendar_events()
+        if isinstance(raw, dict) and _as_str(raw.get("source")).lower() == "study_block"
+    ]
+    if generic:
+        return blocks
+    return [
+        block
+        for block in blocks
+        if query in _as_str(block.get("title")).lower()
+        or _as_str(block.get("title")).lower() in query
+    ]
+
+
+def move_calendar_block(
+    title_query: object,
+    target_date: object,
+    *,
+    start_time: object = "",
+    end_time: object = "",
+) -> dict:
+    """Return a replacement proposal for one existing preview study block."""
+
+    target_raw = _as_str(target_date).strip()
+    if not target_raw:
+        return {"proposal": [], "message": "What date should I move the study block to?"}
+    try:
+        target_day = date.fromisoformat(target_raw[:10])
+    except ValueError:
+        return {
+            "proposal": [],
+            "message": "I could not read the target date. Please use a date like Friday.",
+        }
+
+    matches = matching_study_blocks(title_query)
+    if not matches:
+        return {
+            "proposal": [],
+            "message": (
+                "I could not find that study block in your calendar preview. "
+                "Tell me the block name and target date."
+            ),
+        }
+    if len(matches) > 1:
+        titles = ", ".join(
+            sorted({_as_str(block.get("title")).strip() or "Study block" for block in matches})
+        )
+        return {
+            "proposal": [],
+            "message": f"Which study block should I move? I found: {titles}.",
+        }
+
+    block = matches[0]
+    try:
+        old_start = _parse_iso_datetime(block.get("start_time"))
+        old_end = _parse_iso_datetime(block.get("end_time"))
+    except (ValueError, TypeError):
+        return {"proposal": [], "message": "I could not read that study block's time."}
+
+    start_raw = _as_str(start_time).strip()
+    end_raw = _as_str(end_time).strip()
+    if bool(start_raw) != bool(end_raw):
+        return {
+            "proposal": [],
+            "message": "Please provide both a new start time and end time.",
+        }
+    if start_raw and end_raw:
+        try:
+            new_start = _parse_iso_datetime(start_raw)
+            new_end = _parse_iso_datetime(end_raw)
+        except (ValueError, TypeError):
+            return {"proposal": [], "message": "I could not read the new start or end time."}
+    else:
+        duration = old_end - old_start
+        new_start = datetime.combine(target_day, old_start.time())
+        new_end = new_start + duration
+    if new_end <= new_start:
+        return {"proposal": [], "message": "The end time must be after the start time."}
+
+    title = _as_str(block.get("title")).strip() or "Study block"
+    proposal = [
+        {
+            "task_title": title,
+            "start_time": new_start.isoformat(),
+            "end_time": new_end.isoformat(),
+            "duration_minutes": int((new_end - new_start).total_seconds() // 60),
+            "is_ai_generated": bool(block.get("is_ai_generated", True)),
+            "written_to_calendar": False,
+            "replace_block_id": _as_str(block.get("id")).strip(),
+        }
+    ]
+    return {
+        "proposal": proposal,
+        "message": f"I moved {title} to {target_day.strftime('%A')}.",
     }

@@ -47,6 +47,7 @@ TOOL_LABEL_ORDER = [
 TOOL_LABELS = set(TOOL_LABEL_ORDER)
 CLARIFICATION_ACTION = "clarification"
 ADD_CALENDAR_BLOCK_ACTION = "add_calendar_block"
+MOVE_CALENDAR_BLOCK_ACTION = "move_calendar_block"
 
 
 @dataclass(frozen=True)
@@ -290,6 +291,12 @@ class NlpToolCallingAgent:
             return []
 
         start, end, date_reason = self._date_range(lower)
+        move_calendar_block_call = self._move_calendar_block_call_or_clarification(
+            text=text,
+            lower=lower,
+        )
+        if move_calendar_block_call is not None:
+            return [move_calendar_block_call]
         calendar_block_call = self._calendar_block_call_or_clarification(
             text=text,
             lower=lower,
@@ -767,6 +774,91 @@ class NlpToolCallingAgent:
             confidence=0.95,
             reason="User provided a calendar block title, date, and time range.",
         )
+
+    def _move_calendar_block_call_or_clarification(
+        self,
+        *,
+        text: str,
+        lower: str,
+    ) -> ToolCall | None:
+        if not self._wants_move_calendar_block(lower):
+            return None
+
+        date_text = self._extract_calendar_date_text(text)
+        if not date_text:
+            question = "What date should I move this study block to?"
+            return ToolCall(
+                name=CLARIFICATION_ACTION,
+                arguments={
+                    "message": text,
+                    "question": question,
+                    "options": [MOVE_CALENDAR_BLOCK_ACTION, "ai_agent"],
+                    "predicted_tool": MOVE_CALENDAR_BLOCK_ACTION,
+                    "slots": {},
+                    "needs_followup": True,
+                    "missing_slots": ["date"],
+                    "followup_question": question,
+                    "next_step": "Ask for the target date before moving the block.",
+                },
+                confidence=0.98,
+                reason="Move request is missing its target date.",
+            )
+
+        arguments: dict[str, Any] = {
+            "title_query": self._extract_move_title(text),
+            "target_date": self._date_from_slot(date_text).isoformat(),
+        }
+        time_range = self._extract_time_range(lower)
+        if time_range is not None:
+            start_time, end_time = time_range
+            target_date = self._date_from_slot(date_text)
+            start_dt = datetime.combine(target_date, start_time)
+            end_dt = datetime.combine(target_date, end_time)
+            if end_dt <= start_dt:
+                return self._calendar_time_order_clarification(text, {})
+            arguments["start_time"] = start_dt.isoformat()
+            arguments["end_time"] = end_dt.isoformat()
+
+        return ToolCall(
+            name=MOVE_CALENDAR_BLOCK_ACTION,
+            arguments=arguments,
+            confidence=0.98,
+            reason="User explicitly asked to move an existing study block.",
+        )
+
+    def _wants_move_calendar_block(self, text: str) -> bool:
+        return bool(
+            re.search(r"\b(?:move|reschedule|shift)\b", text)
+            and re.search(
+                r"\b(?:study\s+block|calendar\s+block|study\s+time|event|block)\b",
+                text,
+            )
+        )
+
+    def _extract_move_title(self, text: str) -> str:
+        trailing = re.search(
+            r"\b(?:today|tomorrow|monday|mon|tuesday|tue|wednesday|wed|"
+            r"thursday|thu|friday|fri|saturday|sat|sunday|sun|"
+            r"20\d{2}-\d{2}-\d{2})\b\s+(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if trailing:
+            reply_title = " ".join(trailing.group(1).strip(" .,:;-").split())
+            if reply_title.lower() not in {"yes", "no", "sure", "okay", "ok"}:
+                return reply_title[:120]
+        match = re.search(
+            r"\b(?:move|reschedule|shift)\s+(?:my|the|this|a|an)?\s*"
+            r"(.+?)\s+(?:to|on)\s+(?:today|tomorrow|monday|mon|tuesday|tue|"
+            r"wednesday|wed|thursday|thu|friday|fri|saturday|sat|sunday|sun|"
+            r"20\d{2}-\d{2}-\d{2})\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return "study block"
+        title = " ".join(match.group(1).strip(" .,:;-").split())
+        return title[:120] or "study block"
 
     def _calendar_block_details_call(
         self,
@@ -1531,6 +1623,7 @@ def mock_registry() -> dict[str, ToolHandler]:
         "get_calendar_events": reply("get_calendar_events"),
         "find_free_slots": reply("find_free_slots"),
         "propose_schedule_change": reply("propose_schedule_change"),
+        "move_calendar_block": reply("move_calendar_block"),
         "ai_agent": reply("ai_agent"),
     }
 
@@ -1557,6 +1650,7 @@ def backend_registry() -> dict[str, ToolHandler]:
         "get_calendar_events": make_handler("get_calendar_events"),
         "find_free_slots": make_handler("find_free_slots"),
         "propose_schedule_change": make_handler("propose_schedule_change"),
+        "move_calendar_block": make_handler("move_calendar_block"),
     }
 
 

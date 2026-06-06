@@ -74,7 +74,8 @@ class SynctraChatService {
               'cd backend && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000',
         );
       }
-      return SynctraChatResult(reply: e.message ?? 'Could not reach the chat API');
+      return SynctraChatResult(
+          reply: e.message ?? 'Could not reach the chat API');
     } catch (e) {
       return SynctraChatResult(reply: '$e');
     }
@@ -115,28 +116,41 @@ class SynctraChatService {
 
     final taskId = 'chat-${DateTime.now().millisecondsSinceEpoch}';
     final blocks = <ScheduleBlockModel>[];
+    var applied = 0;
 
     for (final p in proposals) {
       final startRaw = p['start_time']?.toString();
       final endRaw = p['end_time']?.toString();
       if (startRaw == null || endRaw == null) continue;
       try {
+        final start = DateTime.parse(startRaw).toLocal();
+        final end = DateTime.parse(endRaw).toLocal();
+        final replaceId = p['replace_block_id']?.toString();
+        if (replaceId != null &&
+            replaceId.isNotEmpty &&
+            _store.blocks.any((block) => block.id == replaceId)) {
+          _store.updateBlockTimes(id: replaceId, start: start, end: end);
+          applied++;
+          continue;
+        }
         blocks.add(
           ScheduleBlockModel(
             id: const Uuid().v4(),
             taskId: taskId,
             taskTitle: p['task_title']?.toString() ?? 'Study block',
-            startTime: DateTime.parse(startRaw).toLocal(),
-            endTime: DateTime.parse(endRaw).toLocal(),
+            startTime: start,
+            endTime: end,
             isAiGenerated: p['is_ai_generated'] as bool? ?? true,
           ),
         );
       } catch (_) {}
     }
 
-    if (blocks.isEmpty) return 0;
-    _store.addStudyBlocks(blocks);
-    return blocks.length;
+    if (blocks.isNotEmpty) {
+      _store.addStudyBlocks(blocks);
+      applied += blocks.length;
+    }
+    return applied;
   }
 }
 

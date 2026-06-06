@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from app.core.config.settings import settings
+from app.services import chat_agent_tools
 from app.services.chat_agent_common import execute_tool, sanitize_chat_reply
 from app.services.chat_client_context import effective_today
 
@@ -20,6 +21,7 @@ LOCAL_TOOL_NAMES = {
     "get_calendar_events",
     "propose_schedule_change",
     "add_calendar_block",
+    "move_calendar_block",
 }
 TUNNEL_REQUEST_HEADERS = {
     "Accept": "application/json",
@@ -195,6 +197,31 @@ class NlpRouterChatService:
                     "event name, date, start time, and end time."
                 )
             return self._verify_add_calendar_block(arguments)
+        if name == "move_calendar_block":
+            if not self._has_any(lower, ("move", "reschedule", "shift")):
+                return "Do you want me to move an existing study block?"
+            target_date = str(arguments.get("target_date") or "").strip()
+            if not target_date:
+                return "What date should I move this study block to?"
+            matches = chat_agent_tools.matching_study_blocks(
+                arguments.get("title_query") or "study block"
+            )
+            if not matches:
+                return (
+                    "I could not find that study block in your calendar preview. "
+                    "What is the block name?"
+                )
+            if len(matches) > 1:
+                titles = ", ".join(
+                    sorted(
+                        {
+                            str(block.get("title") or "Study block").strip()
+                            for block in matches
+                        }
+                    )
+                )
+                return f"Which study block should I move? I found: {titles}."
+            return None
         if name == "propose_schedule_change":
             if self._looks_like_calendar_block_details(lower):
                 return (
@@ -470,6 +497,8 @@ class NlpRouterChatService:
             return self._format_proposal(result)
         if name == "add_calendar_block":
             return self._format_calendar_block(result)
+        if name == "move_calendar_block":
+            return self._format_move_calendar_block(result)
         return str(result)
 
     def _format_tasks(self, result: dict[str, Any]) -> str:
@@ -568,6 +597,21 @@ class NlpRouterChatService:
             if not isinstance(block, dict):
                 continue
             title = block.get("task_title") or "Calendar block"
+            start = self._short_time(block.get("start_time"))
+            end = self._short_time(block.get("end_time"))
+            lines.append(f"- {title}: {start} to {end}")
+        return "\n".join(lines)
+
+    def _format_move_calendar_block(self, result: dict[str, Any]) -> str:
+        message = str(result.get("message") or "").strip()
+        proposal = result.get("proposal") if isinstance(result.get("proposal"), list) else []
+        if not proposal:
+            return message or "I could not move that study block."
+        lines = [message or "I moved that study block."]
+        for block in proposal[:1]:
+            if not isinstance(block, dict):
+                continue
+            title = block.get("task_title") or "Study block"
             start = self._short_time(block.get("start_time"))
             end = self._short_time(block.get("end_time"))
             lines.append(f"- {title}: {start} to {end}")

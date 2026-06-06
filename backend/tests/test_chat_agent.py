@@ -340,6 +340,105 @@ def test_add_calendar_block_tool_appends_preview_block():
     ]
 
 
+def test_move_calendar_block_tool_replaces_existing_preview_block():
+    from app.services.chat_agent_common import execute_tool
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+
+    async def run_move_block():
+        set_calendar_events(
+            [
+                {
+                    "id": "study-1",
+                    "title": "Study for math",
+                    "start_time": "2026-06-07T18:00:00",
+                    "end_time": "2026-06-07T19:00:00",
+                    "source": "study_block",
+                    "is_ai_generated": True,
+                }
+            ]
+        )
+        result = await execute_tool(
+            "move_calendar_block",
+            {
+                "title_query": "study block",
+                "target_date": "2026-06-12",
+            },
+        )
+        return result, get_schedule_proposals()
+
+    try:
+        result, proposals = asyncio.run(run_move_block())
+    finally:
+        clear_client_context()
+
+    assert result["message"] == "I moved Study for math to Friday."
+    assert proposals == [
+        {
+            "task_title": "Study for math",
+            "start_time": "2026-06-12T18:00:00",
+            "end_time": "2026-06-12T19:00:00",
+            "duration_minutes": 60,
+            "is_ai_generated": True,
+            "written_to_calendar": False,
+            "replace_block_id": "study-1",
+        }
+    ]
+
+
+def test_nlp_router_move_request_never_calls_ai_agent(monkeypatch):
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "move_calendar_block",
+                "arguments": {
+                    "title_query": "study block",
+                    "target_date": "2026-06-12",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("move request must not reach Qwen")
+
+    async def run_turn():
+        set_calendar_events(
+            [
+                {
+                    "id": "study-1",
+                    "title": "Study for math",
+                    "start_time": "2026-06-07T18:00:00",
+                    "end_time": "2026-06-07T19:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        reply = await service.run_turn("Move my study block to Friday", user_id="move-user")
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "I moved Study for math to Friday" in reply
+    assert proposals[0]["replace_block_id"] == "study-1"
+
+
 def test_nlp_router_run_turn_adds_calendar_block(monkeypatch):
     from app.services.chat_client_context import clear_client_context, get_schedule_proposals
     from app.services.nlp_router_chat_service import NlpRouterChatService

@@ -35,6 +35,7 @@ Calendar vs tasks:
 - get_tasks — due items from the Tasks tab (manual + cached Canvas + course import), including estimated_minutes when set.
 - get_assignments — live Canvas API sync (due today or later); use for homework when Tasks may be stale.
 - add_calendar_block — add a named calendar block only when the user provides title, date, start time, and end time.
+- move_calendar_block — move an existing study block to another date, preserving its time unless a new time range is provided.
 
 When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events with today's date.
 When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments for the same date range.
@@ -102,6 +103,17 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": ["title", "start_time", "end_time"],
         "additionalProperties": False,
     },
+    "move_calendar_block": {
+        "type": "object",
+        "properties": {
+            "title_query": {"type": "string"},
+            "target_date": {"type": "string"},
+            "start_time": {"type": "string"},
+            "end_time": {"type": "string"},
+        },
+        "required": ["title_query", "target_date"],
+        "additionalProperties": False,
+    },
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -128,6 +140,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "add_calendar_block": (
         "Add a named calendar preview block with exact start_time and end_time. "
         "Only use after the user has provided event name, date, start time, and end time."
+    ),
+    "move_calendar_block": (
+        "Move an existing study block to target_date. Preserve its current time and "
+        "duration unless start_time and end_time are provided."
     ),
 }
 
@@ -219,6 +235,8 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
             "title",
             "start_time",
             "end_time",
+            "title_query",
+            "target_date",
         ):
             out[key] = coerce_text(val, default="")
         elif key == "hours":
@@ -340,4 +358,15 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "proposal": proposal,
             "message": "I added this calendar block to your calendar preview.",
         }
+    if tool == "move_calendar_block":
+        result = chat_agent_tools.move_calendar_block(
+            params.get("title_query") or "study block",
+            params.get("target_date") or "",
+            start_time=params.get("start_time") or "",
+            end_time=params.get("end_time") or "",
+        )
+        proposal = result.get("proposal")
+        if isinstance(proposal, list):
+            append_schedule_proposals(proposal)
+        return result
     return {"error": f"Unknown tool: {tool}"}

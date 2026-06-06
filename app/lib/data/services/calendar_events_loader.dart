@@ -84,9 +84,8 @@ class CalendarEventsLoader {
       'start_time': e.startTime.toIso8601String(),
       'end_time': e.endTime.toIso8601String(),
       'local_date': CalendarDisplayUtils.localDateKey(e.startTime),
-      'time_label': allDay
-          ? null
-          : LocalTimeFormat.timeRange(e.startTime, e.endTime),
+      'time_label':
+          allDay ? null : LocalTimeFormat.timeRange(e.startTime, e.endTime),
       'when_label': allDay
           ? LocalTimeFormat.whenDateOnly(e.startTime)
           : LocalTimeFormat.whenTimed(e.startTime, e.endTime),
@@ -108,6 +107,7 @@ class CalendarEventsLoader {
         'source': 'study_block',
         'description': b.description,
         'is_all_day': false,
+        'is_ai_generated': b.isAiGenerated,
       };
 
   static Map<String, dynamic> _taskPayload(TaskModel t) => {
