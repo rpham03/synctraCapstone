@@ -45,7 +45,15 @@ Incomplete requests include known slots and list the missing required slots:
 }
 ```
 
-See `tool/syntra_nlu_training_data.jsonl` for the checked-in examples.
+`tool/syntra_nlu_training_data.jsonl` contains exactly 1,000 deterministic,
+balanced examples shared by both models. Each model trains on 700 examples and
+evaluates on the remaining 300 examples.
+
+Regenerate the checked-in dataset after changing its templates:
+
+```bash
+python tool/generate_structured_nlu_dataset.py
+```
 
 ## Training In Colab
 
@@ -54,6 +62,18 @@ The one-click trainer now trains both models:
 ```bash
 python /content/syntra/tool/one_click_train_nlp_router_colab.py
 ```
+
+The default training run uses:
+
+```text
+shared structured examples: 1000
+training examples per model: 700
+testing examples per model: 300
+training examples per tool: 100
+```
+
+Both model directories include `training_meta.json` with the actual split
+counts used by that run.
 
 Output:
 

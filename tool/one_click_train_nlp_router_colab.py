@@ -14,6 +14,7 @@ Default behavior:
 - supports json/jsonl/csv/txt/tsv/parquet and dialogue JSON with turns
 - trains a transformer intent classifier
 - trains a second token-classification model for slots from structured NLU JSONL
+- uses the same 1,000 structured examples and 70/30 split for both models
 - saves the model to /content/syntra_tool_router
 - tests several prompts and prints the predicted Syntra tool calls
 """
@@ -34,6 +35,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
+
+from generate_structured_nlu_dataset import (
+    DEFAULT_DATASET_SIZE,
+    TEST_RATIO,
+    balanced_split_indices,
+)
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -1539,6 +1546,12 @@ def train_slot_model(args: argparse.Namespace, output_dir: Path) -> None:
         str(args.slot_epochs),
         "--batch-size",
         str(args.slot_batch_size),
+        "--dataset-size",
+        str(args.dataset_size),
+        "--test-ratio",
+        str(args.test_ratio),
+        "--seed",
+        str(args.seed),
     ]
     print(f"[slot-model] training with {data_path}")
     subprocess.run(command, check=True)
@@ -1785,6 +1798,41 @@ def limit_examples_per_label(
     return limited
 
 
+def select_balanced_dataset(
+    examples: list[TrainingExample],
+    target_size: int,
+    seed: int,
+) -> list[TrainingExample]:
+    """Select exactly target_size unique rows with balanced tool labels."""
+
+    if target_size <= 0:
+        return examples
+    by_label = {label: [] for label in LABELS}
+    for ex in examples:
+        if ex.label in by_label:
+            by_label[ex.label].append(ex)
+
+    base_count, remainder = divmod(target_size, len(LABELS))
+    targets = {
+        label: base_count + (1 if index < remainder else 0)
+        for index, label in enumerate(LABELS)
+    }
+    rng = random.Random(seed)
+    selected: list[TrainingExample] = []
+    for label in LABELS:
+        items = list(by_label[label])
+        rng.shuffle(items)
+        expected = targets[label]
+        if len(items) < expected:
+            raise ValueError(
+                f"Only {len(items)} unique {label} examples are available; "
+                f"{expected} are required for a {target_size}-row balanced dataset."
+            )
+        selected.extend(items[:expected])
+    rng.shuffle(selected)
+    return selected
+
+
 def print_label_samples(
     examples: list[TrainingExample],
     sample_count: int,
@@ -1851,7 +1899,7 @@ def train_and_test(args: argparse.Namespace) -> None:
         install_dependencies()
 
     import numpy as np
-    from datasets import Dataset
+    from datasets import Dataset, DatasetDict
     from transformers import (
         AutoModelForSequenceClassification,
         AutoTokenizer,
@@ -1894,15 +1942,24 @@ def train_and_test(args: argparse.Namespace) -> None:
         print("[data] skipping local data")
 
     structured = load_structured_nlu_examples(Path(args.structured_nlu_data))
-    examples = hf + local + structured + synthetic_examples()
+    if args.dataset_size > 0 and len(structured) != args.dataset_size:
+        raise ValueError(
+            f"Structured NLU dataset has {len(structured)} rows; expected exactly "
+            f"{args.dataset_size}. Run tool/generate_structured_nlu_dataset.py."
+        )
+    examples = hf + local + structured
     examples = dedupe_examples(examples)
     examples = limit_examples_per_label(
         examples,
         args.max_examples_per_label,
         args.seed,
     )
-    if args.balance:
+    if args.dataset_size > 0:
+        examples = select_balanced_dataset(examples, args.dataset_size, args.seed)
+    elif args.balance:
         examples = balance_examples(examples, args.seed)
+    if not 0 < args.test_ratio < 1:
+        raise ValueError("--test-ratio must be between 0 and 1")
 
     counts = {label: 0 for label in LABELS}
     for ex in examples:
@@ -1922,12 +1979,27 @@ def train_and_test(args: argparse.Namespace) -> None:
     print_label_samples(examples, args.sample_label_examples, args.seed)
 
     label_to_id = {label: idx for idx, label in enumerate(LABELS)}
-    dataset = Dataset.from_dict(
+    full_dataset = Dataset.from_dict(
         {
             "text": [ex.text for ex in examples],
             "label": [label_to_id[ex.label] for ex in examples],
         }
-    ).train_test_split(test_size=0.1, seed=args.seed)
+    )
+    train_indices, test_indices = balanced_split_indices(
+        [ex.label for ex in examples],
+        train_ratio=1 - args.test_ratio,
+        seed=args.seed,
+    )
+    dataset = DatasetDict(
+        {
+            "train": full_dataset.select(train_indices),
+            "test": full_dataset.select(test_indices),
+        }
+    )
+    print(
+        f"[data] split: {len(dataset['train'])} training / "
+        f"{len(dataset['test'])} testing"
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
 
@@ -2006,6 +2078,21 @@ def train_and_test(args: argparse.Namespace) -> None:
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
     (output_dir / "labels.json").write_text(json.dumps({"labels": LABELS}, indent=2))
+    (output_dir / "training_meta.json").write_text(
+        json.dumps(
+            {
+                "total_examples": len(examples),
+                "train_examples": len(dataset["train"]),
+                "test_examples": len(dataset["test"]),
+                "test_ratio": args.test_ratio,
+                "structured_nlu_examples": len(structured),
+                "base_model": args.base_model,
+                "label_counts": counts,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     print(f"[model] saved to {output_dir}")
     train_slot_model(args, output_dir)
     if not args.skip_manual_eval_files:
@@ -2061,6 +2148,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slot-base-model", default="distilbert-base-uncased")
     parser.add_argument("--slot-epochs", type=float, default=8.0)
     parser.add_argument("--slot-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--dataset-size",
+        type=int,
+        default=DEFAULT_DATASET_SIZE,
+        help="Exact shared dataset size for both intent and slot models. Default: 1000.",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=TEST_RATIO,
+        help="Evaluation split used by both models. Default: 0.30 (700/300).",
+    )
     parser.add_argument("--base-model", default="distilbert-base-uncased")
     parser.add_argument("--epochs", type=float, default=6.0)
     parser.add_argument("--batch-size", type=int, default=16)

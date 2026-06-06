@@ -20,6 +20,9 @@ Input is canonical JSONL:
 The trained token-classification model is saved under ``slot_model`` inside
 the intent-model directory. Runtime rules still normalize dates/times and
 verify required slots before any tool executes.
+
+By default this trainer requires the shared 1,000-row structured dataset and
+uses a deterministic 70% training / 30% testing split.
 """
 
 from __future__ import annotations
@@ -30,6 +33,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from generate_structured_nlu_dataset import (
+    DEFAULT_DATASET_SIZE,
+    TEST_RATIO,
+    balanced_split_indices,
+)
 
 
 SUPPORTED_SLOT_KEYS = (
@@ -95,106 +104,6 @@ def load_examples(path: Path) -> list[StructuredNluExample]:
     if not examples:
         raise ValueError(f"No structured NLU examples found in {path}")
     return examples
-
-
-def synthetic_examples() -> list[StructuredNluExample]:
-    """Generate clean slot-labeled rows without weak external annotations."""
-
-    rows: list[StructuredNluExample] = []
-    titles = [
-        "Study for calculus",
-        "Review CSE 369",
-        "Project meeting",
-        "Biology lab prep",
-        "Write essay draft",
-        "Office hours",
-    ]
-    dates = ["today", "tomorrow", "Monday", "Thursday", "Friday", "Saturday"]
-    ranges = [
-        ("9 AM", "10 AM"),
-        ("2 PM", "3 PM"),
-        ("4 PM", "5:30 PM"),
-        ("7 PM", "9 PM"),
-    ]
-    for title in titles:
-        for date_value in dates:
-            for start_time, end_time in ranges:
-                message = f"Add {title} {date_value} from {start_time} to {end_time}"
-                rows.append(
-                    StructuredNluExample(
-                        user_message=message,
-                        tool="add_calendar_block",
-                        slots={
-                            "title": title,
-                            "date": date_value,
-                            "start_time": start_time,
-                            "end_time": end_time,
-                        },
-                        needs_followup=False,
-                        missing_slots=(),
-                        followup_question=None,
-                    )
-                )
-            rows.append(
-                StructuredNluExample(
-                    user_message=f"Add a calendar block {date_value}",
-                    tool="add_calendar_block",
-                    slots={"date": date_value},
-                    needs_followup=True,
-                    missing_slots=("title", "start_time", "end_time"),
-                    followup_question=(
-                        "What event name, start time, and end time should I use?"
-                    ),
-                )
-            )
-
-    work_items = ["lab 7", "essay draft", "problem set", "project proposal"]
-    durations = ["30 minutes", "1 hour", "2 hours"]
-    deadlines = ["tomorrow", "Friday", "next week"]
-    for title in work_items:
-        for duration in durations:
-            for deadline in deadlines:
-                rows.append(
-                    StructuredNluExample(
-                        user_message=(
-                            f"Schedule {duration} for {title} by {deadline}"
-                        ),
-                        tool="propose_schedule_change",
-                        slots={
-                            "title": title,
-                            "duration": duration,
-                            "deadline": deadline,
-                        },
-                        needs_followup=False,
-                        missing_slots=(),
-                        followup_question=None,
-                    )
-                )
-
-    courses = ["CSE 369", "biology", "calculus", "history"]
-    for course in courses:
-        for date_value in dates:
-            rows.append(
-                StructuredNluExample(
-                    user_message=f"What {course} homework is due {date_value}?",
-                    tool="get_tasks",
-                    slots={"course": course, "date": date_value},
-                    needs_followup=False,
-                    missing_slots=(),
-                    followup_question=None,
-                )
-            )
-            rows.append(
-                StructuredNluExample(
-                    user_message=f"Show my {course} calendar {date_value}",
-                    tool="get_calendar_events",
-                    slots={"course": course, "date": date_value},
-                    needs_followup=False,
-                    missing_slots=(),
-                    followup_question=None,
-                )
-            )
-    return rows
 
 
 def dedupe_examples(
@@ -265,7 +174,7 @@ def align_token_labels(
 
 def train(args: argparse.Namespace) -> None:
     import numpy as np
-    from datasets import Dataset
+    from datasets import Dataset, DatasetDict
     from transformers import (
         AutoModelForTokenClassification,
         AutoTokenizer,
@@ -275,7 +184,16 @@ def train(args: argparse.Namespace) -> None:
     )
 
     canonical_examples = load_examples(Path(args.data))
-    examples = dedupe_examples(canonical_examples + synthetic_examples())
+    examples = dedupe_examples(canonical_examples)
+    if args.dataset_size > 0 and len(examples) != args.dataset_size:
+        raise ValueError(
+            f"Slot dataset has {len(examples)} unique examples; "
+            f"expected exactly {args.dataset_size}. Regenerate it with "
+            "tool/generate_structured_nlu_dataset.py."
+        )
+    if not 0 < args.test_ratio < 1:
+        raise ValueError("--test-ratio must be between 0 and 1")
+
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
     label_to_id = {label: index for index, label in enumerate(SLOT_LABELS)}
 
@@ -295,9 +213,21 @@ def train(args: argparse.Namespace) -> None:
         encoded["labels"] = align_token_labels(offsets, spans, label_to_id)
         rows.append(encoded)
 
-    dataset = Dataset.from_list(rows).train_test_split(
-        test_size=max(1, int(round(len(rows) * 0.15))),
+    full_dataset = Dataset.from_list(rows)
+    train_indices, test_indices = balanced_split_indices(
+        [example.tool for example in examples],
+        train_ratio=1 - args.test_ratio,
         seed=args.seed,
+    )
+    dataset = DatasetDict(
+        {
+            "train": full_dataset.select(train_indices),
+            "test": full_dataset.select(test_indices),
+        }
+    )
+    print(
+        f"[slot-model] split: {len(dataset['train'])} training / "
+        f"{len(dataset['test'])} testing"
     )
     model = AutoModelForTokenClassification.from_pretrained(
         args.base_model,
@@ -363,6 +293,9 @@ def train(args: argparse.Namespace) -> None:
             {
                 "structured_examples": len(examples),
                 "canonical_examples": len(canonical_examples),
+                "train_examples": len(dataset["train"]),
+                "test_examples": len(dataset["test"]),
+                "test_ratio": args.test_ratio,
                 "rows_without_exact_slot_spans": skipped_without_spans,
                 "base_model": args.base_model,
             },
@@ -385,6 +318,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument("--dataset-size", type=int, default=DEFAULT_DATASET_SIZE)
+    parser.add_argument("--test-ratio", type=float, default=TEST_RATIO)
     return parser.parse_args()
 
 
