@@ -28,6 +28,25 @@ TUNNEL_REQUEST_HEADERS = {
     "ngrok-skip-browser-warning": "true",
 }
 _pending_nlu_context: dict[str, dict[str, Any]] = {}
+_AFFIRMATIVE_REPLIES = {
+    "yes",
+    "yes please",
+    "sure",
+    "okay",
+    "ok",
+    "confirm",
+    "do it",
+    "please do",
+}
+_CANCEL_REPLIES = {
+    "cancel",
+    "cancel it",
+    "never mind",
+    "nevermind",
+    "stop",
+    "no",
+    "no thanks",
+}
 
 
 class NlpRouterChatService:
@@ -83,25 +102,52 @@ class NlpRouterChatService:
             or "Qwen/Qwen2.5-3B-Instruct"
         ).strip()
 
-    async def run_turn(self, user_message: str, *, user_id: str | None = None) -> str:
+    async def run_turn(
+        self,
+        user_message: str,
+        *,
+        user_id: str | None = None,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
         pending = _pending_nlu_context.get(user_id) if user_id else None
-        if pending and user_message.strip().lower() in {
-            "cancel",
-            "cancel it",
-            "never mind",
-            "nevermind",
-            "stop",
-        }:
+        normalized_reply = self._normalized_reply(user_message)
+        if pending and normalized_reply in _CANCEL_REPLIES:
             if user_id:
                 _pending_nlu_context.pop(user_id, None)
             return "Okay, I canceled that request."
 
+        if pending and normalized_reply in _AFFIRMATIVE_REPLIES:
+            pending_call = pending.get("pending_call")
+            if isinstance(pending_call, dict):
+                name = str(pending_call.get("name") or "")
+                args = pending_call.get("arguments")
+                arguments = args if isinstance(args, dict) else {}
+                if name in LOCAL_TOOL_NAMES:
+                    if user_id:
+                        _pending_nlu_context.pop(user_id, None)
+                    result = await execute_tool(name, arguments)
+                    return sanitize_chat_reply(self._format_tool_result(name, result))
+
+        if pending and self._starts_new_request(user_message, pending):
+            if user_id:
+                _pending_nlu_context.pop(user_id, None)
+            pending = None
+
         planning_message = user_message
         if pending:
             original = str(pending.get("message") or "").strip()
-            planning_message = f"{original} {user_message}".strip()
+            planning_message = (
+                original
+                if normalized_reply in _AFFIRMATIVE_REPLIES
+                else self._merge_pending_reply(original, user_message, pending)
+            )
 
         async with httpx.AsyncClient(timeout=60.0) as client:
+            async def ai_reply(message: str) -> str:
+                if history:
+                    return await self._ai_agent_reply(client, message, history=history)
+                return await self._ai_agent_reply(client, message)
+
             planned = await self._fetch_plan(
                 client,
                 planning_message,
@@ -110,7 +156,7 @@ class NlpRouterChatService:
             if not planned:
                 if user_id:
                     _pending_nlu_context.pop(user_id, None)
-                return await self._ai_agent_reply(client, user_message)
+                return await ai_reply(user_message)
 
             parts: list[str] = []
 
@@ -134,13 +180,13 @@ class NlpRouterChatService:
                     if user_id:
                         _pending_nlu_context.pop(user_id, None)
                     message = str(arguments.get("message") or user_message)
-                    return await self._ai_agent_reply(client, message)
+                    return await ai_reply(message)
 
                 if name not in LOCAL_TOOL_NAMES:
                     if user_id:
                         _pending_nlu_context.pop(user_id, None)
                     message = str(arguments.get("message") or user_message)
-                    return await self._ai_agent_reply(client, message)
+                    return await ai_reply(message)
 
                 verification_question = self._verify_local_tool_call(
                     name,
@@ -149,12 +195,21 @@ class NlpRouterChatService:
                 )
                 if verification_question:
                     if user_id:
-                        _pending_nlu_context[user_id] = {
+                        pending_state: dict[str, Any] = {
                             "message": planning_message,
                             "slots": {},
                             "missing_slots": [],
                             "predicted_tool": name,
                         }
+                        pending_call = self._safe_confirmation_call(
+                            name,
+                            arguments,
+                            planning_message,
+                            verification_question,
+                        )
+                        if pending_call:
+                            pending_state["pending_call"] = pending_call
+                        _pending_nlu_context[user_id] = pending_state
                     return verification_question
 
                 if user_id:
@@ -163,12 +218,117 @@ class NlpRouterChatService:
                 parts.append(self._format_tool_result(name, result))
 
             reply = "\n\n".join(part for part in parts if part).strip()
-            return sanitize_chat_reply(reply) or await self._ai_agent_reply(
-                client, user_message
-            )
+            return sanitize_chat_reply(reply) or await ai_reply(user_message)
 
-    async def _ai_agent_reply(self, client: httpx.AsyncClient, message: str) -> str:
-        ai_result = await self._call_ai_agent(client, message)
+    def _normalized_reply(self, message: str) -> str:
+        return re.sub(r"[.!?]+$", "", message.strip().lower()).strip()
+
+    def _starts_new_request(
+        self,
+        message: str,
+        pending: dict[str, Any],
+    ) -> bool:
+        requested_tool = self._explicit_request_tool(message)
+        if not requested_tool:
+            return False
+        pending_tool = str(pending.get("predicted_tool") or "")
+        return not pending_tool or requested_tool != pending_tool
+
+    def _merge_pending_reply(
+        self,
+        original: str,
+        reply: str,
+        pending: dict[str, Any],
+    ) -> str:
+        missing_slots = set(pending.get("missing_slots") or [])
+        if missing_slots == {"time_period"}:
+            match = re.search(
+                r"(?:a\.?m\.?|p\.?m\.?)\b|"
+                r"\b(?:morning|afternoon|evening|tonight)\b",
+                reply,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return f"{original} {match.group(0)}".strip()
+        return f"{original} {reply}".strip()
+
+    def _explicit_request_tool(self, message: str) -> str | None:
+        lower = message.strip().lower()
+        if re.search(r"\b(?:move|reschedule|shift)\b", lower):
+            return "move_calendar_block"
+        if self._looks_like_calendar_block_request(lower) or re.fullmatch(
+            r"(?:please\s+)?(?:help me\s+)?plan\s+.+",
+            lower,
+        ):
+            return "add_calendar_block"
+        if re.search(
+            r"\b(?:what|which|show|list|tell me|do i have|what's|whats)\b"
+            r".*\b(?:due|deadlines?|homework|assignments?|tasks?|submit)\b",
+            lower,
+        ):
+            return "get_tasks"
+        if re.search(
+            r"\b(?:what|which|show|list|do i have|what's|whats)\b"
+            r".*\b(?:calendar|schedule|classes?|meetings?|events?|lectures?|labs?)\b",
+            lower,
+        ):
+            return "get_calendar_events"
+        if re.search(r"\b(?:schedule|reserve|make time|block time)\b", lower):
+            return "propose_schedule_change"
+        if re.search(
+            r"\b(?:free time|free slots?|open time|availability|when am i free)\b",
+            lower,
+        ):
+            return "find_free_slots"
+        if re.fullmatch(
+            r"(?:hi|hello|hey|thanks|thank you|good morning|good afternoon|"
+            r"good evening)[.!?]*",
+            lower,
+        ) or re.search(
+            r"\b(?:tell me|write|explain|summarize|brainstorm|translate|"
+            r"i feel|i am feeling|i'm feeling)\b",
+            lower,
+        ):
+            return "ai_agent"
+        if re.match(
+            r"(?:what|why|how|who|where|can you|could you|would you|please)\b",
+            lower,
+        ):
+            return "ai_agent"
+        return None
+
+    def _safe_confirmation_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        user_message: str,
+        question: str,
+    ) -> dict[str, Any] | None:
+        if not question.lower().startswith("do you want me to"):
+            return None
+        lower = user_message.lower()
+        if name == "add_calendar_block":
+            title = str(arguments.get("title") or "").strip().lower()
+            if title and title in lower and self._verify_add_calendar_block(arguments) is None:
+                return {"name": name, "arguments": dict(arguments)}
+        if name == "move_calendar_block":
+            title = str(arguments.get("title_query") or "").strip().lower()
+            if title and title in lower and str(arguments.get("target_date") or "").strip():
+                return {"name": name, "arguments": dict(arguments)}
+        return None
+
+    async def _ai_agent_reply(
+        self,
+        client: httpx.AsyncClient,
+        message: str,
+        *,
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
+        ai_result = (
+            await self._call_ai_agent(client, message, history=history)
+            if history
+            else await self._call_ai_agent(client, message)
+        )
         if ai_result.get("error"):
             return sanitize_chat_reply(str(ai_result["error"]))
         assistant = str(ai_result.get("assistant_message") or "").strip()
@@ -323,11 +483,19 @@ class NlpRouterChatService:
         return f"What {label} should I use?"
 
     def _looks_like_calendar_block_details(self, text: str) -> bool:
-        has_time_range = bool(
+        has_time_range_text = bool(
             re.search(
                 r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*"
                 r"(?:-|to|until|through)\s*"
-                r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b",
+                r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        has_time_period = bool(
+            re.search(
+                r"(?:a\.?m\.?|p\.?m\.?)\b|"
+                r"\b(?:morning|afternoon|evening|tonight)\b",
                 text,
                 flags=re.IGNORECASE,
             )
@@ -346,7 +514,7 @@ class NlpRouterChatService:
                 "sunday",
             ),
         ) or bool(re.search(r"\b\d{1,2}(?:st|nd|rd|th)\b", text))
-        return has_time_range and has_date
+        return has_time_range_text and has_time_period and has_date
 
     def _looks_like_calendar_block_request(self, text: str) -> bool:
         return any(
@@ -441,6 +609,8 @@ class NlpRouterChatService:
         self,
         client: httpx.AsyncClient,
         message: str,
+        *,
+        history: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         try:
             host = self._ai_agent_host()
@@ -450,7 +620,7 @@ class NlpRouterChatService:
         url = f"{host}/api/generate"
         payload = {
             "model": self._ai_agent_model(),
-            "prompt": message,
+            "prompt": self._ai_agent_prompt(message, history),
             "stream": False,
             "options": {"temperature": 0.2, "syntra_mode": "ai_agent"},
         }
@@ -481,6 +651,25 @@ class NlpRouterChatService:
             "assistant_message": str(data.get("response") or "").strip(),
             "raw": data,
         }
+
+    def _ai_agent_prompt(
+        self,
+        message: str,
+        history: list[dict[str, str]] | None,
+    ) -> str:
+        if not history:
+            return message
+        lines = [
+            "Use this recent conversation only as context. Answer the current user request.",
+            "",
+        ]
+        for item in history[-12:]:
+            role = str(item.get("role") or "user").strip().capitalize()
+            content = str(item.get("content") or "").strip()
+            if content:
+                lines.append(f"{role}: {content}")
+        lines.extend(("", f"Current user request: {message}"))
+        return "\n".join(lines)
 
     def _format_tool_result(self, name: str, result: dict[str, Any]) -> str:
         if result.get("error"):

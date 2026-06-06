@@ -248,6 +248,48 @@ def test_incomplete_calendar_block_with_a_asks_for_event_name():
     assert call.arguments["missing_slots"] == ["title"]
 
 
+def test_ambiguous_calendar_times_ask_for_am_or_pm():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan(
+        "bible study, the date is tomorrow and the start time is 10:30 to 11:30"
+    )[0]
+
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments["missing_slots"] == ["time_period"]
+    assert "morning" in call.arguments["question"].lower()
+
+
+def test_morning_resolves_ambiguous_calendar_times_to_am():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan(
+        "bible study, the date is tomorrow and the start time is "
+        "10:30 to 11:30 in the morning"
+    )[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "bible study",
+        "start_time": "2026-06-07T10:30:00",
+        "end_time": "2026-06-07T11:30:00",
+    }
+
+
+def test_evening_resolves_ambiguous_calendar_times_to_pm():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan("dinner tomorrow from 6 to 7 in the evening")[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "dinner",
+        "start_time": "2026-06-07T18:00:00",
+        "end_time": "2026-06-07T19:00:00",
+    }
+
+
 def test_complete_calendar_block_routes_to_add_block_without_trained_model():
     agent = NlpToolCallingAgent(today=date(2026, 6, 3))
 

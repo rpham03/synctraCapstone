@@ -717,7 +717,9 @@ class NlpToolCallingAgent:
 
         slots = self._calendar_slot_values(text, lower)
         title = slots.get("title") or self._extract_calendar_block_title(text)
-        time_range = self._time_range_from_slots(slots) or self._extract_time_range(lower)
+        time_range = self._time_range_from_slots(slots, context=lower) or self._extract_time_range(
+            lower
+        )
         date_text = slots.get("date") or slots.get("deadline")
         has_date = bool(date_text) or self._has_exact_calendar_block_date_text(lower)
 
@@ -727,7 +729,9 @@ class NlpToolCallingAgent:
         if not has_date:
             missing.append("date")
         if time_range is None:
-            if not slots.get("start_time"):
+            if slots.get("start_time") and slots.get("end_time"):
+                missing.append("time_period")
+            elif not slots.get("start_time"):
                 missing.append("start_time")
             if not slots.get("end_time"):
                 missing.append("end_time")
@@ -868,22 +872,24 @@ class NlpToolCallingAgent:
         date_value: date,
         clarification_pending: bool,
     ) -> ToolCall | None:
+        has_date = self._has_exact_calendar_block_date_text(lower)
         if not clarification_pending and not (
-            self._has_exact_calendar_block_date_text(lower)
-            and self._extract_time_range(lower) is not None
+            has_date and self._has_time_range_text(lower)
         ):
             return None
         slots = self._calendar_slot_values(text, lower)
-        time_range = self._time_range_from_slots(slots) or self._extract_time_range(lower)
+        time_range = self._time_range_from_slots(slots, context=lower) or self._extract_time_range(
+            lower
+        )
         date_text = slots.get("date") or slots.get("deadline")
-        if time_range is None or not (
-            date_text or self._has_exact_calendar_block_date_text(lower)
-        ):
+        if not (date_text or has_date):
             return None
 
         title = slots.get("title") or self._extract_calendar_block_title(text)
         if not title:
             return None
+        if time_range is None:
+            return self._calendar_time_period_clarification(text, slots)
 
         start_time, end_time = time_range
         resolved_date = self._date_from_slot(date_text) if date_text else date_value
@@ -982,14 +988,23 @@ class NlpToolCallingAgent:
     def _date_from_slot(self, value: str) -> date:
         return self._date_range(value.lower())[0]
 
-    def _time_range_from_slots(self, slots: dict[str, str]) -> tuple[Any, Any] | None:
+    def _time_range_from_slots(
+        self,
+        slots: dict[str, str],
+        *,
+        context: str = "",
+    ) -> tuple[Any, Any] | None:
         start_raw = slots.get("start_time")
         end_raw = slots.get("end_time")
         if not start_raw or not end_raw:
             return None
-        end_ampm = self._time_ampm(end_raw)
-        start_time = self._parse_time_token(start_raw, default_ampm=end_ampm)
-        end_time = self._parse_time_token(end_raw)
+        shared_ampm = (
+            self._time_ampm(end_raw)
+            or self._time_ampm(start_raw)
+            or self._time_period_ampm(context)
+        )
+        start_time = self._parse_time_token(start_raw, default_ampm=shared_ampm)
+        end_time = self._parse_time_token(end_raw, default_ampm=shared_ampm)
         if start_time is None or end_time is None:
             return None
         return start_time, end_time
@@ -1002,6 +1017,7 @@ class NlpToolCallingAgent:
             "end_time": "end time",
             "duration": "duration",
             "deadline": "deadline",
+            "time_period": "AM or PM",
         }
         remaining = list(missing)
         values: list[str] = []
@@ -1042,6 +1058,31 @@ class NlpToolCallingAgent:
             },
             confidence=0.95,
             reason="Calendar block end time is not after its start time.",
+        )
+
+    def _calendar_time_period_clarification(
+        self,
+        message: str,
+        slots: dict[str, str],
+    ) -> ToolCall:
+        question = (
+            "Should I use morning (AM) or afternoon/evening (PM) for those times?"
+        )
+        return ToolCall(
+            name=CLARIFICATION_ACTION,
+            arguments={
+                "message": message,
+                "question": question,
+                "options": [ADD_CALENDAR_BLOCK_ACTION, "ai_agent"],
+                "predicted_tool": ADD_CALENDAR_BLOCK_ACTION,
+                "slots": slots,
+                "needs_followup": True,
+                "missing_slots": ["time_period"],
+                "followup_question": question,
+                "next_step": "Ask whether ambiguous calendar times are AM or PM.",
+            },
+            confidence=0.95,
+            reason="Calendar block times need an AM or PM period.",
         )
 
     def _schedule_call_or_clarification(
@@ -1143,12 +1184,19 @@ class NlpToolCallingAgent:
         if not match:
             return None
         start_raw, end_raw = match.groups()
-        end_ampm = self._time_ampm(end_raw)
-        start_time = self._parse_time_token(start_raw, default_ampm=end_ampm)
-        end_time = self._parse_time_token(end_raw)
+        shared_ampm = (
+            self._time_ampm(end_raw)
+            or self._time_ampm(start_raw)
+            or self._time_period_ampm(text)
+        )
+        start_time = self._parse_time_token(start_raw, default_ampm=shared_ampm)
+        end_time = self._parse_time_token(end_raw, default_ampm=shared_ampm)
         if start_time is None or end_time is None:
             return None
         return start_time, end_time
+
+    def _has_time_range_text(self, text: str) -> bool:
+        return self._TIME_RANGE_RE.search(text) is not None
 
     def _time_ampm(self, raw: str) -> str | None:
         match = re.search(r"(a\.?m\.?|p\.?m\.?)", raw, flags=re.IGNORECASE)
@@ -1156,6 +1204,14 @@ class NlpToolCallingAgent:
             return None
         value = match.group(1).lower().replace(".", "")
         return "am" if value.startswith("a") else "pm"
+
+    def _time_period_ampm(self, text: str) -> str | None:
+        lower = text.lower()
+        if re.search(r"\b(?:morning|before noon)\b", lower):
+            return "am"
+        if re.search(r"\b(?:afternoon|evening|tonight|after noon)\b", lower):
+            return "pm"
+        return None
 
     def _parse_time_token(self, raw: str, *, default_ampm: str | None = None) -> Any | None:
         from datetime import time
@@ -1190,6 +1246,18 @@ class NlpToolCallingAgent:
         cleaned = self._ISO_DATE_RE.sub(" ", cleaned)
         cleaned = self._MONTH_DAY_RE.sub(" ", cleaned)
         cleaned = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"\b(?:and\s+)?(?:the\s+)?(?:date|start\s+time|end\s+time)\s+is\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:in\s+(?:the\s+)?)?(?:morning|afternoon|evening|tonight)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
         cleaned = re.sub(
             r"\b(?:today|tomorrow|this week|next week|the week|my week|"
             r"this weekend|next weekend|the weekend|my weekend|weekend|"

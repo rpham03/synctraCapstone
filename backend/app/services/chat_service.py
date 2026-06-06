@@ -106,7 +106,12 @@ class ChatService:
         provider = self._provider()
         if provider in ("nlp", "nlp-router", "colab-nlp", "colab_nlp"):
             try:
-                reply = await self._nlp_agent().run_turn(text, user_id=user_id)
+                history = list(_history.get(user_id, []))
+                reply = await self._nlp_agent().run_turn(
+                    text,
+                    user_id=user_id,
+                    history=history,
+                )
                 reply = sanitize_chat_reply(reply)
                 self._append_history(user_id, "user", text)
                 self._append_history(user_id, "assistant", reply)

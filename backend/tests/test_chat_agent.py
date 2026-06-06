@@ -318,6 +318,34 @@ def test_chat_service_nlp_mocked(monkeypatch):
     assert proposals == []
 
 
+def test_chat_service_passes_live_history_to_nlp_ai_fallback(monkeypatch):
+    import app.core.config.settings as settings_mod
+    from app.services.chat_service import _history
+
+    monkeypatch.setattr(settings_mod.settings, "chat_llm_provider", "nlp")
+    service = ChatService()
+    seen_history: list[list[dict[str, str]]] = []
+
+    class FakeNlpAgent:
+        async def run_turn(self, *_args, **kwargs):
+            seen_history.append(list(kwargs.get("history") or []))
+            return "NLP reply"
+
+    try:
+        _history.clear()
+        monkeypatch.setattr(service, "_nlp_agent", lambda: FakeNlpAgent())
+        asyncio.run(service.process_message("hello", "history-user"))
+        asyncio.run(service.process_message("what did I just say?", "history-user"))
+    finally:
+        _history.clear()
+
+    assert seen_history[0] == []
+    assert seen_history[1] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "NLP reply"},
+    ]
+
+
 def test_chat_service_nlp_returns_schedule_proposals(monkeypatch):
     import app.core.config.settings as settings_mod
     from app.services.chat_client_context import append_schedule_proposals
@@ -590,6 +618,39 @@ def test_nlp_router_calls_ollama_generate_for_ai_agent(monkeypatch):
     assert seen["headers"]["ngrok-skip-browser-warning"] == "true"
     assert seen["payload"]["prompt"] == "hi"
     assert seen["payload"]["options"]["syntra_mode"] == "ai_agent"
+
+
+def test_nlp_router_sends_recent_history_to_ai_agent(monkeypatch):
+    import app.core.config.settings as settings_mod
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example")
+    monkeypatch.setattr(settings_mod.settings, "colab_ai_agent_host", "")
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"response": "Context-aware reply"})
+
+    async def run() -> dict[str, object]:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await NlpRouterChatService()._call_ai_agent(
+                client,
+                "what did I say?",
+                history=[
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "Hi there"},
+                ],
+            )
+
+    result = asyncio.run(run())
+    prompt = str(dict(seen["payload"])["prompt"])
+
+    assert result["assistant_message"] == "Context-aware reply"
+    assert "User: hello" in prompt
+    assert "Assistant: Hi there" in prompt
+    assert "Current user request: what did I say?" in prompt
 
 
 def test_nlp_router_run_turn_uses_ai_agent_plan(monkeypatch):
@@ -881,6 +942,189 @@ def test_nlp_router_keeps_missing_slots_across_user_replies(monkeypatch):
     )
     assert "I added this calendar block" in second
     assert proposals[0]["task_title"] == "Study for CSE 369"
+
+
+def test_nlp_router_clears_pending_context_when_user_changes_topic(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, set_tasks
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+    seen: list[tuple[str, bool]] = []
+
+    async def fake_fetch_plan(_client, message: str, *, clarification_pending: bool = False):
+        seen.append((message, clarification_pending))
+        if message == "add a calendar block tomorrow":
+            return [
+                {
+                    "name": "clarification",
+                    "arguments": {
+                        "message": message,
+                        "question": "What event name and time should I use?",
+                        "predicted_tool": "add_calendar_block",
+                        "missing_slots": ["title", "start_time", "end_time"],
+                    },
+                }
+            ]
+        return [
+            {
+                "name": "get_tasks",
+                "arguments": {
+                    "due_start": "2026-06-07",
+                    "due_end": "2026-06-07",
+                },
+            }
+        ]
+
+    async def run_conversation():
+        set_tasks(
+            [
+                {
+                    "title": "Homework 5",
+                    "due_date": "2026-06-07T23:59:00",
+                }
+            ]
+        )
+        await service.run_turn("add a calendar block tomorrow", user_id="topic-user")
+        return await service.run_turn("what tasks are due tomorrow", user_id="topic-user")
+
+    try:
+        _pending_nlu_context.clear()
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply = asyncio.run(run_conversation())
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert seen[-1] == ("what tasks are due tomorrow", False)
+    assert "Homework 5" in reply
+
+
+def test_nlp_router_treats_general_question_as_new_topic():
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    assert NlpRouterChatService()._starts_new_request(
+        "what is recursion?",
+        {"predicted_tool": "add_calendar_block"},
+    )
+
+
+def test_nlp_router_yes_replans_original_request_without_appending_yes(monkeypatch):
+    from app.services.chat_client_context import clear_client_context
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+    original = "bible study tomorrow from 10:30 am to 11:30 am"
+    seen: list[tuple[str, bool]] = []
+
+    async def fake_fetch_plan(_client, message: str, *, clarification_pending: bool = False):
+        seen.append((message, clarification_pending))
+        return [{"name": "ai_agent", "arguments": {"message": message}}]
+
+    async def fake_ai_agent_reply(_client, message: str):
+        return f"handled: {message}"
+
+    try:
+        _pending_nlu_context.clear()
+        _pending_nlu_context["yes-user"] = {
+            "message": original,
+            "predicted_tool": "add_calendar_block",
+        }
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fake_ai_agent_reply)
+        reply = asyncio.run(service.run_turn("yes", user_id="yes-user"))
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert seen == [(original, True)]
+    assert reply == f"handled: {original}"
+
+
+def test_nlp_router_time_period_followup_does_not_duplicate_event_details(monkeypatch):
+    from app.services.chat_client_context import clear_client_context
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+    original = "bible study tomorrow from 10:30 to 11:30"
+    seen: list[tuple[str, bool]] = []
+
+    async def fake_fetch_plan(_client, message: str, *, clarification_pending: bool = False):
+        seen.append((message, clarification_pending))
+        return [{"name": "ai_agent", "arguments": {"message": message}}]
+
+    async def fake_ai_agent_reply(_client, message: str):
+        return message
+
+    try:
+        _pending_nlu_context.clear()
+        _pending_nlu_context["period-user"] = {
+            "message": original,
+            "predicted_tool": "add_calendar_block",
+            "missing_slots": ["time_period"],
+        }
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fake_ai_agent_reply)
+        reply = asyncio.run(
+            service.run_turn(
+                "bibe study at 10:30 to 11:30 in morning",
+                user_id="period-user",
+            )
+        )
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert seen == [(f"{original} morning", True)]
+    assert reply == f"{original} morning"
+
+
+def test_nlp_router_yes_executes_safe_pending_call_without_replanning(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+
+    async def fail_fetch_plan(*_args, **_kwargs):
+        raise AssertionError("confirmed call must execute without replanning")
+
+    async def run_confirmation():
+        reply = await service.run_turn("yes", user_id="confirm-user")
+        return reply, get_schedule_proposals()
+
+    try:
+        _pending_nlu_context.clear()
+        _pending_nlu_context["confirm-user"] = {
+            "message": "add Bible study tomorrow",
+            "predicted_tool": "add_calendar_block",
+            "pending_call": {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Bible study",
+                    "start_time": "2026-06-07T10:30:00",
+                    "end_time": "2026-06-07T11:30:00",
+                },
+            },
+        }
+        monkeypatch.setattr(service, "_fetch_plan", fail_fetch_plan)
+        reply, proposals = asyncio.run(run_confirmation())
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "I added this calendar block" in reply
+    assert proposals[0]["task_title"] == "Bible study"
 
 
 def test_backend_verifier_blocks_hallucinated_calendar_tool(monkeypatch):
