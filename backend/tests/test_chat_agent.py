@@ -880,6 +880,75 @@ def test_nlp_router_verifies_add_block_misrouted_to_calendar_lookup(monkeypatch)
     assert proposals == []
 
 
+def test_nlp_router_verifier_accepts_natural_calendar_filler_phrase(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Bible study",
+                    "start_time": "2026-06-07T10:30:00",
+                    "end_time": "2026-06-07T11:30:00",
+                },
+            }
+        ]
+
+    async def run():
+        reply = await service.run_turn(
+            "Could you put Bible study on my calendar for tomorrow "
+            "between 10:30 and 11:30 in the morning?"
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run())
+    finally:
+        clear_client_context()
+
+    assert "I added this calendar block" in reply
+    assert proposals[0]["task_title"] == "Bible study"
+
+
+def test_nlp_router_verifier_accepts_word_duration_phrase(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Office hours",
+                    "start_time": "2026-06-12T16:00:00",
+                    "end_time": "2026-06-12T16:40:00",
+                },
+            }
+        ]
+
+    async def run():
+        reply = await service.run_turn(
+            "Please book office hours Friday at 4 PM for forty minutes"
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run())
+    finally:
+        clear_client_context()
+
+    assert "I added this calendar block" in reply
+    assert proposals[0]["task_title"] == "Office hours"
+
+
 def test_nlp_router_keeps_missing_slots_across_user_replies(monkeypatch):
     from app.services.chat_client_context import clear_client_context, get_schedule_proposals
     from app.services.nlp_router_chat_service import (

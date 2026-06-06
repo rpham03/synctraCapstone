@@ -385,9 +385,8 @@ class NlpRouterChatService:
         if name == "propose_schedule_change":
             if self._looks_like_calendar_block_details(lower):
                 return (
-                    "I see an event name, date, and time range. Should I add this "
-                    "as a calendar block? Send it like: Study for CSE 369 on "
-                    "Thursday from 7 PM to 9 PM."
+                    "I found an event name, date, and time range. Should I add "
+                    "it as a calendar block?"
                 )
             task_name = str(arguments.get("task_name") or "").strip().lower()
             if task_name in {
@@ -483,11 +482,40 @@ class NlpRouterChatService:
         return f"What {label} should I use?"
 
     def _looks_like_calendar_block_details(self, text: str) -> bool:
+        direct_range = (
+            r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*"
+            r"(?:-|to|until|through)\s*"
+            r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b"
+        )
+        between_range = (
+            r"\b(?:sometime\s+)?between\s+"
+            r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s+and\s+"
+            r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b"
+        )
+        labeled_range = (
+            r"\b(?:with\s+(?:a\s+)?)?"
+            r"(?:starting|starts?|start(?:\s+time)?(?:\s+(?:is|of))?)\s+"
+            r"(?:at\s+|of\s+)?"
+            r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*"
+            r"(?:,|and|then)?\s*"
+            r"(?:ending|ends?|end(?:\s+time)?(?:\s+(?:is|of))?)\s+"
+            r"(?:at\s+|of\s+)?"
+            r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b"
+        )
+        duration_range = (
+            r"\b(?:at|from|starting\s+at|starts?\s+at)\s+"
+            r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?"
+            r"(?:\s+in\s+(?:the\s+)?(?:morning|afternoon|evening)|\s+tonight)?"
+            r"\s+for\s+"
+            r"(?:\d+(?:\.\d+)?|an?|one|two|three|four|five|six|seven|eight|"
+            r"nine|ten|eleven|twelve|fifteen|twenty|thirty|forty(?:-five)?|"
+            r"sixty|ninety|half(?:\s+an?)?|"
+            r"quarter(?:\s+of\s+an?)?)\s*"
+            r"(?:hours?|hrs?|hr|h|minutes?|mins?|min|m)\b"
+        )
         has_time_range_text = bool(
             re.search(
-                r"\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\s*"
-                r"(?:-|to|until|through)\s*"
-                r"\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?\b",
+                rf"(?:{direct_range}|{between_range}|{labeled_range}|{duration_range})",
                 text,
                 flags=re.IGNORECASE,
             )

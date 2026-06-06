@@ -199,6 +199,28 @@ class NlpToolCallingAgent:
         rf"\b(?:from\s+)?({_TIME_TEXT})\s*(?:-|to|until|through)\s*({_TIME_TEXT})\b",
         re.IGNORECASE,
     )
+    _BETWEEN_TIME_RANGE_RE = re.compile(
+        rf"\b(?:sometime\s+)?between\s+({_TIME_TEXT})\s+and\s+({_TIME_TEXT})\b",
+        re.IGNORECASE,
+    )
+    _LABELED_TIME_RANGE_RE = re.compile(
+        rf"\b(?:with\s+(?:a\s+)?)?"
+        rf"(?:starting|starts?|start(?:\s+time)?(?:\s+(?:is|of))?)\s+(?:at\s+|of\s+)?"
+        rf"({_TIME_TEXT})\s*(?:,|and|then)?\s*"
+        rf"(?:ending|ends?|end(?:\s+time)?(?:\s+(?:is|of))?)\s+(?:at\s+|of\s+)?"
+        rf"({_TIME_TEXT})\b",
+        re.IGNORECASE,
+    )
+    _START_DURATION_RE = re.compile(
+        rf"\b(?:at|from|starting\s+at|starts?\s+at)\s+({_TIME_TEXT})"
+        r"(?:\s+in\s+(?:the\s+)?(?:morning|afternoon|evening)|\s+tonight)?"
+        r"\s+for\s+"
+        r"(\d+(?:\.\d+)?|an?|one|two|three|four|five|six|seven|eight|nine|"
+        r"ten|eleven|twelve|fifteen|twenty|thirty|forty(?:-five)?|sixty|ninety|"
+        r"half(?:\s+an?)?|quarter(?:\s+of\s+an?)?)\s*"
+        r"(hours?|hrs?|hr|h|minutes?|mins?|min|m)\b",
+        re.IGNORECASE,
+    )
 
     _WEEKDAYS = {
         "monday": 0,
@@ -290,23 +312,25 @@ class NlpToolCallingAgent:
         if not lower:
             return []
 
+        calendar_text = self._normalize_calendar_filler_text(text)
+        calendar_lower = calendar_text.lower()
         start, end, date_reason = self._date_range(lower)
         move_calendar_block_call = self._move_calendar_block_call_or_clarification(
-            text=text,
-            lower=lower,
+            text=calendar_text,
+            lower=calendar_lower,
         )
         if move_calendar_block_call is not None:
             return [move_calendar_block_call]
         calendar_block_call = self._calendar_block_call_or_clarification(
-            text=text,
-            lower=lower,
+            text=calendar_text,
+            lower=calendar_lower,
             date_value=start,
         )
         if calendar_block_call is not None:
             return [calendar_block_call]
         calendar_block_details_call = self._calendar_block_details_call(
-            text=text,
-            lower=lower,
+            text=calendar_text,
+            lower=calendar_lower,
             date_value=start,
             clarification_pending=clarification_pending,
         )
@@ -740,7 +764,7 @@ class NlpToolCallingAgent:
             missing_text = self._missing_slots_text(missing)
             question = (
                 f"What {missing_text} should I use for this calendar block? "
-                "For example: Study for math tomorrow from 2 PM to 3 PM."
+                "You can provide the details naturally and in any order."
             )
             return ToolCall(
                 name=CLARIFICATION_ACTION,
@@ -872,6 +896,8 @@ class NlpToolCallingAgent:
         date_value: date,
         clarification_pending: bool,
     ) -> ToolCall | None:
+        if self._looks_like_calendar_lookup(lower):
+            return None
         has_date = self._has_exact_calendar_block_date_text(lower)
         if not clarification_pending and not (
             has_date and self._has_time_range_text(lower)
@@ -946,6 +972,38 @@ class NlpToolCallingAgent:
                 "add study time in my calendar",
             )
         )
+
+    def _looks_like_calendar_lookup(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:what|which|show|list|tell me|do i have|what's|whats)\b",
+                text,
+            )
+            and re.search(
+                r"\b(?:calendar|schedule|events?|classes?|meetings?|appointments?)\b",
+                text,
+            )
+        )
+
+    def _normalize_calendar_filler_text(self, text: str) -> str:
+        """Normalize common natural phrasing without changing extracted details."""
+
+        normalized = text
+
+        def replace_range(match: re.Match[str]) -> str:
+            return f" from {match.group(1).strip()} to {match.group(2).strip()} "
+
+        normalized = self._BETWEEN_TIME_RANGE_RE.sub(replace_range, normalized)
+        normalized = self._LABELED_TIME_RANGE_RE.sub(replace_range, normalized)
+        normalized = re.sub(
+            rf"\bat\s+({self._TIME_TEXT})\s*(?:,|and|then)?\s*"
+            rf"(?:ending|ends?|end(?:\s+time)?(?:\s+is)?)\s+(?:at\s+)?"
+            rf"({self._TIME_TEXT})\b",
+            replace_range,
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        return " ".join(normalized.split())
 
     def _learned_slots(self, text: str) -> dict[str, str]:
         if not self.slot_model:
@@ -1181,22 +1239,76 @@ class NlpToolCallingAgent:
 
     def _extract_time_range(self, text: str) -> tuple[Any, Any] | None:
         match = self._TIME_RANGE_RE.search(text)
-        if not match:
+        if match:
+            start_raw, end_raw = match.groups()
+            shared_ampm = (
+                self._time_ampm(end_raw)
+                or self._time_ampm(start_raw)
+                or self._time_period_ampm(text)
+            )
+            start_time = self._parse_time_token(start_raw, default_ampm=shared_ampm)
+            end_time = self._parse_time_token(end_raw, default_ampm=shared_ampm)
+            if start_time is None or end_time is None:
+                return None
+            return start_time, end_time
+
+        duration_match = self._START_DURATION_RE.search(text)
+        if not duration_match:
             return None
-        start_raw, end_raw = match.groups()
+        start_raw, amount_raw, unit = duration_match.groups()
         shared_ampm = (
-            self._time_ampm(end_raw)
-            or self._time_ampm(start_raw)
-            or self._time_period_ampm(text)
+            self._time_ampm(start_raw) or self._time_period_ampm(text)
         )
         start_time = self._parse_time_token(start_raw, default_ampm=shared_ampm)
-        end_time = self._parse_time_token(end_raw, default_ampm=shared_ampm)
-        if start_time is None or end_time is None:
+        if start_time is None:
             return None
+        normalized_amount = amount_raw.lower()
+        word_amounts = {
+            "a": 1.0,
+            "an": 1.0,
+            "one": 1.0,
+            "two": 2.0,
+            "three": 3.0,
+            "four": 4.0,
+            "five": 5.0,
+            "six": 6.0,
+            "seven": 7.0,
+            "eight": 8.0,
+            "nine": 9.0,
+            "ten": 10.0,
+            "eleven": 11.0,
+            "twelve": 12.0,
+            "fifteen": 15.0,
+            "twenty": 20.0,
+            "thirty": 30.0,
+            "forty": 40.0,
+            "forty-five": 45.0,
+            "sixty": 60.0,
+            "ninety": 90.0,
+            "half": 0.5,
+            "half a": 0.5,
+            "half an": 0.5,
+            "quarter": 0.25,
+            "quarter of a": 0.25,
+            "quarter of an": 0.25,
+        }
+        amount = word_amounts.get(
+            normalized_amount,
+            float(amount_raw) if amount_raw[0].isdigit() else 0,
+        )
+        minutes = round(amount * 60) if unit.lower().startswith(("h", "hr")) else round(amount)
+        if minutes < 1:
+            return None
+        end_time = (
+            datetime.combine(self.today, start_time) + timedelta(minutes=minutes)
+        ).time()
         return start_time, end_time
 
     def _has_time_range_text(self, text: str) -> bool:
-        return self._TIME_RANGE_RE.search(text) is not None
+        return bool(
+            self._TIME_RANGE_RE.search(text)
+            or self._START_DURATION_RE.search(text)
+        )
 
     def _time_ampm(self, raw: str) -> str | None:
         match = re.search(r"(a\.?m\.?|p\.?m\.?)", raw, flags=re.IGNORECASE)
@@ -1243,6 +1355,7 @@ class NlpToolCallingAgent:
 
     def _extract_calendar_block_title(self, text: str) -> str:
         cleaned = self._TIME_RANGE_RE.sub(" ", text)
+        cleaned = self._START_DURATION_RE.sub(" ", cleaned)
         cleaned = self._ISO_DATE_RE.sub(" ", cleaned)
         cleaned = self._MONTH_DAY_RE.sub(" ", cleaned)
         cleaned = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\b", " ", cleaned, flags=re.IGNORECASE)
@@ -1259,10 +1372,54 @@ class NlpToolCallingAgent:
             flags=re.IGNORECASE,
         )
         cleaned = re.sub(
+            r"\b(?:on|in|to)\s+(?:my\s+|the\s+)?calendar\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:can|could|would)\s+you\s+(?:please\s+)?",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:i\s+(?:need|want|would like)\s+(?:you\s+to|to|a|an)?|"
+            r"i\s+have\s+(?:a|an)?|"
+            r"i\s+want\s+you\s+to|"
+            r"i'd\s+like\s+to|please|help\s+me)\s+",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:please\s+)?(?:add|create|put|book|schedule|reserve|make|"
+            r"set\s+up|block\s+off)\s+(?:me\s+)?(?:(?:a|an|the)\s+)?"
+            r"(?:(?:calendar|study)\s+block\s*)?",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
             r"\b(?:today|tomorrow|this week|next week|the week|my week|"
             r"this weekend|next weekend|the weekend|my weekend|weekend|"
             r"monday|mon|tuesday|tue|wednesday|wed|"
             r"thursday|thu|friday|fri|saturday|sat|sunday|sun)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:can|could|would)\s+you\s+(?:please\s+)?|"
+            r"^\s*(?:please|help\s+me)\s+",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:add|create|put|book|schedule|reserve|make|set\s+up|"
+            r"block\s+off)\s+(?:me\s+)?(?:(?:a|an|the)\s+)?"
+            r"(?:(?:calendar|study)\s+block\s*)?",
             " ",
             cleaned,
             flags=re.IGNORECASE,
@@ -1288,7 +1445,20 @@ class NlpToolCallingAgent:
             cleaned,
             flags=re.IGNORECASE,
         )
-        title = " ".join(cleaned.strip(" .,:;-").split())
+        cleaned = re.sub(
+            r"^\s*event\s+(?:called|named|for)?\s*",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"[!?]+\s*$", " ", cleaned)
+        cleaned = re.sub(
+            r"\b(?:for\s+me|for|sometime|some\s+time|please)\b\s*$",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        title = " ".join(cleaned.strip(" .,:;-!?").split())
         if title.lower() in {"calendar", "block", "calendar block", "event"}:
             return ""
         return title[:120]

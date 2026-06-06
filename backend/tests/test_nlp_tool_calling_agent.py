@@ -47,6 +47,20 @@ def test_shared_structured_nlu_dataset_has_1000_balanced_examples():
     assert len({" ".join(row["user_message"].lower().split()) for row in rows}) == 1000
 
 
+def test_calendar_training_data_uses_general_natural_phrasing():
+    rows = build_structured_examples()
+    messages = [
+        row["user_message"].lower()
+        for row in rows
+        if row["tool"] == ADD_CALENDAR_BLOCK_ACTION
+    ]
+
+    assert any("between" in message for message in messages)
+    assert any("starting at" in message and "ending at" in message for message in messages)
+    assert any("with a start time" in message for message in messages)
+    assert any("could you put" in message for message in messages)
+
+
 def test_checked_in_structured_nlu_dataset_matches_generated_1000_rows():
     examples = load_examples(TOOL_DIR / "syntra_nlu_training_data.jsonl")
 
@@ -288,6 +302,103 @@ def test_evening_resolves_ambiguous_calendar_times_to_pm():
         "start_time": "2026-06-07T18:00:00",
         "end_time": "2026-06-07T19:00:00",
     }
+
+
+def test_calendar_block_accepts_polite_between_phrase():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan(
+        "Could you please put Bible study on my calendar for tomorrow "
+        "sometime between 10:30 and 11:30 in the morning?"
+    )[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "Bible study",
+        "start_time": "2026-06-07T10:30:00",
+        "end_time": "2026-06-07T11:30:00",
+    }
+
+
+def test_calendar_block_accepts_starting_and_ending_phrase():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan(
+        "I need a dentist appointment tomorrow starting at 2 PM and ending at 3 PM"
+    )[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "dentist appointment",
+        "start_time": "2026-06-07T14:00:00",
+        "end_time": "2026-06-07T15:00:00",
+    }
+
+
+def test_calendar_block_accepts_labeled_times_in_any_order():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan(
+        "Please create exam review for Thursday with a start time of "
+        "7 PM and end time of 9 PM"
+    )[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "exam review",
+        "start_time": "2026-06-11T19:00:00",
+        "end_time": "2026-06-11T21:00:00",
+    }
+
+
+def test_calendar_block_accepts_start_time_plus_duration():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan("I have a dentist appointment tomorrow at 2 PM for 1 hour")[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "dentist appointment",
+        "start_time": "2026-06-07T14:00:00",
+        "end_time": "2026-06-07T15:00:00",
+    }
+
+
+def test_calendar_block_accepts_word_duration_and_time_period_filler():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan(
+        "Could you add Bible study tomorrow at 10:30 in the morning "
+        "for half an hour?"
+    )[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "Bible study",
+        "start_time": "2026-06-07T10:30:00",
+        "end_time": "2026-06-07T11:00:00",
+    }
+
+
+def test_calendar_block_accepts_written_minute_duration():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan("Please book office hours Friday at 4 PM for forty minutes")[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments == {
+        "title": "office hours",
+        "start_time": "2026-06-12T16:00:00",
+        "end_time": "2026-06-12T16:40:00",
+    }
+
+
+def test_calendar_lookup_with_between_times_does_not_create_block():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    call = agent.plan("What is on my calendar tomorrow between 2 PM and 3 PM?")[0]
+
+    assert call.name == "get_calendar_events"
 
 
 def test_complete_calendar_block_routes_to_add_block_without_trained_model():

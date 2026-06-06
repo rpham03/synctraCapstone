@@ -333,11 +333,30 @@ def _candidate_examples() -> dict[str, list[dict[str, Any]]]:
         "coding practice",
         "exam review",
     ]
-    for title, date_value, time_range in product(calendar_titles, dates[:9], ranges):
+    calendar_templates = [
+        "Add {title} {date} from {start} to {end}",
+        "{title} {date} from {start} until {end}",
+        "Could you put {title} on my calendar for {date} between {start} and {end}?",
+        "I need {title} {date} starting at {start} and ending at {end}",
+        "{date}, please add {title} between {start} and {end}",
+        "Book {title} on {date}, {start} through {end}",
+        "Please create {title} for {date} with a start time of {start} and end time of {end}",
+    ]
+    for title, date_value, time_range, template in product(
+        calendar_titles,
+        dates[:9],
+        ranges,
+        calendar_templates,
+    ):
         start_time, end_time = time_range
         pools["add_calendar_block"].append(
             example(
-                f"Add {title} {date_value} from {start_time} to {end_time}",
+                template.format(
+                    title=title,
+                    date=date_value,
+                    start=start_time,
+                    end=end_time,
+                ),
                 "add_calendar_block",
                 slots={
                     "title": title,
