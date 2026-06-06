@@ -200,10 +200,17 @@ def main() -> None:
         confidence_threshold=args.confidence_threshold,
     )
     has_model = agent.intent_model is not None
+    has_slot_model = agent.slot_model is not None
     if not has_model:
         print(
             f"[warning] no trained model found at {args.model_dir}; "
             "router will fall back to keyword heuristics.",
+            file=sys.stderr,
+        )
+    if not has_slot_model:
+        print(
+            f"[warning] no slot model found at {Path(args.model_dir) / 'slot_model'}; "
+            "router will fall back to regex slot extraction.",
             file=sys.stderr,
         )
 
@@ -222,6 +229,7 @@ def main() -> None:
             "service": "syntra-nlp-router",
             "model_dir": args.model_dir,
             "has_trained_model": has_model,
+            "has_slot_model": has_slot_model,
             "confidence_threshold": agent.confidence_threshold,
             "today": agent.today.isoformat(),
         }

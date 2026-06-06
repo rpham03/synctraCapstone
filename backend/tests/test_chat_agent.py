@@ -541,6 +541,39 @@ def test_nlp_router_verifies_generic_schedule_before_executing(monkeypatch):
     assert proposals == []
 
 
+def test_nlp_router_verifies_schedule_duration_before_executing(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "propose_schedule_change",
+                "arguments": {
+                    "task_name": "lab 7",
+                    "hours": 1,
+                    "deadline": "2026-06-05T23:59:00",
+                    "estimated_minutes": 60,
+                },
+            }
+        ]
+
+    async def run():
+        reply = await service.run_turn("schedule time for lab 7 by Friday")
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run())
+    finally:
+        clear_client_context()
+
+    assert "what duration" in reply.lower()
+    assert proposals == []
+
+
 def test_nlp_router_verifies_calendar_block_times_before_executing(monkeypatch):
     from app.services.chat_client_context import clear_client_context, get_schedule_proposals
     from app.services.nlp_router_chat_service import NlpRouterChatService
@@ -631,6 +664,102 @@ def test_nlp_router_verifies_add_block_misrouted_to_calendar_lookup(monkeypatch)
         clear_client_context()
 
     assert "what event name" in reply.lower()
+    assert proposals == []
+
+
+def test_nlp_router_keeps_missing_slots_across_user_replies(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+    seen: list[tuple[str, bool]] = []
+
+    async def fake_fetch_plan(_client, message: str, *, clarification_pending: bool = False):
+        seen.append((message, clarification_pending))
+        if not clarification_pending:
+            return [
+                {
+                    "name": "clarification",
+                    "arguments": {
+                        "message": message,
+                        "question": "What event name, start time, and end time should I use?",
+                        "predicted_tool": "add_calendar_block",
+                        "slots": {"date": "tomorrow"},
+                        "missing_slots": ["title", "start_time", "end_time"],
+                    },
+                }
+            ]
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Study for CSE 369",
+                    "start_time": "2026-06-04T19:00:00",
+                    "end_time": "2026-06-04T21:00:00",
+                },
+            }
+        ]
+
+    async def run_conversation():
+        first_reply = await service.run_turn(
+            "add a calendar block tomorrow",
+            user_id="user-1",
+        )
+        second_reply = await service.run_turn(
+            "Study for CSE 369 from 7 PM to 9 PM",
+            user_id="user-1",
+        )
+        return first_reply, second_reply, get_schedule_proposals()
+
+    try:
+        _pending_nlu_context.clear()
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        first, second, proposals = asyncio.run(run_conversation())
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "what event name" in first.lower()
+    assert seen[1] == (
+        "add a calendar block tomorrow Study for CSE 369 from 7 PM to 9 PM",
+        True,
+    )
+    assert "I added this calendar block" in second
+    assert proposals[0]["task_title"] == "Study for CSE 369"
+
+
+def test_backend_verifier_blocks_hallucinated_calendar_tool(monkeypatch):
+    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "Invented event",
+                    "start_time": "2026-06-04T19:00:00",
+                    "end_time": "2026-06-04T21:00:00",
+                },
+            }
+        ]
+
+    async def run():
+        reply = await service.run_turn("tell me a joke")
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run())
+    finally:
+        clear_client_context()
+
+    assert "do you want me to add a calendar block" in reply.lower()
     assert proposals == []
 
 

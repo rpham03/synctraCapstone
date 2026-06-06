@@ -40,6 +40,7 @@ LABELS = [
     "get_calendar_events",
     "get_tasks",
     "propose_schedule_change",
+    "add_calendar_block",
     "ai_agent",
 ]
 
@@ -95,6 +96,13 @@ def synthetic_examples() -> list[TrainingExample]:
             "plan work on project 1 for 3 hours before Monday",
             "schedule time for the assignment due tomorrow",
         ],
+        "add_calendar_block": [
+            "add study for cse 369 thursday from 7 pm to 9 pm",
+            "add dentist tomorrow from 2 pm to 3 pm",
+            "create a calendar block for office hours friday from 1 pm to 2 pm",
+            "put project meeting on my calendar monday from 4 pm to 5 pm",
+            "add a calendar block tomorrow from 2 pm to 3 pm",
+        ],
         "ai_agent": [
             "explain how the app works",
             "help me understand this error",
@@ -117,6 +125,7 @@ def synthetic_examples() -> list[TrainingExample]:
 def extract_user_text(row: dict[str, Any]) -> str | None:
     """Best-effort extraction across common function-calling dataset formats."""
     for key in (
+        "user_message",
         "query",
         "instruction",
         "prompt",
@@ -173,6 +182,8 @@ def normalize_label(value: object) -> str | None:
         return "get_assignments"
     if any(word in key for word in ("free", "available", "availability", "slot")):
         return "find_free_slots"
+    if any(word in key for word in ("create_calendar", "add_calendar", "calendar_block")):
+        return "add_calendar_block"
     if any(word in key for word in ("calendar", "event", "meeting", "class", "lecture")):
         return "get_calendar_events"
     if any(word in key for word in ("homework", "assignment", "deadline", "task", "todo", "due")):
@@ -221,6 +232,17 @@ def extract_label(row: dict[str, Any]) -> str | None:
 
 def infer_syntra_label(text: str) -> str:
     lower = text.lower()
+    if any(
+        phrase in lower
+        for phrase in (
+            "add a calendar block",
+            "add calendar block",
+            "add a block to my calendar",
+            "create a calendar block",
+            "put a block on my calendar",
+        )
+    ):
+        return "add_calendar_block"
     has_schedule_action = any(
         phrase in lower
         for phrase in (

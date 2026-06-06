@@ -41,6 +41,7 @@ TOOL_LABEL_ORDER = [
     "get_calendar_events",
     "get_tasks",
     "propose_schedule_change",
+    "add_calendar_block",
     "ai_agent",
 ]
 TOOL_LABELS = set(TOOL_LABEL_ORDER)
@@ -108,6 +109,77 @@ class TrainedToolIntentModel:
             idx = int(self._torch.argmax(probs).item())
         label = self.id_to_label.get(idx, "ai_agent")
         return label, float(probs[idx].item())
+
+
+class TrainedSlotExtractionModel:
+    """Optional token-classification model trained by train_nlu_slot_model.py."""
+
+    def __init__(self, model_dir: str | Path, *, confidence_threshold: float = 0.55) -> None:
+        try:
+            import torch
+            from transformers import AutoModelForTokenClassification, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install model dependencies first: pip install torch transformers"
+            ) from exc
+
+        self._torch = torch
+        self.model_dir = Path(model_dir)
+        self.confidence_threshold = confidence_threshold
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, use_fast=True)
+        self.model = AutoModelForTokenClassification.from_pretrained(self.model_dir)
+        self.model.eval()
+        self.id_to_label = {
+            int(index): str(label)
+            for index, label in self.model.config.id2label.items()
+        }
+
+    def predict(self, message: str) -> dict[str, str]:
+        encoded = self.tokenizer(
+            message,
+            return_tensors="pt",
+            truncation=True,
+            max_length=256,
+            return_offsets_mapping=True,
+        )
+        offsets = encoded.pop("offset_mapping")[0].tolist()
+        with self._torch.no_grad():
+            logits = self.model(**encoded).logits[0]
+            probabilities = self._torch.softmax(logits, dim=-1)
+            predicted_ids = self._torch.argmax(probabilities, dim=-1).tolist()
+            confidences = self._torch.max(probabilities, dim=-1).values.tolist()
+
+        spans: dict[str, list[tuple[int, int]]] = {}
+        active_key: str | None = None
+        for token_id, confidence, (start, end) in zip(
+            predicted_ids,
+            confidences,
+            offsets,
+        ):
+            label = self.id_to_label.get(int(token_id), "O")
+            if (
+                start == end
+                or label == "O"
+                or confidence < self.confidence_threshold
+                or "-" not in label
+            ):
+                active_key = None
+                continue
+
+            prefix, key = label.split("-", 1)
+            key = key.lower()
+            if prefix == "B" or active_key != key or not spans.get(key):
+                spans.setdefault(key, []).append((start, end))
+            else:
+                previous_start, _ = spans[key][-1]
+                spans[key][-1] = (previous_start, end)
+            active_key = key
+
+        return {
+            key: " ".join(message[start:end].strip() for start, end in values).strip()
+            for key, values in spans.items()
+            if any(message[start:end].strip() for start, end in values)
+        }
 
 
 class NlpToolCallingAgent:
@@ -193,10 +265,16 @@ class NlpToolCallingAgent:
         self.today = today or date.today()
         self.confidence_threshold = confidence_threshold
         self.intent_model: TrainedToolIntentModel | None = None
+        self.slot_model: TrainedSlotExtractionModel | None = None
+        self._slot_cache_message = ""
+        self._slot_cache: dict[str, str] = {}
         if model_dir:
             path = Path(model_dir)
             if path.exists():
                 self.intent_model = TrainedToolIntentModel(path)
+            slot_path = path / "slot_model"
+            if slot_path.exists():
+                self.slot_model = TrainedSlotExtractionModel(slot_path)
 
     def plan(
         self,
@@ -223,6 +301,7 @@ class NlpToolCallingAgent:
             text=text,
             lower=lower,
             date_value=start,
+            clarification_pending=clarification_pending,
         )
         if calendar_block_details_call is not None:
             return [calendar_block_details_call]
@@ -284,23 +363,14 @@ class NlpToolCallingAgent:
             ]
 
         if self._wants_schedule_proposal(lower):
-            task_name = self._extract_task_name(text)
-            estimated_minutes = self._extract_minutes(lower)
-            hours = max(0.25, round(estimated_minutes / 60.0, 2))
-            calls.append(
-                ToolCall(
-                    name="propose_schedule_change",
-                    arguments={
-                        "task_name": task_name,
-                        "hours": hours,
-                        "deadline": self._deadline_iso(lower, end),
-                        "estimated_minutes": estimated_minutes,
-                    },
+            return [
+                self._schedule_call_or_clarification(
+                    text=text,
+                    lower=lower,
                     confidence=0.91,
                     reason="User is asking to schedule or plan study/work time.",
                 )
-            )
-            return calls
+            ]
 
         if self._wants_free_slots(lower):
             calls.append(
@@ -638,30 +708,40 @@ class NlpToolCallingAgent:
         if not self._wants_calendar_block_creation(lower):
             return None
 
-        title = self._extract_calendar_block_title(text)
-        time_range = self._extract_time_range(lower)
-        has_date = self._has_exact_calendar_block_date_text(lower)
+        slots = self._calendar_slot_values(text, lower)
+        title = slots.get("title") or self._extract_calendar_block_title(text)
+        time_range = self._time_range_from_slots(slots) or self._extract_time_range(lower)
+        date_text = slots.get("date") or slots.get("deadline")
+        has_date = bool(date_text) or self._has_exact_calendar_block_date_text(lower)
 
         missing: list[str] = []
         if not title:
-            missing.append("event name")
+            missing.append("title")
         if not has_date:
             missing.append("date")
         if time_range is None:
-            missing.append("start and end time")
+            if not slots.get("start_time"):
+                missing.append("start_time")
+            if not slots.get("end_time"):
+                missing.append("end_time")
 
         if missing:
-            missing_text = ", ".join(missing)
+            missing_text = self._missing_slots_text(missing)
+            question = (
+                f"What {missing_text} should I use for this calendar block? "
+                "For example: Study for math tomorrow from 2 PM to 3 PM."
+            )
             return ToolCall(
                 name=CLARIFICATION_ACTION,
                 arguments={
                     "message": text,
-                    "question": (
-                        f"What {missing_text} should I use for this calendar block? "
-                        "For example: Study for math tomorrow from 2 PM to 3 PM."
-                    ),
+                    "question": question,
                     "options": [ADD_CALENDAR_BLOCK_ACTION, "ai_agent"],
                     "predicted_tool": ADD_CALENDAR_BLOCK_ACTION,
+                    "slots": slots,
+                    "needs_followup": True,
+                    "missing_slots": missing,
+                    "followup_question": question,
                     "next_step": (
                         "Ask for the missing calendar block details before adding a block."
                     ),
@@ -671,10 +751,11 @@ class NlpToolCallingAgent:
             )
 
         start_time, end_time = time_range
-        start_dt = datetime.combine(date_value, start_time)
-        end_dt = datetime.combine(date_value, end_time)
+        resolved_date = self._date_from_slot(date_text) if date_text else date_value
+        start_dt = datetime.combine(resolved_date, start_time)
+        end_dt = datetime.combine(resolved_date, end_time)
         if end_dt <= start_dt:
-            end_dt += timedelta(days=1)
+            return self._calendar_time_order_clarification(text, slots)
 
         return ToolCall(
             name=ADD_CALENDAR_BLOCK_ACTION,
@@ -693,20 +774,31 @@ class NlpToolCallingAgent:
         text: str,
         lower: str,
         date_value: date,
+        clarification_pending: bool,
     ) -> ToolCall | None:
-        time_range = self._extract_time_range(lower)
-        if time_range is None or not self._has_exact_calendar_block_date_text(lower):
+        if not clarification_pending and not (
+            self._has_exact_calendar_block_date_text(lower)
+            and self._extract_time_range(lower) is not None
+        ):
+            return None
+        slots = self._calendar_slot_values(text, lower)
+        time_range = self._time_range_from_slots(slots) or self._extract_time_range(lower)
+        date_text = slots.get("date") or slots.get("deadline")
+        if time_range is None or not (
+            date_text or self._has_exact_calendar_block_date_text(lower)
+        ):
             return None
 
-        title = self._extract_calendar_block_title(text)
+        title = slots.get("title") or self._extract_calendar_block_title(text)
         if not title:
             return None
 
         start_time, end_time = time_range
-        start_dt = datetime.combine(date_value, start_time)
-        end_dt = datetime.combine(date_value, end_time)
+        resolved_date = self._date_from_slot(date_text) if date_text else date_value
+        start_dt = datetime.combine(resolved_date, start_time)
+        end_dt = datetime.combine(resolved_date, end_time)
         if end_dt <= start_dt:
-            end_dt += timedelta(days=1)
+            return self._calendar_time_order_clarification(text, slots)
 
         return ToolCall(
             name=ADD_CALENDAR_BLOCK_ACTION,
@@ -756,6 +848,195 @@ class NlpToolCallingAgent:
                 "add study time in my calendar",
             )
         )
+
+    def _learned_slots(self, text: str) -> dict[str, str]:
+        if not self.slot_model:
+            return {}
+        if text == self._slot_cache_message:
+            return dict(self._slot_cache)
+        self._slot_cache_message = text
+        self._slot_cache = self.slot_model.predict(text)
+        return dict(self._slot_cache)
+
+    def _calendar_slot_values(self, text: str, lower: str) -> dict[str, str]:
+        slots = self._learned_slots(text)
+        title = self._extract_calendar_block_title(text)
+        if title:
+            slots.setdefault("title", title)
+        date_text = self._extract_calendar_date_text(text)
+        if date_text:
+            slots.setdefault("date", date_text)
+        match = self._TIME_RANGE_RE.search(text)
+        if match:
+            slots.setdefault("start_time", match.group(1).strip())
+            slots.setdefault("end_time", match.group(2).strip())
+        return slots
+
+    def _extract_calendar_date_text(self, text: str) -> str:
+        iso_match = self._ISO_DATE_RE.search(text)
+        if iso_match:
+            return iso_match.group(1)
+        month_match = self._MONTH_DAY_RE.search(text)
+        if month_match:
+            return month_match.group(0)
+        match = re.search(
+            r"\b(?:today|tomorrow|monday|mon|tuesday|tue|tues|wednesday|wed|"
+            r"thursday|thu|thur|thurs|friday|fri|saturday|sat|sunday|sun)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return match.group(0) if match else ""
+
+    def _date_from_slot(self, value: str) -> date:
+        return self._date_range(value.lower())[0]
+
+    def _time_range_from_slots(self, slots: dict[str, str]) -> tuple[Any, Any] | None:
+        start_raw = slots.get("start_time")
+        end_raw = slots.get("end_time")
+        if not start_raw or not end_raw:
+            return None
+        end_ampm = self._time_ampm(end_raw)
+        start_time = self._parse_time_token(start_raw, default_ampm=end_ampm)
+        end_time = self._parse_time_token(end_raw)
+        if start_time is None or end_time is None:
+            return None
+        return start_time, end_time
+
+    def _missing_slots_text(self, missing: list[str]) -> str:
+        labels = {
+            "title": "event name",
+            "date": "date",
+            "start_time": "start time",
+            "end_time": "end time",
+            "duration": "duration",
+            "deadline": "deadline",
+        }
+        remaining = list(missing)
+        values: list[str] = []
+        if "start_time" in remaining and "end_time" in remaining:
+            remaining.remove("start_time")
+            remaining.remove("end_time")
+            values.append("start and end time")
+        values = [
+            labels.get(value, value.replace("_", " "))
+            for value in remaining
+        ] + values
+        if len(values) <= 1:
+            return values[0] if values else "details"
+        if len(values) == 2:
+            return f"{values[0]} and {values[1]}"
+        return ", ".join(values[:-1]) + f", and {values[-1]}"
+
+    def _calendar_time_order_clarification(
+        self,
+        message: str,
+        slots: dict[str, str],
+    ) -> ToolCall:
+        question = (
+            "The end time must be after the start time. What end time should I use?"
+        )
+        return ToolCall(
+            name=CLARIFICATION_ACTION,
+            arguments={
+                "message": message,
+                "question": question,
+                "options": [ADD_CALENDAR_BLOCK_ACTION, "ai_agent"],
+                "predicted_tool": ADD_CALENDAR_BLOCK_ACTION,
+                "slots": slots,
+                "needs_followup": True,
+                "missing_slots": ["end_time"],
+                "followup_question": question,
+                "next_step": "Ask for a valid end time before adding a block.",
+            },
+            confidence=0.95,
+            reason="Calendar block end time is not after its start time.",
+        )
+
+    def _schedule_call_or_clarification(
+        self,
+        *,
+        text: str,
+        lower: str,
+        confidence: float,
+        reason: str,
+    ) -> ToolCall:
+        learned = self._learned_slots(text)
+        task_name = learned.get("title") or self._extract_task_name(text)
+        duration_text = learned.get("duration") or self._extract_duration_text(text)
+        deadline_text = learned.get("deadline") or self._extract_deadline_text(text)
+        slots = {
+            key: value
+            for key, value in {
+                "title": task_name if task_name != "Study block" else "",
+                "duration": duration_text,
+                "deadline": deadline_text,
+            }.items()
+            if value
+        }
+        missing: list[str] = []
+        if task_name == "Study block":
+            missing.append("title")
+        if not duration_text:
+            missing.append("duration")
+        if not deadline_text:
+            missing.append("deadline")
+        if missing:
+            missing_text = self._missing_slots_text(missing)
+            question = (
+                f"What {missing_text} should I use for this study schedule? "
+                "For example: Schedule 2 hours for lab 7 by Friday."
+            )
+            return ToolCall(
+                name=CLARIFICATION_ACTION,
+                arguments={
+                    "message": text,
+                    "question": question,
+                    "options": ["propose_schedule_change", "ai_agent"],
+                    "predicted_tool": "propose_schedule_change",
+                    "slots": slots,
+                    "needs_followup": True,
+                    "missing_slots": missing,
+                    "followup_question": question,
+                    "next_step": (
+                        "Ask for missing schedule details before proposing blocks."
+                    ),
+                },
+                confidence=confidence,
+                reason="Study schedule request is missing required details.",
+            )
+
+        estimated_minutes = self._extract_minutes(duration_text.lower())
+        deadline_date = self._date_range(deadline_text.lower())[1]
+        return ToolCall(
+            name="propose_schedule_change",
+            arguments={
+                "task_name": task_name,
+                "hours": max(0.25, round(estimated_minutes / 60.0, 2)),
+                "deadline": self._deadline_iso(deadline_text.lower(), deadline_date),
+                "estimated_minutes": estimated_minutes,
+            },
+            confidence=confidence,
+            reason=reason,
+        )
+
+    def _extract_duration_text(self, text: str) -> str:
+        match = self._HOURS_RE.search(text) or self._MINUTES_RE.search(text)
+        return match.group(0) if match else ""
+
+    def _extract_deadline_text(self, text: str) -> str:
+        iso_match = self._ISO_DATE_RE.search(text)
+        if iso_match:
+            return iso_match.group(1)
+        month_match = self._MONTH_DAY_RE.search(text)
+        if month_match:
+            return month_match.group(0)
+        match = re.search(
+            r"\b(?:today|tomorrow|this week|next week|monday|mon|tuesday|tue|"
+            r"wednesday|wed|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return match.group(0) if match else ""
 
     def _has_exact_calendar_block_date_text(self, text: str) -> bool:
         if self._ISO_DATE_RE.search(text) or self._MONTH_DAY_RE.search(text):
@@ -898,6 +1179,11 @@ class NlpToolCallingAgent:
                 "Do you want me to schedule a study or work block?",
                 ["propose_schedule_change", "ai_agent"],
             )
+        if predicted_label == ADD_CALENDAR_BLOCK_ACTION:
+            return (
+                "What event name, date, start time, and end time should I use?",
+                [ADD_CALENDAR_BLOCK_ACTION, "ai_agent"],
+            )
         return (
             "Do you want me to use a Syntra tool, or should I answer generally?",
             [
@@ -906,6 +1192,7 @@ class NlpToolCallingAgent:
                 "get_calendar_events",
                 "get_tasks",
                 "propose_schedule_change",
+                "add_calendar_block",
                 "ai_agent",
             ],
         )
@@ -922,15 +1209,9 @@ class NlpToolCallingAgent:
         reason: str,
     ) -> ToolCall:
         if label == "propose_schedule_change":
-            estimated_minutes = self._extract_minutes(lower)
-            return ToolCall(
-                name=label,
-                arguments={
-                    "task_name": self._extract_task_name(text),
-                    "hours": max(0.25, round(estimated_minutes / 60.0, 2)),
-                    "deadline": self._deadline_iso(lower, end),
-                    "estimated_minutes": estimated_minutes,
-                },
+            return self._schedule_call_or_clarification(
+                text=text,
+                lower=lower,
                 confidence=confidence,
                 reason=reason,
             )
@@ -957,6 +1238,17 @@ class NlpToolCallingAgent:
             )
         if label == "get_assignments":
             return ToolCall(name=label, arguments={}, confidence=confidence, reason=reason)
+        if label == ADD_CALENDAR_BLOCK_ACTION:
+            return self._calendar_block_call_or_clarification(
+                text=text,
+                lower=lower,
+                date_value=start,
+            ) or self._clarification_call(
+                text,
+                predicted_label=ADD_CALENDAR_BLOCK_ACTION,
+                confidence=confidence,
+                reason="Calendar block request needs more information.",
+            )
         return self._ai_agent_call(text, confidence=confidence, reason=reason)
 
     def _ai_agent_call(self, message: str, *, confidence: float, reason: str) -> ToolCall:
@@ -1360,12 +1652,13 @@ def confidence_test_examples() -> list[ConfidenceTestExample]:
     """Return 1000 balanced prompts for confidence testing."""
 
     target_counts = {
-        "get_assignments": 167,
-        "find_free_slots": 167,
-        "get_calendar_events": 167,
-        "get_tasks": 167,
-        "propose_schedule_change": 166,
-        "ai_agent": 166,
+        "get_assignments": 143,
+        "find_free_slots": 143,
+        "get_calendar_events": 143,
+        "get_tasks": 143,
+        "propose_schedule_change": 143,
+        "add_calendar_block": 142,
+        "ai_agent": 143,
     }
     courses = [
         "calculus",
@@ -1573,6 +1866,16 @@ def confidence_test_examples() -> list[ConfidenceTestExample]:
                     "propose_schedule_change",
                     template.format(item=item, day=day, duration=duration),
                 )
+
+    calendar_block_templates = [
+        "add {item} to my calendar {day} from 2 PM to 3 PM",
+        "create a calendar block for {item} {day} from 4 PM to 5 PM",
+        "plan {item} {day} from 6 PM to 7 PM",
+    ]
+    for item in work_items:
+        for day in days:
+            for template in calendar_block_templates:
+                add("add_calendar_block", template.format(item=item, day=day))
 
     ai_templates = [
         "{topic}",

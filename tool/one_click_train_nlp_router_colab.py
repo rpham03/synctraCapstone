@@ -13,6 +13,7 @@ Default behavior:
 - when local data is enabled, supports skipping __MACOSX and ._ metadata files
 - supports json/jsonl/csv/txt/tsv/parquet and dialogue JSON with turns
 - trains a transformer intent classifier
+- trains a second token-classification model for slots from structured NLU JSONL
 - saves the model to /content/syntra_tool_router
 - tests several prompts and prints the predicted Syntra tool calls
 """
@@ -44,6 +45,7 @@ LABELS = [
     "get_calendar_events",
     "get_tasks",
     "propose_schedule_change",
+    "add_calendar_block",
     "ai_agent",
 ]
 
@@ -211,10 +213,21 @@ def manual_eval_examples() -> list[TrainingExample]:
             "add a focused work session for lab 3",
             "plan three hours for the final paper",
             "move some free time into a study block",
+        ],
+        "add_calendar_block": [
+            "add study for cse 369 thursday from 7 pm to 9 pm",
+            "add dentist tomorrow from 2 pm to 3 pm",
+            "create a calendar block for office hours friday from 1 pm to 2 pm",
+            "put project meeting on my calendar monday from 4 pm to 5 pm",
+            "plan calculus review tomorrow from 6 pm to 7 pm",
+            "add a calendar block tomorrow from 2 pm to 3 pm",
+            "add a block to my calendar tomorrow",
+            "plan today",
             "plan this week",
             "plan my week",
             "help me plan the week",
             "set up a plan for this week",
+            "plan weekend",
             "make a study time at 7pm",
             "block 7pm for studying",
             "schedule studying tonight",
@@ -308,6 +321,7 @@ def manual_eval_examples() -> list[TrainingExample]:
         "get_calendar_events": 84,
         "get_tasks": 83,
         "propose_schedule_change": 95,
+        "add_calendar_block": 60,
         "ai_agent": 130,
     }
     seen = {
@@ -423,6 +437,17 @@ def manual_eval_examples() -> list[TrainingExample]:
         add("get_calendar_events", f"what events do I have {window}")
         add("get_calendar_events", f"show calendar items {window}")
 
+    for course in courses:
+        for day in days:
+            add(
+                "add_calendar_block",
+                f"add study for {course} {day} from 2 pm to 3 pm",
+            )
+            add(
+                "add_calendar_block",
+                f"put {course} review on my calendar {day} from 4 pm to 5 pm",
+            )
+
     general_requests = [
         "draft a message to my professor",
         "rewrite my paragraph so it sounds clearer",
@@ -483,6 +508,7 @@ LABELS = [
     "get_calendar_events",
     "get_tasks",
     "propose_schedule_change",
+    "add_calendar_block",
     "ai_agent",
 ]
 
@@ -735,6 +761,14 @@ def synthetic_examples() -> list[TrainingExample]:
             "plan work on project 1 for 3 hours before Monday",
             "schedule time for the assignment due tomorrow",
         ],
+        "add_calendar_block": [
+            "add study for cse 369 thursday from 7 pm to 9 pm",
+            "add dentist tomorrow from 2 pm to 3 pm",
+            "create a calendar block for office hours friday from 1 pm to 2 pm",
+            "put project meeting on my calendar monday from 4 pm to 5 pm",
+            "plan calculus review tomorrow from 6 pm to 7 pm",
+            "add a calendar block tomorrow from 2 pm to 3 pm",
+        ],
         "ai_agent": [
             "explain how the app works",
             "help me understand this error",
@@ -834,6 +868,18 @@ def synthetic_examples() -> list[TrainingExample]:
             rows.append(TrainingExample(f"what assignments are due {day}", "get_tasks"))
             rows.append(TrainingExample(f"when is {course} on my calendar {day}", "get_calendar_events"))
             rows.append(TrainingExample(f"what time is {course} on my calendar {day}", "get_calendar_events"))
+            rows.append(
+                TrainingExample(
+                    f"add study for {course} {day} from 2 pm to 3 pm",
+                    "add_calendar_block",
+                )
+            )
+            rows.append(
+                TrainingExample(
+                    f"put {course} review on my calendar {day} from 4 pm to 5 pm",
+                    "add_calendar_block",
+                )
+            )
 
             for event_type in event_types:
                 rows.append(TrainingExample(f"do I have {course} {event_type} {day}", "get_calendar_events"))
@@ -966,6 +1012,15 @@ def synthetic_examples() -> list[TrainingExample]:
             "create calendar time for studying",
             "make room for assignment work",
         ],
+        "add_calendar_block": [
+            "add tutoring tomorrow from 2 pm to 3 pm",
+            "create a calendar block for advising friday from 11 am to noon",
+            "put study for calculus on my calendar monday from 6 pm to 8 pm",
+            "add project meeting thursday from 4 pm to 5 pm",
+            "plan biology review tomorrow from 7 pm to 8 pm",
+            "add a calendar block tomorrow from 2 pm to 3 pm",
+            "add a block to my calendar friday",
+        ],
         "ai_agent": [
             "brainstorm essay topics for history",
             "give me topic ideas for my paper",
@@ -996,6 +1051,8 @@ def normalize_label(value: object) -> str | None:
         return "get_assignments"
     if any(x in key for x in ("free", "available", "availability", "slot")):
         return "find_free_slots"
+    if any(x in key for x in ("create_calendar", "add_calendar", "calendar_block")):
+        return "add_calendar_block"
     if any(x in key for x in ("calendar", "event", "meeting", "class", "lecture")):
         return "get_calendar_events"
     if any(x in key for x in ("homework", "assignment", "deadline", "task", "todo", "due")):
@@ -1009,6 +1066,7 @@ def normalize_label(value: object) -> str | None:
 
 def extract_user_text(row: dict[str, Any]) -> str | None:
     for key in (
+        "user_message",
         "query",
         "instruction",
         "prompt",
@@ -1085,6 +1143,17 @@ def extract_exact_label(row: dict[str, Any]) -> str | None:
 
 def infer_syntra_label(text: str) -> str:
     lower = text.lower()
+    if any(
+        phrase in lower
+        for phrase in (
+            "add a calendar block",
+            "add calendar block",
+            "add a block to my calendar",
+            "create a calendar block",
+            "put a block on my calendar",
+        )
+    ):
+        return "add_calendar_block"
     if any(x in lower for x in ("schedule", "plan", "study block", "make time", "work on")) and any(
         x in lower for x in ("homework", "assignment", "task", "exam", "quiz", "lab", "project", "study")
     ):
@@ -1103,6 +1172,25 @@ def infer_syntra_label(text: str) -> str:
 def infer_syntra_label_strict(text: str) -> str | None:
     lower = text.lower()
     words = set(re.findall(r"\b[a-z0-9]+\b", lower))
+
+    if any(
+        phrase in lower
+        for phrase in (
+            "add a calendar block",
+            "add calendar block",
+            "add a block to my calendar",
+            "create a calendar block",
+            "put a block on my calendar",
+        )
+    ) or (
+        re.search(
+            r"\b(?:from\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\s+to\s+"
+            r"\d{1,2}(?::\d{2})?\s*(?:am|pm)\b",
+            lower,
+        )
+        and any(word in words for word in ("add", "put", "plan", "create"))
+    ):
+        return "add_calendar_block"
 
     schedule_action = any(
         phrase in lower
@@ -1412,6 +1500,50 @@ def load_local_examples(
     return examples
 
 
+def load_structured_nlu_examples(path: Path) -> list[TrainingExample]:
+    if not path.exists():
+        print(f"[structured-nlu] data not found at {path}; skipping intent rows")
+        return []
+    examples: list[TrainingExample] = []
+    for row in rows_from_file(path):
+        text = extract_user_text(row)
+        label = extract_exact_label(row)
+        if text and label:
+            examples.append(TrainingExample(text=text, label=label))
+    print(f"[structured-nlu] loaded {len(examples)} canonical intent rows from {path}")
+    return examples
+
+
+def train_slot_model(args: argparse.Namespace, output_dir: Path) -> None:
+    if args.skip_slot_model:
+        print("[slot-model] skipped")
+        return
+    data_path = Path(args.structured_nlu_data)
+    trainer_path = Path(__file__).with_name("train_nlu_slot_model.py")
+    if not data_path.exists() or not trainer_path.exists():
+        print(
+            "[slot-model] skipped because structured data or trainer is missing: "
+            f"{data_path}, {trainer_path}"
+        )
+        return
+    command = [
+        sys.executable,
+        str(trainer_path),
+        "--data",
+        str(data_path),
+        "--output-dir",
+        str(output_dir / "slot_model"),
+        "--base-model",
+        args.slot_base_model,
+        "--epochs",
+        str(args.slot_epochs),
+        "--batch-size",
+        str(args.slot_batch_size),
+    ]
+    print(f"[slot-model] training with {data_path}")
+    subprocess.run(command, check=True)
+
+
 def map_tool_name_to_label(value: object) -> str | None:
     if value is None:
         return None
@@ -1424,7 +1556,7 @@ def map_tool_name_to_label(value: object) -> str | None:
         return "find_free_slots"
     if any(part in key for part in ("calendar", "event", "meeting", "class", "lecture")):
         if any(part in key for part in ("create", "add", "schedule", "book", "reserve")):
-            return "propose_schedule_change"
+            return "add_calendar_block"
         return "get_calendar_events"
     if any(part in key for part in ("todo", "task", "homework", "assignment", "deadline", "due")):
         return "get_tasks"
@@ -1709,6 +1841,8 @@ def route_args(label: str, prompt: str, today: date | None = None) -> dict[str, 
             "deadline": f"{end.isoformat()}T23:59:00",
             "estimated_minutes": int(hours * 60),
         }
+    if label == "add_calendar_block":
+        return {"message": prompt, "needs_slot_extraction": True}
     return {"message": prompt}
 
 
@@ -1759,7 +1893,8 @@ def train_and_test(args: argparse.Namespace) -> None:
     else:
         print("[data] skipping local data")
 
-    examples = hf + local + synthetic_examples()
+    structured = load_structured_nlu_examples(Path(args.structured_nlu_data))
+    examples = hf + local + structured + synthetic_examples()
     examples = dedupe_examples(examples)
     examples = limit_examples_per_label(
         examples,
@@ -1777,6 +1912,7 @@ def train_and_test(args: argparse.Namespace) -> None:
             {
                 "hf_examples": len(hf),
                 "local_examples": len(local),
+                "structured_nlu_examples": len(structured),
                 "total_examples": len(examples),
                 "label_counts": counts,
             },
@@ -1871,6 +2007,7 @@ def train_and_test(args: argparse.Namespace) -> None:
     tokenizer.save_pretrained(output_dir)
     (output_dir / "labels.json").write_text(json.dumps({"labels": LABELS}, indent=2))
     print(f"[model] saved to {output_dir}")
+    train_slot_model(args, output_dir)
     if not args.skip_manual_eval_files:
         eval_path = (
             Path(args.manual_eval_path)
@@ -1915,6 +2052,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", default="/content/data.zip")
     parser.add_argument("--extract-dir", default="/content/real_data")
     parser.add_argument("--output-dir", default="/content/syntra_tool_router")
+    parser.add_argument(
+        "--structured-nlu-data",
+        default=str(Path(__file__).with_name("syntra_nlu_training_data.jsonl")),
+        help="Canonical JSONL used for intent rows, slots, and follow-up ground truth.",
+    )
+    parser.add_argument("--skip-slot-model", action="store_true")
+    parser.add_argument("--slot-base-model", default="distilbert-base-uncased")
+    parser.add_argument("--slot-epochs", type=float, default=8.0)
+    parser.add_argument("--slot-batch-size", type=int, default=8)
     parser.add_argument("--base-model", default="distilbert-base-uncased")
     parser.add_argument("--epochs", type=float, default=6.0)
     parser.add_argument("--batch-size", type=int, default=16)

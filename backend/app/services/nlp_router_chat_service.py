@@ -25,6 +25,7 @@ TUNNEL_REQUEST_HEADERS = {
     "Accept": "application/json",
     "ngrok-skip-browser-warning": "true",
 }
+_pending_nlu_context: dict[str, dict[str, Any]] = {}
 
 
 class NlpRouterChatService:
@@ -80,10 +81,33 @@ class NlpRouterChatService:
             or "Qwen/Qwen2.5-3B-Instruct"
         ).strip()
 
-    async def run_turn(self, user_message: str) -> str:
+    async def run_turn(self, user_message: str, *, user_id: str | None = None) -> str:
+        pending = _pending_nlu_context.get(user_id) if user_id else None
+        if pending and user_message.strip().lower() in {
+            "cancel",
+            "cancel it",
+            "never mind",
+            "nevermind",
+            "stop",
+        }:
+            if user_id:
+                _pending_nlu_context.pop(user_id, None)
+            return "Okay, I canceled that request."
+
+        planning_message = user_message
+        if pending:
+            original = str(pending.get("message") or "").strip()
+            planning_message = f"{original} {user_message}".strip()
+
         async with httpx.AsyncClient(timeout=60.0) as client:
-            planned = await self._fetch_plan(client, user_message)
+            planned = await self._fetch_plan(
+                client,
+                planning_message,
+                clarification_pending=bool(pending),
+            )
             if not planned:
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
                 return await self._ai_agent_reply(client, user_message)
 
             parts: list[str] = []
@@ -95,24 +119,44 @@ class NlpRouterChatService:
 
                 if name == CLARIFICATION_ACTION:
                     question = str(arguments.get("question") or "").strip()
+                    if user_id:
+                        _pending_nlu_context[user_id] = {
+                            "message": planning_message,
+                            "slots": dict(arguments.get("slots") or {}),
+                            "missing_slots": list(arguments.get("missing_slots") or []),
+                            "predicted_tool": str(arguments.get("predicted_tool") or ""),
+                        }
                     return question or "Can you clarify what you want me to do?"
 
                 if name == "ai_agent":
+                    if user_id:
+                        _pending_nlu_context.pop(user_id, None)
                     message = str(arguments.get("message") or user_message)
                     return await self._ai_agent_reply(client, message)
 
                 if name not in LOCAL_TOOL_NAMES:
+                    if user_id:
+                        _pending_nlu_context.pop(user_id, None)
                     message = str(arguments.get("message") or user_message)
                     return await self._ai_agent_reply(client, message)
 
                 verification_question = self._verify_local_tool_call(
                     name,
                     arguments,
-                    user_message,
+                    planning_message,
                 )
                 if verification_question:
+                    if user_id:
+                        _pending_nlu_context[user_id] = {
+                            "message": planning_message,
+                            "slots": {},
+                            "missing_slots": [],
+                            "predicted_tool": name,
+                        }
                     return verification_question
 
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
                 result = await execute_tool(name, arguments)
                 parts.append(self._format_tool_result(name, result))
 
@@ -142,6 +186,14 @@ class NlpRouterChatService:
 
         lower = user_message.lower()
         if name == "add_calendar_block":
+            if not (
+                self._looks_like_calendar_block_request(lower)
+                or self._looks_like_calendar_block_details(lower)
+            ):
+                return (
+                    "Do you want me to add a calendar block? If so, send the "
+                    "event name, date, start time, and end time."
+                )
             return self._verify_add_calendar_block(arguments)
         if name == "propose_schedule_change":
             if self._looks_like_calendar_block_details(lower):
@@ -164,6 +216,16 @@ class NlpRouterChatService:
                 return (
                     "Before I add anything, what event name, date, start time, "
                     "and end time should I use?"
+                )
+            missing: list[str] = []
+            if not self._has_duration(lower):
+                missing.append("duration")
+            if not self._has_deadline_text(lower):
+                missing.append("deadline")
+            if missing:
+                return (
+                    f"What {' and '.join(missing)} should I use for this study "
+                    "schedule? For example: Schedule 2 hours for lab 7 by Friday."
                 )
             if not (
                 self._has_any(lower, ("schedule", "study", "homework", "assignment"))
@@ -291,6 +353,15 @@ class NlpRouterChatService:
             )
         )
 
+    def _has_deadline_text(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:today|tomorrow|this week|next week|monday|tuesday|"
+                r"wednesday|thursday|friday|saturday|sunday|20\d{2}-\d{2}-\d{2})\b",
+                text,
+            )
+        )
+
     def _has_any(self, text: str, terms: tuple[str, ...]) -> bool:
         return any(term in text for term in terms)
 
@@ -298,10 +369,12 @@ class NlpRouterChatService:
         self,
         client: httpx.AsyncClient,
         message: str,
+        *,
+        clarification_pending: bool = False,
     ) -> list[dict[str, Any]]:
         payload = {
             "message": message,
-            "clarification_pending": False,
+            "clarification_pending": clarification_pending,
             "today": effective_today().isoformat(),
         }
         try:
