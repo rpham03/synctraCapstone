@@ -10,6 +10,59 @@ from app.services import chat_agent_tools
 from app.services.chat_service import ChatService
 
 
+def test_chat_conversation_log_writes_jsonl(monkeypatch, tmp_path):
+    import app.core.config.settings as settings_mod
+    from app.services.chat_conversation_log import append_conversation_turn
+
+    log_path = tmp_path / "chat.jsonl"
+    monkeypatch.setattr(settings_mod.settings, "chat_conversation_log_enabled", True)
+    monkeypatch.setattr(settings_mod.settings, "chat_conversation_log_path", str(log_path))
+
+    append_conversation_turn(
+        user_id="user-1",
+        provider="nlp",
+        user_message="Move my study block to Friday",
+        assistant_reply="I moved Study for math to Friday.",
+        schedule_proposals=[{"replace_block_id": "study-1"}],
+        client_today="2026-06-06",
+        timezone_name="PDT",
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["user_id"] == "user-1"
+    assert row["provider"] == "nlp"
+    assert row["user_message"] == "Move my study block to Friday"
+    assert row["assistant_reply"] == "I moved Study for math to Friday."
+    assert row["schedule_proposals"] == [{"replace_block_id": "study-1"}]
+    assert row["client_today"] == "2026-06-06"
+    assert row["timezone_name"] == "PDT"
+    assert row["timestamp"]
+
+
+def test_chat_service_logs_fallback_conversation(monkeypatch, tmp_path):
+    import app.core.config.settings as settings_mod
+
+    log_path = tmp_path / "chat.jsonl"
+    monkeypatch.setattr(settings_mod.settings, "chat_conversation_log_enabled", True)
+    monkeypatch.setattr(settings_mod.settings, "chat_conversation_log_path", str(log_path))
+    service = ChatService()
+    monkeypatch.setattr(service, "_provider", lambda: "disabled")
+
+    reply, proposals = asyncio.run(
+        service.process_message(
+            "hello",
+            "user-2",
+            client_today="2026-06-06",
+            timezone_name="PDT",
+        )
+    )
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["user_message"] == "hello"
+    assert row["assistant_reply"] == reply
+    assert row["schedule_proposals"] == proposals == []
+
+
 def test_normalize_reply_times_converts_military():
     from app.services.chat_agent_common import normalize_reply_times
 

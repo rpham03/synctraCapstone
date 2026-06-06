@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 *.egg-info/
 .env
+backend/data/chat_conversations*.jsonl
 
 # Flutter / Dart
 app/.dart_tool/

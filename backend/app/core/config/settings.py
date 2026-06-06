@@ -1,6 +1,7 @@
 # App configuration — loads environment variables for the database, Redis, and third-party APIs.
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -32,5 +33,8 @@ class Settings(BaseSettings):
     colab_nlp_router_host: str = ""
     colab_ai_agent_host: str = ""
     colab_ai_agent_model: str = "Qwen/Qwen2.5-3B-Instruct"
+    # Durable JSONL transcript of user/assistant chat turns.
+    chat_conversation_log_enabled: bool = True
+    chat_conversation_log_path: str = "data/chat_conversations.jsonl"
 
 settings = Settings()

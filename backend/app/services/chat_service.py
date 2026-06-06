@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config.settings import settings
 from app.services.chat_agent_common import sanitize_chat_reply
+from app.services.chat_conversation_log import append_conversation_turn
 from app.services.chat_client_context import (
     clear_client_context,
     get_schedule_proposals,
@@ -77,7 +78,27 @@ class ChatService:
         set_timezone_offset_minutes(timezone_offset_minutes)
         set_timezone_name(timezone_name)
         try:
-            return await self._process_message_inner(text, user_id)
+            reply, proposals = await self._process_message_inner(text, user_id)
+            append_conversation_turn(
+                user_id=user_id,
+                provider=self._provider(),
+                user_message=text,
+                assistant_reply=reply,
+                schedule_proposals=proposals,
+                client_today=client_today,
+                timezone_name=timezone_name,
+            )
+            return reply, proposals
+        except Exception as exc:
+            append_conversation_turn(
+                user_id=user_id,
+                provider=self._provider(),
+                user_message=text,
+                assistant_reply=f"ERROR: {exc}",
+                client_today=client_today,
+                timezone_name=timezone_name,
+            )
+            raise
         finally:
             clear_client_context()
 
