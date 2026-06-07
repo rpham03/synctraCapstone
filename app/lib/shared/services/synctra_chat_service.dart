@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/constants/api_constants.dart';
 import '../../data/models/schedule_block_model.dart';
 import '../../data/services/calendar_events_loader.dart';
+import 'manual_events_store.dart';
 import 'suggested_schedule_store.dart';
 
 class SynctraChatResult {
@@ -56,7 +57,7 @@ class SynctraChatService {
       final reply = response.data?['reply']?.toString() ??
           'Sorry, I did not get a reply from the server.';
       final proposals = _readProposals(response.data?['schedule_proposals']);
-      final added = _applyScheduleProposals(proposals);
+      final added = await _applyScheduleProposals(proposals);
 
       return SynctraChatResult(reply: reply, blocksAdded: added);
     } on DioException catch (e) {
@@ -111,7 +112,8 @@ class SynctraChatService {
         .toList();
   }
 
-  int _applyScheduleProposals(List<Map<String, dynamic>> proposals) {
+  Future<int> _applyScheduleProposals(
+      List<Map<String, dynamic>> proposals) async {
     if (proposals.isEmpty) return 0;
 
     final taskId = 'chat-${DateTime.now().millisecondsSinceEpoch}';
@@ -119,6 +121,19 @@ class SynctraChatService {
     var applied = 0;
 
     for (final p in proposals) {
+      // A proposal carrying delete_block_id is a DELETE: remove the matching
+      // study block or manual event. It has no start/end, so handle it first.
+      final deleteId = p['delete_block_id']?.toString();
+      if (deleteId != null && deleteId.isNotEmpty) {
+        if (_store.blocks.any((block) => block.id == deleteId)) {
+          _store.removeBlock(deleteId);
+          applied++;
+        } else if (await _deleteManualEvent(deleteId)) {
+          applied++;
+        }
+        continue;
+      }
+
       final startRaw = p['start_time']?.toString();
       final endRaw = p['end_time']?.toString();
       if (startRaw == null || endRaw == null) continue;
@@ -127,11 +142,13 @@ class SynctraChatService {
         final end = DateTime.parse(endRaw).toLocal();
         final replaceId = p['replace_block_id']?.toString();
         // A proposal carrying replace_block_id is a MOVE: relocate the existing
-        // block in place. Never fall through to adding a new one, or the move
+        // item in place. Never fall through to adding a new one, or the move
         // would duplicate the event instead of moving it.
         if (replaceId != null && replaceId.isNotEmpty) {
           if (_store.blocks.any((block) => block.id == replaceId)) {
             _store.updateBlockTimes(id: replaceId, start: start, end: end);
+            applied++;
+          } else if (await _moveManualEvent(replaceId, start, end)) {
             applied++;
           }
           continue;
@@ -154,6 +171,32 @@ class SynctraChatService {
       applied += blocks.length;
     }
     return applied;
+  }
+
+  /// Relocate a "+"-button (manual) calendar event the move targeted, if the
+  /// replace id wasn't one of our study blocks. Returns true when it matched.
+  Future<bool> _moveManualEvent(
+      String replaceId, DateTime start, DateTime end) async {
+    final g = GetIt.instance;
+    if (!g.isRegistered<ManualEventsStore>()) return false;
+    try {
+      return await g<ManualEventsStore>()
+          .updateTimes(id: replaceId, start: start, end: end);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Remove a "+"-button (manual) calendar event a delete targeted, if the id
+  /// wasn't one of our study blocks. Returns true when it matched.
+  Future<bool> _deleteManualEvent(String deleteId) async {
+    final g = GetIt.instance;
+    if (!g.isRegistered<ManualEventsStore>()) return false;
+    try {
+      return await g<ManualEventsStore>().remove(deleteId);
+    } catch (_) {
+      return false;
+    }
   }
 }
 

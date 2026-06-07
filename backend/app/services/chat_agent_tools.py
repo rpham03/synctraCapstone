@@ -560,8 +560,17 @@ def propose_schedule_change(
     }
 
 
+# Calendar items the chat is allowed to move: chat-created study blocks and the
+# user's own manually-added events. iCal/Canvas/course events are read-only
+# mirrors of an external calendar, so they are intentionally excluded.
+MOVABLE_EVENT_SOURCES = ("study_block", "manual")
+
+
 def matching_study_blocks(title_query: object) -> list[dict]:
-    """Return preview study blocks matching a natural-language title query."""
+    """Return movable calendar events matching a natural-language title query.
+
+    Covers chat-created study blocks and "+"-button manual events.
+    """
 
     query = re.sub(
         r"\b(?:my|the|this|a|an)\b",
@@ -569,11 +578,12 @@ def matching_study_blocks(title_query: object) -> list[dict]:
         _as_str(title_query).lower(),
     )
     query = " ".join(query.split())
-    generic = query in {"", "block", "study block", "calendar block", "study time"}
+    generic = query in {"", "block", "study block", "calendar block", "study time", "event"}
     blocks = [
         raw
         for raw in get_calendar_events()
-        if isinstance(raw, dict) and _as_str(raw.get("source")).lower() == "study_block"
+        if isinstance(raw, dict)
+        and _as_str(raw.get("source")).lower() in MOVABLE_EVENT_SOURCES
     ]
     if generic:
         return blocks
@@ -583,6 +593,32 @@ def matching_study_blocks(title_query: object) -> list[dict]:
         if query in _as_str(block.get("title")).lower()
         or _as_str(block.get("title")).lower() in query
     ]
+
+
+def resolve_single_block(matches: list[dict]) -> dict | None:
+    """Pick the one block to act on, or None when the user must disambiguate.
+
+    Several *different-titled* matches are genuinely ambiguous (ask the user).
+    But duplicate blocks that share the same title can't be told apart by name
+    either, so asking "which one?" loops forever — instead pick the earliest one
+    deterministically.
+    """
+
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    titles = {_as_str(b.get("title")).strip().lower() for b in matches}
+    if len(titles) > 1:
+        return None
+
+    def _start(block: dict) -> datetime:
+        try:
+            return _parse_iso_datetime(block.get("start_time"))
+        except (ValueError, TypeError):
+            return datetime.max
+
+    return sorted(matches, key=_start)[0]
 
 
 def move_calendar_block(
@@ -614,7 +650,8 @@ def move_calendar_block(
                 "Tell me the block name and target date."
             ),
         }
-    if len(matches) > 1:
+    block = resolve_single_block(matches)
+    if block is None:
         titles = ", ".join(
             sorted({_as_str(block.get("title")).strip() or "Study block" for block in matches})
         )
@@ -623,7 +660,6 @@ def move_calendar_block(
             "message": f"Which study block should I move? I found: {titles}.",
         }
 
-    block = matches[0]
     try:
         old_start = _parse_iso_datetime(block.get("start_time"))
         old_end = _parse_iso_datetime(block.get("end_time"))
@@ -665,4 +701,40 @@ def move_calendar_block(
     return {
         "proposal": proposal,
         "message": f"I moved {title} to {target_day.strftime('%A')}.",
+    }
+
+
+def delete_calendar_block(title_query: object) -> dict:
+    """Return a proposal that removes one matching study block or manual event."""
+
+    matches = matching_study_blocks(title_query)
+    if not matches:
+        return {
+            "proposal": [],
+            "message": (
+                "I could not find that event in your calendar to delete. "
+                "What is the exact name?"
+            ),
+        }
+    block = resolve_single_block(matches)
+    if block is None:
+        titles = ", ".join(
+            sorted({_as_str(block.get("title")).strip() or "Event" for block in matches})
+        )
+        return {
+            "proposal": [],
+            "message": f"Which event should I delete? I found: {titles}.",
+        }
+
+    title = _as_str(block.get("title")).strip() or "Event"
+    proposal = [
+        {
+            "task_title": title,
+            "written_to_calendar": False,
+            "delete_block_id": _as_str(block.get("id")).strip(),
+        }
+    ]
+    return {
+        "proposal": proposal,
+        "message": f"I removed {title} from your calendar.",
     }

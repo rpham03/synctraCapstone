@@ -11,6 +11,7 @@ import '../models/schedule_block_model.dart';
 import '../models/task_model.dart';
 import 'course_import_service.dart';
 import '../../shared/services/canvas_tasks_service.dart';
+import '../../shared/services/manual_events_storage.dart';
 import '../../shared/services/suggested_schedule_store.dart';
 import '../../shared/utils/calendar_display_utils.dart';
 import '../../shared/utils/manual_tasks_calendar.dart';
@@ -18,7 +19,6 @@ import '../../shared/utils/local_time_format.dart';
 import '../../shared/utils/task_timeline_utils.dart';
 
 class CalendarEventsLoader {
-  static const _manualEventsKey = 'synctra_manual_events_v1';
   static const _manualTasksKey = 'synctra_manual_tasks_v1';
 
   /// Device-local calendar date (YYYY-MM-DD) for the chat backend.
@@ -158,17 +158,7 @@ class CalendarEventsLoader {
   }
 
   static Future<void> _loadManualEvents(List<EventModel> out) async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_manualEventsKey);
-    if (raw == null || raw.isEmpty) return;
-    try {
-      final list = jsonDecode(raw) as List<dynamic>;
-      for (final item in list) {
-        if (item is! Map) continue;
-        final e = EventModel.fromJson(Map<String, dynamic>.from(item));
-        if (e.source == 'manual') out.add(e);
-      }
-    } catch (_) {}
+    out.addAll(await loadManualEvents());
   }
 
   static Future<void> _loadCanvasDueEvents(List<EventModel> out) async {

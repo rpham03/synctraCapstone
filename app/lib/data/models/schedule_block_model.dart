@@ -36,4 +36,25 @@ class ScheduleBlockModel {
         isAiGenerated: isAiGenerated ?? this.isAiGenerated,
         description: description ?? this.description,
       );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'task_id': taskId,
+        'task_title': taskTitle,
+        'start_time': startTime.toIso8601String(),
+        'end_time': endTime.toIso8601String(),
+        'is_ai_generated': isAiGenerated,
+        'description': description,
+      };
+
+  factory ScheduleBlockModel.fromJson(Map<String, dynamic> json) =>
+      ScheduleBlockModel(
+        id: json['id'] as String? ?? '',
+        taskId: json['task_id'] as String? ?? '',
+        taskTitle: json['task_title'] as String? ?? 'Study block',
+        startTime: DateTime.parse(json['start_time'] as String),
+        endTime: DateTime.parse(json['end_time'] as String),
+        isAiGenerated: json['is_ai_generated'] as bool? ?? true,
+        description: json['description'] as String? ?? '',
+      );
 }

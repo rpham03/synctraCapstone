@@ -586,6 +586,467 @@ def test_nlp_router_move_phrasing_reroutes_add_to_move(monkeypatch):
     assert proposals[0]["end_time"] == "2026-06-07T22:00:00"
 
 
+def test_nlp_router_delete_removes_matching_block(monkeypatch):
+    """"delete my bible study" removes the block via a delete_block_id proposal."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        # Router has no delete tool, so it guesses something else.
+        return [{"name": "ai_agent", "arguments": {"message": "delete my bible study"}}]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("delete must not fall through to the AI agent")
+
+    async def run_turn():
+        set_calendar_events(
+            [
+                {
+                    "id": "study-5",
+                    "title": "bible study",
+                    "start_time": "2026-06-07T20:00:00",
+                    "end_time": "2026-06-07T21:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        reply = await service.run_turn(
+            "delete my bible study", user_id="delete-user"
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "removed" in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["delete_block_id"] == "study-5"
+
+
+def test_nlp_router_delete_works_for_manual_event(monkeypatch):
+    """Delete also covers "+"-button manual events."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "remove the dentist"}}]
+
+    async def run_turn():
+        set_calendar_events(
+            [
+                {
+                    "id": "manual-9",
+                    "title": "dentist",
+                    "start_time": "2026-06-10T09:00:00",
+                    "end_time": "2026-06-10T10:00:00",
+                    "source": "manual",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "remove the dentist", user_id="delete-manual-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        _, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert len(proposals) == 1
+    assert proposals[0]["delete_block_id"] == "manual-9"
+
+
+def test_nlp_router_delete_without_match_asks_instead_of_guessing(monkeypatch):
+    """If nothing matches a delete, ask — never delete the wrong thing or add."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "delete my bible study"}}]
+
+    async def ai_agent_reply(*_args, **_kwargs):
+        return "general answer"
+
+    async def run_turn():
+        set_calendar_events([])
+        return await service.run_turn(
+            "delete my bible study", user_id="delete-none-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", ai_agent_reply)
+        _, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    # No match -> no delete proposal emitted.
+    assert proposals == []
+
+
+def test_nlp_router_move_with_duplicate_titles_picks_one_not_loops(monkeypatch):
+    """Two blocks share a title -> move the earliest, don't ask an unanswerable Q."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "gaming",
+                    "start_time": "2026-06-07T22:00:00",
+                    "end_time": "2026-06-07T23:00:00",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("move must resolve, not chat")
+
+    async def run_turn():
+        set_client_today("2026-06-06")
+        set_calendar_events(
+            [
+                {
+                    "id": "gaming-late",
+                    "title": "gaming",
+                    "start_time": "2026-06-06T23:00:00",
+                    "end_time": "2026-06-06T23:30:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "gaming-early",
+                    "title": "gaming",
+                    "start_time": "2026-06-06T09:00:00",
+                    "end_time": "2026-06-06T09:30:00",
+                    "source": "study_block",
+                },
+            ]
+        )
+        return await service.run_turn(
+            "move gaming to sunday 10 pm to 11 pm", user_id="dup-move-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "which" not in reply.lower()
+    assert len(proposals) == 1
+    # Earliest of the duplicates is moved (deterministic), not a loop.
+    assert proposals[0]["replace_block_id"] == "gaming-early"
+
+
+def test_nlp_router_move_via_ai_agent_relocates_without_chatting(monkeypatch):
+    """"can you move gaming to friday" (router picks ai_agent) must move it."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        # The "can you ..." prefix makes the router fall back to ai_agent.
+        return [
+            {"name": "ai_agent", "arguments": {"message": "can you move gaming to friday"}}
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a move must not be answered by the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-06")  # Saturday -> next Friday is Jun 12
+        set_calendar_events(
+            [
+                {
+                    "id": "gaming-1",
+                    "title": "gaming",
+                    "start_time": "2026-06-06T23:00:00",
+                    "end_time": "2026-06-06T23:30:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "can you move gaming to friday", user_id="ai-move-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "moved" in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "gaming-1"
+    # No time was given, so it keeps its time-of-day on the new day (Jun 12).
+    assert proposals[0]["start_time"] == "2026-06-12T23:00:00"
+    assert proposals[0]["end_time"] == "2026-06-12T23:30:00"
+
+
+def test_nlp_router_move_overrides_misrouted_clarification(monkeypatch):
+    """"move gaming to tuesday" mislabeled as a get_tasks clarification still moves."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        # Router wrongly asks about tasks/Canvas for a clear move request.
+        return [
+            {
+                "name": "clarification",
+                "arguments": {
+                    "question": "Do you want me to show tasks, homework, and deadlines?",
+                    "missing_slots": [],
+                    "predicted_tool": "get_tasks",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a move must not be answered by the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-07")  # Sunday -> next Tuesday is Jun 9
+        set_calendar_events(
+            [
+                {
+                    "id": "gaming-x",
+                    "title": "gaming",
+                    "start_time": "2026-06-08T20:00:00",
+                    "end_time": "2026-06-08T21:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "move gaming to tuesday", user_id="misroute-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "tasks" not in reply.lower() and "canvas" not in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "gaming-x"
+    # Moved to Tuesday Jun 9, keeping the 8-9 PM time.
+    assert proposals[0]["start_time"] == "2026-06-09T20:00:00"
+
+
+def test_nlp_router_move_followup_ampm_completes_as_move(monkeypatch):
+    """A timed move that needed an AM/PM answer finishes as a MOVE, not an add."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(_client, message, *, clarification_pending=False):
+        # The follow-up "pm" is merged in; the router now resolves the times.
+        assert "pm" in message.lower()
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "gaming",
+                    "start_time": "2026-06-07T23:00:00",
+                    "end_time": "2026-06-07T23:30:00",
+                },
+            }
+        ]
+
+    async def run_turn():
+        set_client_today("2026-06-06")
+        set_calendar_events(
+            [
+                {
+                    "id": "gaming-2",
+                    "title": "gaming",
+                    "start_time": "2026-06-06T23:00:00",
+                    "end_time": "2026-06-06T23:30:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        _pending_nlu_context["ampm-move"] = {
+            "message": "move gaming to sunday at 11 to 11:30",
+            "missing_slots": ["time_period"],
+            "predicted_tool": "add_calendar_block",
+            "question": "Should I use morning (AM) or afternoon/evening (PM) for those times?",
+        }
+        return await service.run_turn("pm", user_id="ampm-move"), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        _pending_nlu_context.clear()
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "added this calendar block" not in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "gaming-2"
+    assert proposals[0]["start_time"] == "2026-06-07T23:00:00"
+
+
+def test_nlp_router_non_calendar_move_phrase_stays_chat(monkeypatch):
+    """"move on to ..." is not a calendar move and must not become one."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "move on to recursion"}}]
+
+    async def ai_agent_reply(*_args, **_kwargs):
+        return "Recursion is when a function calls itself."
+
+    async def run_turn():
+        set_calendar_events([])
+        return await service.run_turn(
+            "can you move on to explaining recursion", user_id="chat-move-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", ai_agent_reply)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "Recursion" in reply
+    assert proposals == []
+
+
+def test_nlp_router_move_works_for_manual_calendar_event(monkeypatch):
+    """A "+"-button (manual) event can be moved too, not just study blocks."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "dentist",
+                    "start_time": "2026-06-12T15:00:00",
+                    "end_time": "2026-06-12T16:00:00",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("move request must not reach Qwen")
+
+    async def run_turn():
+        set_calendar_events(
+            [
+                {
+                    "id": "manual-3",
+                    "title": "dentist",
+                    "start_time": "2026-06-10T09:00:00",
+                    "end_time": "2026-06-10T10:00:00",
+                    "source": "manual",
+                }
+            ]
+        )
+        reply = await service.run_turn(
+            "move dentist to friday 3 pm to 4 pm",
+            user_id="move-manual-user",
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "added this calendar block" not in reply.lower()
+    assert len(proposals) == 1
+    # Replaces the manual event in place (frontend routes this to ManualEventsStore).
+    assert proposals[0]["replace_block_id"] == "manual-3"
+
+
 def test_nlp_router_move_uses_target_day_after_to_not_source_day(monkeypatch):
     """"move X tomorrow to today" must land on today, reusing the time-of-day.
 

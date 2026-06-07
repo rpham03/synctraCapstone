@@ -22,6 +22,7 @@ LOCAL_TOOL_NAMES = {
     "propose_schedule_change",
     "add_calendar_block",
     "move_calendar_block",
+    "delete_calendar_block",
 }
 TUNNEL_REQUEST_HEADERS = {
     "Accept": "application/json",
@@ -168,6 +169,9 @@ class NlpRouterChatService:
                 name, arguments = self._coerce_move_intent(
                     name, arguments, planning_message
                 )
+                name, arguments = self._coerce_delete_intent(
+                    name, arguments, planning_message
+                )
 
                 if name == CLARIFICATION_ACTION:
                     question = str(arguments.get("question") or "").strip()
@@ -210,12 +214,21 @@ class NlpRouterChatService:
                     planning_message,
                 )
                 if verification_question:
+                    # Loop guard: the user just answered this exact verification
+                    # question and we're about to ask it again — break out.
+                    if pending and self._normalized_reply(
+                        str(pending.get("question") or "")
+                    ) == self._normalized_reply(verification_question):
+                        if user_id:
+                            _pending_nlu_context.pop(user_id, None)
+                        return self._loop_break_message(pending)
                     if user_id:
                         pending_state: dict[str, Any] = {
                             "message": planning_message,
                             "slots": {},
                             "missing_slots": [],
                             "predicted_tool": name,
+                            "question": verification_question,
                         }
                         pending_call = self._safe_confirmation_call(
                             name,
@@ -300,6 +313,8 @@ class NlpRouterChatService:
         lower = message.strip().lower()
         if re.search(r"\b(?:move|reschedule|shift)\b", lower):
             return "move_calendar_block"
+        if self._is_delete_request(lower):
+            return "delete_calendar_block"
         if self._looks_like_calendar_block_request(lower) or re.fullmatch(
             r"(?:please\s+)?(?:help me\s+)?plan\s+.+",
             lower,
@@ -346,22 +361,122 @@ class NlpRouterChatService:
             re.search(r"\b(?:move|reschedule|shift)\b", text, flags=re.IGNORECASE)
         )
 
+    def _message_has_clock_time(self, text: str) -> bool:
+        """True if the message names a specific clock time (10:30, 10pm, at 11)."""
+        return bool(
+            re.search(
+                r"\b\d{1,2}:\d{2}\b"
+                r"|\b\d{1,2}\s*(?:a\.?m\.?|p\.?m\.?)\b"
+                r"|\bat\s+\d{1,2}\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    # Pronouns/adverbs that aren't real event names ("move it", "move on").
+    _NON_TITLE_WORDS = {"it", "that", "this", "them", "those", "on", "forward", "ahead", "along"}
+
+    def _extract_move_title(self, message: str) -> str:
+        """Pull the event name out of "move my gaming to friday" phrasing."""
+
+        match = re.search(
+            r"\b(?:move|reschedule|shift)\b\s+(?:my|the|this|that|a|an)?\s*(.+)$",
+            message.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        title = match.group(1)
+        # Cut at the target ("... to friday") or any trailing date/time phrase.
+        title = re.split(
+            r"\b(?:to|on|at|from|for|today|tomorrow|tonight|monday|tuesday|"
+            r"wednesday|thursday|friday|saturday|sunday|this week|next week)\b",
+            title,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        title = " ".join(title.strip(" .,:;-").split())
+        if title.lower() in self._NON_TITLE_WORDS:
+            return ""
+        return title
+
+    def _is_delete_request(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:delete|remove|cancel|get rid of|take off)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _extract_delete_title(self, message: str) -> str:
+        """Pull the event name out of "delete my X" / "remove the X today"."""
+
+        match = re.search(
+            r"\b(?:delete|remove|cancel|get rid of|take off)\b\s+"
+            r"(?:my|the|this|that|a|an)?\s*(.+)$",
+            message.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        title = match.group(1)
+        # Drop a trailing date/time phrase ("... today", "... from my calendar").
+        title = re.split(
+            r"\b(?:from|on|at|for|today|tomorrow|tonight|monday|tuesday|"
+            r"wednesday|thursday|friday|saturday|sunday|this week|next week)\b",
+            title,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        return " ".join(title.strip(" .,:;-").split())
+
+    def _coerce_delete_intent(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reroute to delete_calendar_block when the user asks to remove an event.
+
+        The trained router has no delete tool, so a "delete my bible study"
+        message arrives as add_calendar_block, ai_agent, or a clarification.
+        When the message is clearly a delete request and names an existing
+        block, run the delete instead.
+        """
+
+        if name == "delete_calendar_block":
+            return name, arguments
+        if not self._is_delete_request(message):
+            return name, arguments
+
+        title_query = self._extract_delete_title(message) or str(
+            arguments.get("title") or arguments.get("title_query") or ""
+        ).strip()
+        # Only reroute when we can actually find the event; otherwise let the
+        # normal flow answer or ask, rather than deleting the wrong thing.
+        if not title_query:
+            return name, arguments
+        if not chat_agent_tools.matching_study_blocks(title_query):
+            return name, arguments
+        return "delete_calendar_block", {"title_query": title_query}
+
     def _coerce_move_intent(
         self,
         name: str,
         arguments: dict[str, Any],
         message: str,
     ) -> tuple[str, dict[str, Any]]:
-        """Reroute add/schedule calls to a move when the user clearly says 'move'.
+        """Reroute to a move when the user clearly says 'move'.
 
-        The trained router sometimes predicts add_calendar_block for phrasing
-        like "move my bible study to Sunday 9pm to 10pm", which would duplicate
-        the event instead of relocating it. When the message is a move request
-        and names an existing preview block, rebuild the call as
-        move_calendar_block so the original block is replaced, not duplicated.
+        The trained router mislabels "move X to <day>" all over the place —
+        add_calendar_block (would duplicate), ai_agent (just chats), or even a
+        get_tasks/get_assignments clarification ("check Canvas?"). Whenever the
+        message is a move request that names an existing block and a target day,
+        rebuild the call as move_calendar_block so the block is relocated.
         """
 
-        if name not in {"add_calendar_block", "propose_schedule_change"}:
+        if name == "move_calendar_block":
             return name, arguments
         if not self._is_move_request(message):
             return name, arguments
@@ -372,19 +487,34 @@ class NlpRouterChatService:
             or arguments.get("title_query")
             or ""
         ).strip()
+        # Non-calendar plans (ai_agent, get_tasks, ...) carry no title slot —
+        # pull it from the user's words.
+        if not title_query:
+            title_query = self._extract_move_title(message)
+        if not title_query:
+            return name, arguments
         # Only reroute when we can actually find the block the user means;
         # otherwise let the original path ask for clarification.
-        if not chat_agent_tools.matching_study_blocks(title_query or "study block"):
+        if not chat_agent_tools.matching_study_blocks(title_query):
             return name, arguments
 
         start_dt = self._parse_naive_datetime(arguments.get("start_time"))
         end_dt = self._parse_naive_datetime(arguments.get("end_time"))
+        # The user gave a clock time but the router hasn't resolved it into
+        # start/end yet (e.g. it asked AM/PM). Don't move with the wrong time —
+        # let that flow resolve first; the resolved add then re-routes here.
+        if start_dt is None and self._message_has_clock_time(message):
+            return name, arguments
         # The router fills start/end using the *source* date for phrasing like
         # "move X tomorrow to today" (it grabs the first date it sees). Trust the
         # user's own words for the target day and reuse only the time-of-day.
         target_day = self._move_target_date(message) or (
             start_dt.date() if start_dt else None
         )
+        # Need a concrete target day before moving — guards against non-calendar
+        # phrases like "move on to the next topic" that have no date.
+        if target_day is None:
+            return name, arguments
 
         moved_args: dict[str, Any] = {
             "title_query": title_query or "study block",
@@ -511,6 +641,11 @@ class NlpRouterChatService:
                     "I could not find that event in your calendar preview to move. "
                     "What is the exact name of the block you want to move?"
                 )
+            if self._is_delete_request(lower):
+                return (
+                    "I could not find that event in your calendar to delete. "
+                    "What is the exact name of the event you want to remove?"
+                )
             if not (
                 self._looks_like_calendar_block_request(lower)
                 or self._looks_like_calendar_block_details(lower)
@@ -534,7 +669,10 @@ class NlpRouterChatService:
                     "I could not find that study block in your calendar preview. "
                     "What is the block name?"
                 )
-            if len(matches) > 1:
+            # Only ask "which one?" for genuinely different events. Duplicate
+            # same-title blocks can't be told apart by name, so the tool picks
+            # one deterministically instead of looping on the question.
+            if chat_agent_tools.resolve_single_block(matches) is None:
                 titles = ", ".join(
                     sorted(
                         {
@@ -879,6 +1017,8 @@ class NlpRouterChatService:
             return self._format_calendar_block(result)
         if name == "move_calendar_block":
             return self._format_move_calendar_block(result)
+        if name == "delete_calendar_block":
+            return self._format_delete_calendar_block(result)
         return str(result)
 
     def _format_tasks(self, result: dict[str, Any]) -> str:
@@ -996,6 +1136,14 @@ class NlpRouterChatService:
             end = self._short_time(block.get("end_time"))
             lines.append(f"- {title}: {start} to {end}")
         return "\n".join(lines)
+
+    def _format_delete_calendar_block(self, result: dict[str, Any]) -> str:
+        message = str(result.get("message") or "").strip()
+        proposal = result.get("proposal") if isinstance(result.get("proposal"), list) else []
+        if not proposal:
+            # No match / ambiguous — the tool's message is the question to ask.
+            return message or "I could not delete that event."
+        return message or "I removed that event from your calendar."
 
     def _short_time(self, value: Any) -> str:
         text = str(value or "").strip()

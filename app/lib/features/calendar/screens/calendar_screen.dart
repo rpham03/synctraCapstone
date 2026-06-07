@@ -21,6 +21,8 @@ import '../../../data/models/schedule_block_model.dart';
 import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/services/llm_service.dart';
+import '../../../shared/services/manual_events_storage.dart';
+import '../../../shared/services/manual_events_store.dart';
 import '../../../shared/services/synctra_chat_constants.dart';
 import '../../../shared/services/synctra_chat_service.dart';
 import '../../../shared/services/scheduling_service.dart';
@@ -55,9 +57,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
   final List<EventModel> _canvasEvents = [];
   final List<EventModel> _manualTaskEvents = [];
   late final SuggestedScheduleStore _scheduleStore;
+  late final ManualEventsStore _manualEventsStore;
   late final CanvasTasksService _canvasTasks;
   late final CourseImportService _courseImportService;
-  static const _manualEventsKey = 'synctra_manual_events_v1';
 
   final Map<String, List<EventModel>> _feedEvents = {};
   final List<Map<String, String>> _icalFeeds = [];
@@ -74,12 +76,15 @@ class _CalendarScreenState extends State<CalendarScreen> {
   void initState() {
     super.initState();
     _scheduleStore = GetIt.instance<SuggestedScheduleStore>();
+    _manualEventsStore = GetIt.instance<ManualEventsStore>();
     _canvasTasks = GetIt.instance<CanvasTasksService>();
     _courseImportService = CourseImportService();
     _canvasTasks.addListener(_reloadCanvasEvents);
     CourseImportTasksBridge.instance.addListener(_handleCourseImportsRefresh);
     ManualTasksBridge.instance.addListener(_handleManualTasksRefresh);
     _scheduleStore.addListener(_onScheduleStoreChanged);
+    // Chat can move/delete manual events; reload them when that store changes.
+    _manualEventsStore.addListener(_loadManualEvents);
     _loadSavedFeeds();
     _loadManualEvents();
     _loadManualTaskEvents();
@@ -129,6 +134,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
         .removeListener(_handleCourseImportsRefresh);
     ManualTasksBridge.instance.removeListener(_handleManualTasksRefresh);
     _scheduleStore.removeListener(_onScheduleStoreChanged);
+    _manualEventsStore.removeListener(_loadManualEvents);
     _nowTicker?.cancel();
     _timeScrollController.dispose();
     super.dispose();
@@ -163,39 +169,18 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   Future<void> _loadManualEvents() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_manualEventsKey);
-    if (raw == null || raw.isEmpty) return;
-    try {
-      final list = jsonDecode(raw) as List<dynamic>;
-      final loaded = list
-          .whereType<Map>()
-          .map((m) => EventModel.fromJson(Map<String, dynamic>.from(m)))
-          .where((e) => e.source == 'manual')
-          .toList();
-      if (!mounted) return;
-      setState(() {
-        _fixedEvents.removeWhere((e) => e.source == 'manual');
-        _fixedEvents.addAll(loaded);
-      });
-      _pushExternalBusyToStore();
-    } catch (_) {}
+    final loaded = await loadManualEvents();
+    if (!mounted) return;
+    setState(() {
+      _fixedEvents.removeWhere((e) => e.source == 'manual');
+      _fixedEvents.addAll(loaded);
+    });
+    _pushExternalBusyToStore();
   }
 
   Future<void> _persistManualEvents() async {
-    final manual = _fixedEvents.where((e) => e.source == 'manual').map((e) {
-      return {
-        'id': e.id,
-        'title': e.title,
-        'start_time': e.startTime.toIso8601String(),
-        'end_time': e.endTime.toIso8601String(),
-        'source': e.source,
-        'is_fixed': e.isFixed,
-        'description': e.description,
-      };
-    }).toList();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_manualEventsKey, jsonEncode(manual));
+    final manual = _fixedEvents.where((e) => e.source == 'manual').toList();
+    await saveManualEvents(manual);
   }
 
   Future<void> _loadSavedFeeds() async {

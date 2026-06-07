@@ -36,6 +36,7 @@ Calendar vs tasks:
 - get_assignments — live Canvas API sync (due today or later); use for homework when Tasks may be stale.
 - add_calendar_block — add a named calendar block only when the user provides title, date, start time, and end time.
 - move_calendar_block — move an existing study block to another date, preserving its time unless a new time range is provided.
+- delete_calendar_block — delete an existing study block or manual calendar event the user asks to remove or cancel.
 
 When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events with today's date.
 When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments for the same date range.
@@ -114,6 +115,14 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": ["title_query", "target_date"],
         "additionalProperties": False,
     },
+    "delete_calendar_block": {
+        "type": "object",
+        "properties": {
+            "title_query": {"type": "string"},
+        },
+        "required": ["title_query"],
+        "additionalProperties": False,
+    },
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -144,6 +153,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "move_calendar_block": (
         "Move an existing study block to target_date. Preserve its current time and "
         "duration unless start_time and end_time are provided."
+    ),
+    "delete_calendar_block": (
+        "Delete an existing study block or manual calendar event matching title_query. "
+        "Use when the user asks to delete, remove, or cancel an event."
     ),
 }
 
@@ -364,6 +377,14 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             params.get("target_date") or "",
             start_time=params.get("start_time") or "",
             end_time=params.get("end_time") or "",
+        )
+        proposal = result.get("proposal")
+        if isinstance(proposal, list):
+            append_schedule_proposals(proposal)
+        return result
+    if tool == "delete_calendar_block":
+        result = chat_agent_tools.delete_calendar_block(
+            params.get("title_query") or "event",
         )
         proposal = result.get("proposal")
         if isinstance(proposal, list):
