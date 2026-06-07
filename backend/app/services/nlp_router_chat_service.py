@@ -403,33 +403,128 @@ class NlpRouterChatService:
     def _is_delete_request(self, text: str) -> bool:
         return bool(
             re.search(
-                r"\b(?:delete|remove|cancel|get rid of|take off)\b",
+                r"\b(?:delete|remove|cancel|erase|drop|clear|get rid of|"
+                r"take off|take\b.+\boff)\b",
                 text,
                 flags=re.IGNORECASE,
             )
         )
 
-    def _extract_delete_title(self, message: str) -> str:
-        """Pull the event name out of "delete my X" / "remove the X today"."""
+    def _extract_delete_titles(self, message: str) -> list[str]:
+        """Pull one or more event names out of natural delete phrasing."""
 
-        match = re.search(
-            r"\b(?:delete|remove|cancel|get rid of|take off)\b\s+"
-            r"(?:my|the|this|that|a|an)?\s*(.+)$",
+        take_match = re.search(
+            r"\btake\s+(.+?)\s+off(?:\s+(?:my|the)\s+(?:calendar|schedule))?\b",
             message.strip(),
             flags=re.IGNORECASE,
         )
-        if not match:
-            return ""
-        title = match.group(1)
-        # Drop a trailing date/time phrase ("... today", "... from my calendar").
-        title = re.split(
-            r"\b(?:from|on|at|for|today|tomorrow|tonight|monday|tuesday|"
-            r"wednesday|thursday|friday|saturday|sunday|this week|next week)\b",
-            title,
-            maxsplit=1,
+        if take_match:
+            cleaned = take_match.group(1)
+        else:
+            match = re.search(
+                r"\b(?:delete|remove|cancel|erase|drop|clear|get rid of|take off)\b"
+                r"\s+(.+)$",
+                message.strip(),
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                return []
+            cleaned = match.group(1)
+        cleaned = re.sub(
+            r"\b(?:from|off|out of)\s+(?:my|the)?\s*(?:calendar|schedule)\b",
+            " ",
+            cleaned,
             flags=re.IGNORECASE,
-        )[0]
-        return " ".join(title.strip(" .,:;-").split())
+        )
+        cleaned = re.sub(
+            r"\b(?:today|tomorrow|tonight|this week|next week|this weekend|"
+            r"next weekend|weekend|monday|mon|tuesday|tue|wednesday|wed|"
+            r"thursday|thu|friday|fri|saturday|sat|sunday|sun|"
+            r"\d{4}-\d{2}-\d{2})\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:please\s+)?(?:all|every|each|both|my|the|this|that|a|an)\s+",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        normalized = " ".join(cleaned.strip(" .,:;!?-").split())
+        if normalized.lower() in {
+            "",
+            "event",
+            "events",
+            "calendar event",
+            "calendar events",
+            "calendar",
+            "schedule",
+            "appointment",
+            "appointments",
+            "block",
+            "blocks",
+            "calendar block",
+            "calendar blocks",
+            "everything",
+        }:
+            return []
+        titles: list[str] = []
+        for part in re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", normalized):
+            title = re.sub(
+                r"^\s*(?:all|every|each|both|my|the|this|that|a|an)\s+",
+                " ",
+                part,
+                flags=re.IGNORECASE,
+            )
+            title = " ".join(title.strip(" .,:;!?-").split())
+            if title and title.lower() not in {"event", "events", "block", "blocks"}:
+                titles.append(title[:120])
+        return list(dict.fromkeys(titles))
+
+    def _wants_delete_all(self, message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:all|every|everything|entire|each)\b",
+                message,
+                flags=re.IGNORECASE,
+            )
+            or re.search(
+                r"\bclear\s+(?:out\s+)?(?:my|the)?\s*(?:calendar|schedule)\b",
+                message,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _delete_date_range(self, message: str) -> tuple[str, str] | None:
+        lower = message.lower()
+        today = effective_today()
+        if "tomorrow" in lower:
+            day = today + timedelta(days=1)
+            return day.isoformat(), day.isoformat()
+        if "today" in lower or "tonight" in lower:
+            return today.isoformat(), today.isoformat()
+        if "next week" in lower:
+            monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
+            return monday.isoformat(), (monday + timedelta(days=4)).isoformat()
+        if "this week" in lower:
+            monday = today - timedelta(days=today.weekday())
+            return monday.isoformat(), (monday + timedelta(days=4)).isoformat()
+        if "weekend" in lower:
+            saturday = today - timedelta(days=today.weekday()) + timedelta(days=5)
+            if "next weekend" in lower:
+                saturday += timedelta(days=7)
+            return saturday.isoformat(), (saturday + timedelta(days=1)).isoformat()
+        tokens = re.findall(
+            r"\b(monday|mon|tuesday|tue|wednesday|wed|thursday|thu|"
+            r"friday|fri|saturday|sat|sunday|sun|\d{4}-\d{2}-\d{2})\b",
+            lower,
+        )
+        if tokens:
+            day = self._resolve_date_token(tokens[-1])
+            if day:
+                return day.isoformat(), day.isoformat()
+        return None
 
     def _coerce_delete_intent(
         self,
@@ -445,21 +540,28 @@ class NlpRouterChatService:
         block, run the delete instead.
         """
 
-        if name == "delete_calendar_block":
-            return name, arguments
         if not self._is_delete_request(message):
             return name, arguments
 
-        title_query = self._extract_delete_title(message) or str(
-            arguments.get("title") or arguments.get("title_query") or ""
-        ).strip()
-        # Only reroute when we can actually find the event; otherwise let the
-        # normal flow answer or ask, rather than deleting the wrong thing.
-        if not title_query:
+        title_queries = self._extract_delete_titles(message)
+        if not title_queries:
+            provided = str(
+                arguments.get("title") or arguments.get("title_query") or ""
+            ).strip()
+            if provided and provided.lower() not in {"event", "events", "calendar"}:
+                title_queries = [provided]
+        delete_all = self._wants_delete_all(message)
+        if not title_queries and not delete_all:
             return name, arguments
-        if not chat_agent_tools.matching_study_blocks(title_query):
-            return name, arguments
-        return "delete_calendar_block", {"title_query": title_query}
+        delete_args: dict[str, Any] = {
+            "title_query": title_queries[0] if title_queries else "event",
+            "title_queries": title_queries,
+            "delete_all_matches": delete_all,
+        }
+        date_range = self._delete_date_range(message)
+        if date_range:
+            delete_args["start_date"], delete_args["end_date"] = date_range
+        return "delete_calendar_block", delete_args
 
     def _coerce_move_intent(
         self,
@@ -682,6 +784,25 @@ class NlpRouterChatService:
                     )
                 )
                 return f"Which study block should I move? I found: {titles}."
+            return None
+        if name == "delete_calendar_block":
+            if not self._is_delete_request(lower):
+                return "Do you want me to remove an event from your calendar?"
+            queries = arguments.get("title_queries")
+            title_queries = queries if isinstance(queries, list) else []
+            title_query = str(arguments.get("title_query") or "").strip().lower()
+            delete_all = bool(arguments.get("delete_all_matches"))
+            if not title_queries and title_query in {
+                "",
+                "event",
+                "events",
+                "calendar",
+                "schedule",
+            } and not delete_all:
+                return (
+                    "Which event should I remove? Tell me its name, date, or say "
+                    "to remove all matching events."
+                )
             return None
         if name == "propose_schedule_change":
             if self._looks_like_calendar_block_details(lower):

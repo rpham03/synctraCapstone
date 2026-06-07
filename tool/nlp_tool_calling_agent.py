@@ -42,12 +42,14 @@ TOOL_LABEL_ORDER = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "delete_calendar_block",
     "ai_agent",
 ]
 TOOL_LABELS = set(TOOL_LABEL_ORDER)
 CLARIFICATION_ACTION = "clarification"
 ADD_CALENDAR_BLOCK_ACTION = "add_calendar_block"
 MOVE_CALENDAR_BLOCK_ACTION = "move_calendar_block"
+DELETE_CALENDAR_BLOCK_ACTION = "delete_calendar_block"
 
 
 @dataclass(frozen=True)
@@ -315,6 +317,14 @@ class NlpToolCallingAgent:
         calendar_text = self._normalize_calendar_filler_text(text)
         calendar_lower = calendar_text.lower()
         start, end, date_reason = self._date_range(lower)
+        delete_calendar_block_call = self._delete_calendar_block_call_or_clarification(
+            text=text,
+            lower=lower,
+            start=start,
+            end=end,
+        )
+        if delete_calendar_block_call is not None:
+            return [delete_calendar_block_call]
         move_calendar_block_call = self._move_calendar_block_call_or_clarification(
             text=calendar_text,
             lower=calendar_lower,
@@ -466,6 +476,8 @@ class NlpToolCallingAgent:
     def _high_precision_label(self, text: str) -> str | None:
         """Prefer explicit intent phrases over an overconfident classifier."""
 
+        if self._wants_delete_calendar_block(text):
+            return DELETE_CALENDAR_BLOCK_ACTION
         if self._explicit_schedule_request(text):
             return "propose_schedule_change"
         if self._explicit_ai_agent_request(text):
@@ -802,6 +814,183 @@ class NlpToolCallingAgent:
             confidence=0.95,
             reason="User provided a calendar block title, date, and time range.",
         )
+
+    def _delete_calendar_block_call_or_clarification(
+        self,
+        *,
+        text: str,
+        lower: str,
+        start: date,
+        end: date,
+    ) -> ToolCall | None:
+        if not self._wants_delete_calendar_block(lower):
+            return None
+
+        title_queries = self._extract_delete_title_queries(text)
+        delete_all = self._wants_delete_all(lower)
+        has_date = self._has_delete_date_text(lower)
+        if not title_queries and not delete_all:
+            question = (
+                "Which event should I remove? Tell me its name, date, or say "
+                "to remove all matching events."
+            )
+            return ToolCall(
+                name=CLARIFICATION_ACTION,
+                arguments={
+                    "message": text,
+                    "question": question,
+                    "options": [DELETE_CALENDAR_BLOCK_ACTION, "ai_agent"],
+                    "predicted_tool": DELETE_CALENDAR_BLOCK_ACTION,
+                    "slots": {},
+                    "needs_followup": True,
+                    "missing_slots": ["title"],
+                    "followup_question": question,
+                    "next_step": "Ask which calendar event should be removed.",
+                },
+                confidence=0.98,
+                reason="Delete request is missing an event name or explicit all-events scope.",
+            )
+
+        arguments: dict[str, Any] = {
+            "title_query": title_queries[0] if title_queries else "event",
+            "title_queries": title_queries,
+            "delete_all_matches": delete_all,
+        }
+        if has_date:
+            arguments["start_date"] = start.isoformat()
+            arguments["end_date"] = end.isoformat()
+        return ToolCall(
+            name=DELETE_CALENDAR_BLOCK_ACTION,
+            arguments=arguments,
+            confidence=0.98,
+            reason="User explicitly asked to remove one or more calendar events.",
+        )
+
+    def _wants_delete_calendar_block(self, text: str) -> bool:
+        has_delete_action = bool(
+            re.search(
+                r"\b(?:delete|remove|cancel|erase|drop|clear|get\s+rid\s+of|"
+                r"take\s+off|take\b.+\boff)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        deleting_non_calendar_item = bool(
+            re.search(
+                r"\b(?:task|tasks|homework|assignment|assignments|file|files|"
+                r"account|message|messages)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        return has_delete_action and not deleting_non_calendar_item
+
+    def _wants_delete_all(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:all|every|everything|entire|each)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+            or re.search(
+                r"\bclear\s+(?:out\s+)?(?:my|the)?\s*(?:calendar|schedule)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _has_delete_date_text(self, text: str) -> bool:
+        if self._has_exact_calendar_block_date_text(text):
+            return True
+        return bool(
+            re.search(
+                r"\b(?:this|next)\s+week\b|\b(?:this|next)?\s*weekend\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _extract_delete_title_queries(self, text: str) -> list[str]:
+        """Extract one or more event names from natural delete phrasing."""
+
+        take_match = re.search(
+            r"\btake\s+(.+?)\s+off(?:\s+(?:my|the)\s+(?:calendar|schedule))?\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if take_match:
+            cleaned = take_match.group(1)
+        else:
+            action_match = re.search(
+                r"\b(?:delete|remove|cancel|erase|drop|clear|get\s+rid\s+of|"
+                r"take\s+off)\b\s+(.+)$",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if not action_match:
+                return []
+            cleaned = action_match.group(1)
+
+        cleaned = re.sub(
+            r"\b(?:from|off|out\s+of)\s+(?:my|the)?\s*(?:calendar|schedule)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = self._ISO_DATE_RE.sub(" ", cleaned)
+        cleaned = self._MONTH_DAY_RE.sub(" ", cleaned)
+        cleaned = re.sub(
+            r"\b(?:today|tomorrow|tonight|this\s+week|next\s+week|"
+            r"this\s+weekend|next\s+weekend|weekend|monday|mon|tuesday|tue|"
+            r"wednesday|wed|thursday|thu|friday|fri|saturday|sat|sunday|sun)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*(?:please\s+)?(?:all|every|each|both|my|the|this|that|a|an)\s+",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\b(?:please|from\s+calendar|from\s+schedule)\b\s*$",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        normalized = " ".join(cleaned.strip(" .,:;!?-").split())
+        if normalized.lower() in {
+            "",
+            "event",
+            "events",
+            "calendar event",
+            "calendar events",
+            "calendar",
+            "schedule",
+            "appointment",
+            "appointments",
+            "block",
+            "blocks",
+            "calendar block",
+            "calendar blocks",
+            "everything",
+        }:
+            return []
+
+        parts = re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", normalized)
+        queries: list[str] = []
+        for part in parts:
+            query = re.sub(
+                r"^\s*(?:and\s+)?(?:all|every|each|both|my|the|this|that|a|an)\s+",
+                " ",
+                part,
+                flags=re.IGNORECASE,
+            )
+            query = " ".join(query.strip(" .,:;!?-").split())
+            if query and query.lower() not in {"event", "events", "block", "blocks"}:
+                queries.append(query[:120])
+        return list(dict.fromkeys(queries))
 
     def _move_calendar_block_call_or_clarification(
         self,
@@ -1525,6 +1714,12 @@ class NlpToolCallingAgent:
                 "What event name, date, start time, and end time should I use?",
                 [ADD_CALENDAR_BLOCK_ACTION, "ai_agent"],
             )
+        if predicted_label == DELETE_CALENDAR_BLOCK_ACTION:
+            return (
+                "Which event should I remove? You can name one, several, or all "
+                "events on a date.",
+                [DELETE_CALENDAR_BLOCK_ACTION, "ai_agent"],
+            )
         return (
             "Do you want me to use a Syntra tool, or should I answer generally?",
             [
@@ -1534,6 +1729,7 @@ class NlpToolCallingAgent:
                 "get_tasks",
                 "propose_schedule_change",
                 "add_calendar_block",
+                "delete_calendar_block",
                 "ai_agent",
             ],
         )
@@ -1589,6 +1785,18 @@ class NlpToolCallingAgent:
                 predicted_label=ADD_CALENDAR_BLOCK_ACTION,
                 confidence=confidence,
                 reason="Calendar block request needs more information.",
+            )
+        if label == DELETE_CALENDAR_BLOCK_ACTION:
+            return self._delete_calendar_block_call_or_clarification(
+                text=text,
+                lower=lower,
+                start=start,
+                end=end,
+            ) or self._clarification_call(
+                text,
+                predicted_label=DELETE_CALENDAR_BLOCK_ACTION,
+                confidence=confidence,
+                reason="Delete request needs an event target.",
             )
         return self._ai_agent_call(text, confidence=confidence, reason=reason)
 
@@ -1872,7 +2080,9 @@ def mock_registry() -> dict[str, ToolHandler]:
         "get_calendar_events": reply("get_calendar_events"),
         "find_free_slots": reply("find_free_slots"),
         "propose_schedule_change": reply("propose_schedule_change"),
+        "add_calendar_block": reply("add_calendar_block"),
         "move_calendar_block": reply("move_calendar_block"),
+        "delete_calendar_block": reply("delete_calendar_block"),
         "ai_agent": reply("ai_agent"),
     }
 
@@ -1899,7 +2109,9 @@ def backend_registry() -> dict[str, ToolHandler]:
         "get_calendar_events": make_handler("get_calendar_events"),
         "find_free_slots": make_handler("find_free_slots"),
         "propose_schedule_change": make_handler("propose_schedule_change"),
+        "add_calendar_block": make_handler("add_calendar_block"),
         "move_calendar_block": make_handler("move_calendar_block"),
+        "delete_calendar_block": make_handler("delete_calendar_block"),
     }
 
 
@@ -1995,13 +2207,14 @@ def confidence_test_examples() -> list[ConfidenceTestExample]:
     """Return 1000 balanced prompts for confidence testing."""
 
     target_counts = {
-        "get_assignments": 143,
-        "find_free_slots": 143,
-        "get_calendar_events": 143,
-        "get_tasks": 143,
-        "propose_schedule_change": 143,
-        "add_calendar_block": 142,
-        "ai_agent": 143,
+        "get_assignments": 125,
+        "find_free_slots": 125,
+        "get_calendar_events": 125,
+        "get_tasks": 125,
+        "propose_schedule_change": 125,
+        "add_calendar_block": 125,
+        "delete_calendar_block": 125,
+        "ai_agent": 125,
     }
     courses = [
         "calculus",
@@ -2219,6 +2432,20 @@ def confidence_test_examples() -> list[ConfidenceTestExample]:
         for day in days:
             for template in calendar_block_templates:
                 add("add_calendar_block", template.format(item=item, day=day))
+
+    delete_templates = [
+        "delete my {item} {day}",
+        "remove the {item} from my calendar {day}",
+        "cancel {item} {day}",
+        "take {item} off my calendar {day}",
+        "get rid of {item} from my schedule {day}",
+        "erase {item} {day}",
+        "drop {item} from the calendar {day}",
+    ]
+    for item in work_items:
+        for day in days:
+            for template in delete_templates:
+                add("delete_calendar_block", template.format(item=item, day=day))
 
     ai_templates = [
         "{topic}",

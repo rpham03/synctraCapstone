@@ -16,6 +16,7 @@ if str(TOOL_DIR) not in sys.path:
 from nlp_tool_calling_agent import (
     ADD_CALENDAR_BLOCK_ACTION,
     CLARIFICATION_ACTION,
+    DELETE_CALENDAR_BLOCK_ACTION,
     MOVE_CALENDAR_BLOCK_ACTION,
     NlpToolCallingAgent,
 )
@@ -61,6 +62,22 @@ def test_calendar_training_data_uses_general_natural_phrasing():
     assert any("could you put" in message for message in messages)
 
 
+def test_delete_training_data_uses_general_and_multiple_event_phrasing():
+    rows = build_structured_examples()
+    messages = [
+        row["user_message"].lower()
+        for row in rows
+        if row["tool"] == DELETE_CALENDAR_BLOCK_ACTION
+    ]
+
+    assert any(message.startswith("delete ") for message in messages)
+    assert any(message.startswith("remove ") for message in messages)
+    assert any(message.startswith("cancel ") for message in messages)
+    assert any("take " in message and " off my calendar" in message for message in messages)
+    assert any(" and " in message for message in messages)
+    assert any("every event" in message or "all study blocks" in message for message in messages)
+
+
 def test_checked_in_structured_nlu_dataset_matches_generated_1000_rows():
     examples = load_examples(TOOL_DIR / "syntra_nlu_training_data.jsonl")
 
@@ -82,8 +99,8 @@ def test_shared_dataset_split_is_700_300_and_label_balanced():
     assert len(train_indices) == 700
     assert len(test_indices) == 300
     assert set(train_indices).isdisjoint(test_indices)
-    assert set(train_counts.values()) == {100}
-    assert sorted(test_counts.values()) == [42, 43, 43, 43, 43, 43, 43]
+    assert sorted(train_counts.values()) == [87, 87, 87, 87, 88, 88, 88, 88]
+    assert sorted(test_counts.values()) == [37, 37, 37, 37, 38, 38, 38, 38]
 
 
 def test_intent_dataset_selection_is_exactly_1000_and_balanced():
@@ -191,6 +208,58 @@ def test_move_followup_title_is_used_when_multiple_blocks_exist():
 
     assert call.name == MOVE_CALENDAR_BLOCK_ACTION
     assert call.arguments["title_query"] == "CSE 369 review"
+
+
+def test_delete_event_routes_before_trained_model_for_flexible_phrasing():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 7))
+
+    prompts = {
+        "delete my bible study": "bible study",
+        "remove the dentist appointment": "dentist appointment",
+        "cancel office hours": "office hours",
+        "take project meeting off my calendar": "project meeting",
+        "get rid of gym from my schedule": "gym",
+        "erase my focus block": "focus block",
+        "drop advising meeting": "advising meeting",
+    }
+
+    for prompt, title in prompts.items():
+        call = agent.plan(prompt)[0]
+        assert call.name == DELETE_CALENDAR_BLOCK_ACTION
+        assert call.arguments["title_queries"] == [title]
+        assert call.arguments["delete_all_matches"] is False
+
+
+def test_delete_multiple_named_events_routes_as_one_call():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 7))
+
+    call = agent.plan("Cancel bible study, dentist, and gym")[0]
+
+    assert call.name == DELETE_CALENDAR_BLOCK_ACTION
+    assert call.arguments["title_queries"] == ["bible study", "dentist", "gym"]
+    assert call.arguments["delete_all_matches"] is False
+
+
+def test_delete_all_events_on_date_routes_with_date_scope():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 7))
+
+    call = agent.plan("Clear every event from my calendar tomorrow")[0]
+
+    assert call.name == DELETE_CALENDAR_BLOCK_ACTION
+    assert call.arguments["title_queries"] == []
+    assert call.arguments["delete_all_matches"] is True
+    assert call.arguments["start_date"] == "2026-06-08"
+    assert call.arguments["end_date"] == "2026-06-08"
+
+
+def test_delete_generic_event_asks_which_event():
+    agent = NlpToolCallingAgent(today=date(2026, 6, 7))
+
+    call = agent.plan("Delete an event")[0]
+
+    assert call.name == CLARIFICATION_ACTION
+    assert call.arguments["predicted_tool"] == DELETE_CALENDAR_BLOCK_ACTION
+    assert call.arguments["missing_slots"] == ["title"]
 
 
 def test_emotional_support_routes_to_ai_agent_without_trained_model():

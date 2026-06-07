@@ -566,7 +566,12 @@ def propose_schedule_change(
 MOVABLE_EVENT_SOURCES = ("study_block", "manual")
 
 
-def matching_study_blocks(title_query: object) -> list[dict]:
+def matching_study_blocks(
+    title_query: object,
+    *,
+    start_date: object = "",
+    end_date: object = "",
+) -> list[dict]:
     """Return movable calendar events matching a natural-language title query.
 
     Covers chat-created study blocks and "+"-button manual events.
@@ -578,13 +583,45 @@ def matching_study_blocks(title_query: object) -> list[dict]:
         _as_str(title_query).lower(),
     )
     query = " ".join(query.split())
-    generic = query in {"", "block", "study block", "calendar block", "study time", "event"}
+    generic = query in {
+        "",
+        "block",
+        "blocks",
+        "study block",
+        "study blocks",
+        "calendar block",
+        "calendar blocks",
+        "study time",
+        "event",
+        "events",
+    }
     blocks = [
         raw
         for raw in get_calendar_events()
         if isinstance(raw, dict)
         and _as_str(raw.get("source")).lower() in MOVABLE_EVENT_SOURCES
     ]
+    start_day: date | None = None
+    end_day: date | None = None
+    try:
+        if _as_str(start_date).strip():
+            start_day = date.fromisoformat(_as_str(start_date).strip()[:10])
+        if _as_str(end_date).strip():
+            end_day = date.fromisoformat(_as_str(end_date).strip()[:10])
+    except ValueError:
+        return []
+    if start_day or end_day:
+        filtered: list[dict] = []
+        for block in blocks:
+            block_day = _event_local_date(block)
+            if block_day is None:
+                continue
+            if start_day and block_day < start_day:
+                continue
+            if end_day and block_day > end_day:
+                continue
+            filtered.append(block)
+        blocks = filtered
     if generic:
         return blocks
     return [
@@ -704,37 +741,99 @@ def move_calendar_block(
     }
 
 
-def delete_calendar_block(title_query: object) -> dict:
-    """Return a proposal that removes one matching study block or manual event."""
+def delete_calendar_block(
+    title_query: object,
+    *,
+    title_queries: object = None,
+    start_date: object = "",
+    end_date: object = "",
+    delete_all_matches: object = False,
+) -> dict:
+    """Return proposals that remove one or more matching editable events."""
 
-    matches = matching_study_blocks(title_query)
-    if not matches:
+    raw_queries = title_queries if isinstance(title_queries, list) else []
+    queries = [
+        _as_str(value).strip()
+        for value in raw_queries
+        if _as_str(value).strip()
+    ]
+    if not queries:
+        queries = [_as_str(title_query).strip() or "event"]
+    delete_all = bool(delete_all_matches)
+
+    matches_by_query: list[list[dict]] = []
+    for query in queries:
+        matches = matching_study_blocks(
+            query,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        normalized_query = " ".join(query.lower().split())
+        if normalized_query in {"study block", "study blocks", "study time"}:
+            matches = [
+                block
+                for block in matches
+                if _as_str(block.get("source")).lower() == "study_block"
+            ]
+        matches_by_query.append(matches)
+    all_matches: list[dict] = []
+    seen_ids: set[str] = set()
+    for matches in matches_by_query:
+        for block in matches:
+            block_id = _as_str(block.get("id")).strip()
+            if block_id and block_id not in seen_ids:
+                seen_ids.add(block_id)
+                all_matches.append(block)
+
+    if not all_matches:
         return {
             "proposal": [],
             "message": (
                 "I could not find that event in your calendar to delete. "
-                "What is the exact name?"
+                "Tell me its exact name or date. Imported course and Canvas "
+                "events are read-only."
             ),
         }
-    block = resolve_single_block(matches)
-    if block is None:
-        titles = ", ".join(
-            sorted({_as_str(block.get("title")).strip() or "Event" for block in matches})
-        )
-        return {
-            "proposal": [],
-            "message": f"Which event should I delete? I found: {titles}.",
-        }
 
-    title = _as_str(block.get("title")).strip() or "Event"
+    selected: list[dict] = []
+    if delete_all:
+        selected = all_matches
+    else:
+        for query, matches in zip(queries, matches_by_query):
+            if len(matches) > 1:
+                details = ", ".join(
+                    f"{_as_str(block.get('title')).strip() or 'Event'}"
+                    + (
+                        f" on {_event_local_date(block).isoformat()}"
+                        if _event_local_date(block)
+                        else ""
+                    )
+                    for block in matches[:6]
+                )
+                return {
+                    "proposal": [],
+                    "message": (
+                        f"I found multiple matches for {query}: {details}. "
+                        "Include a date, or say to remove all matching events."
+                    ),
+                }
+            if len(matches) == 1:
+                selected.append(matches[0])
+
     proposal = [
         {
-            "task_title": title,
+            "task_title": _as_str(block.get("title")).strip() or "Event",
             "written_to_calendar": False,
             "delete_block_id": _as_str(block.get("id")).strip(),
         }
+        for block in selected
     ]
+    titles = [_as_str(block.get("title")).strip() or "Event" for block in selected]
+    if len(titles) == 1:
+        message = f"I removed {titles[0]} from your calendar."
+    else:
+        message = f"I removed {len(titles)} events from your calendar: {', '.join(titles)}."
     return {
         "proposal": proposal,
-        "message": f"I removed {title} from your calendar.",
+        "message": message,
     }

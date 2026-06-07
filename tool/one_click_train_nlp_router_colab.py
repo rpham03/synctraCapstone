@@ -53,6 +53,7 @@ LABELS = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "delete_calendar_block",
     "ai_agent",
 ]
 
@@ -75,6 +76,9 @@ DEFAULT_TEST_PROMPTS = [
     "hi",
     "plan this week",
     "make a study time at 7pm",
+    "delete my bible study",
+    "remove bible study and dentist tomorrow",
+    "clear every event tomorrow",
 ]
 
 
@@ -247,6 +251,18 @@ def manual_eval_examples() -> list[TrainingExample]:
             "give me a study block",
             "make me a focus block this evening",
         ],
+        "delete_calendar_block": [
+            "delete my bible study",
+            "remove the dentist appointment",
+            "cancel office hours tomorrow",
+            "take project meeting off my calendar",
+            "get rid of every study block this week",
+            "clear my calendar tomorrow",
+            "remove bible study and gym",
+            "erase my focus block",
+            "drop advising meeting",
+            "delete an event",
+        ],
         "ai_agent": [
             "help me write an email about missing class",
             "explain how to study for finals",
@@ -329,6 +345,7 @@ def manual_eval_examples() -> list[TrainingExample]:
         "get_tasks": 83,
         "propose_schedule_change": 95,
         "add_calendar_block": 60,
+        "delete_calendar_block": 80,
         "ai_agent": 130,
     }
     seen = {
@@ -454,6 +471,12 @@ def manual_eval_examples() -> list[TrainingExample]:
                 "add_calendar_block",
                 f"put {course} review on my calendar {day} from 4 pm to 5 pm",
             )
+            add("delete_calendar_block", f"delete my {course} study block {day}")
+            add(
+                "delete_calendar_block",
+                f"remove {course} review from my calendar {day}",
+            )
+            add("delete_calendar_block", f"cancel {course} meeting {day}")
 
     general_requests = [
         "draft a message to my professor",
@@ -516,6 +539,7 @@ LABELS = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "delete_calendar_block",
     "ai_agent",
 ]
 
@@ -776,6 +800,14 @@ def synthetic_examples() -> list[TrainingExample]:
             "plan calculus review tomorrow from 6 pm to 7 pm",
             "add a calendar block tomorrow from 2 pm to 3 pm",
         ],
+        "delete_calendar_block": [
+            "delete my bible study",
+            "remove the dentist appointment",
+            "cancel office hours tomorrow",
+            "take project meeting off my calendar",
+            "clear every event tomorrow",
+            "remove bible study and gym",
+        ],
         "ai_agent": [
             "explain how the app works",
             "help me understand this error",
@@ -885,6 +917,18 @@ def synthetic_examples() -> list[TrainingExample]:
                 TrainingExample(
                     f"put {course} review on my calendar {day} from 4 pm to 5 pm",
                     "add_calendar_block",
+                )
+            )
+            rows.append(
+                TrainingExample(
+                    f"delete my {course} study block {day}",
+                    "delete_calendar_block",
+                )
+            )
+            rows.append(
+                TrainingExample(
+                    f"remove {course} review from my calendar {day}",
+                    "delete_calendar_block",
                 )
             )
 
@@ -1028,6 +1072,14 @@ def synthetic_examples() -> list[TrainingExample]:
             "add a calendar block tomorrow from 2 pm to 3 pm",
             "add a block to my calendar friday",
         ],
+        "delete_calendar_block": [
+            "delete my tutoring block",
+            "remove advising from my calendar",
+            "cancel the project meeting",
+            "take biology review off my calendar",
+            "clear every event tomorrow",
+            "remove tutoring and advising",
+        ],
         "ai_agent": [
             "brainstorm essay topics for history",
             "give me topic ideas for my paper",
@@ -1058,6 +1110,8 @@ def normalize_label(value: object) -> str | None:
         return "get_assignments"
     if any(x in key for x in ("free", "available", "availability", "slot")):
         return "find_free_slots"
+    if any(x in key for x in ("delete_calendar", "remove_calendar", "cancel_event")):
+        return "delete_calendar_block"
     if any(x in key for x in ("create_calendar", "add_calendar", "calendar_block")):
         return "add_calendar_block"
     if any(x in key for x in ("calendar", "event", "meeting", "class", "lecture")):
@@ -1150,6 +1204,11 @@ def extract_exact_label(row: dict[str, Any]) -> str | None:
 
 def infer_syntra_label(text: str) -> str:
     lower = text.lower()
+    if re.search(
+        r"\b(?:delete|remove|cancel|erase|drop|clear|get rid of|take off)\b",
+        lower,
+    ):
+        return "delete_calendar_block"
     if any(
         phrase in lower
         for phrase in (
@@ -1179,6 +1238,12 @@ def infer_syntra_label(text: str) -> str:
 def infer_syntra_label_strict(text: str) -> str | None:
     lower = text.lower()
     words = set(re.findall(r"\b[a-z0-9]+\b", lower))
+
+    if re.search(
+        r"\b(?:delete|remove|cancel|erase|drop|clear|get rid of|take off)\b",
+        lower,
+    ):
+        return "delete_calendar_block"
 
     if any(
         phrase in lower
@@ -1567,6 +1632,10 @@ def map_tool_name_to_label(value: object) -> str | None:
         return "get_assignments"
     if any(part in key for part in ("free", "availability", "available", "open_slot", "slot")):
         return "find_free_slots"
+    if any(part in key for part in ("delete", "remove", "cancel", "erase")) and any(
+        part in key for part in ("calendar", "event", "meeting", "block", "appointment")
+    ):
+        return "delete_calendar_block"
     if any(part in key for part in ("calendar", "event", "meeting", "class", "lecture")):
         if any(part in key for part in ("create", "add", "schedule", "book", "reserve")):
             return "add_calendar_block"
@@ -1890,6 +1959,8 @@ def route_args(label: str, prompt: str, today: date | None = None) -> dict[str, 
             "estimated_minutes": int(hours * 60),
         }
     if label == "add_calendar_block":
+        return {"message": prompt, "needs_slot_extraction": True}
+    if label == "delete_calendar_block":
         return {"message": prompt, "needs_slot_extraction": True}
     return {"message": prompt}
 

@@ -36,7 +36,7 @@ Calendar vs tasks:
 - get_assignments — live Canvas API sync (due today or later); use for homework when Tasks may be stale.
 - add_calendar_block — add a named calendar block only when the user provides title, date, start time, and end time.
 - move_calendar_block — move an existing study block to another date, preserving its time unless a new time range is provided.
-- delete_calendar_block — delete an existing study block or manual calendar event the user asks to remove or cancel.
+- delete_calendar_block — delete one or more existing study blocks or manual calendar events the user asks to remove or cancel. Use date filters for duplicate names and only set delete_all_matches when the user explicitly says all/every.
 
 When the user asks what is on their calendar, today's schedule, classes, or events, call get_calendar_events with today's date.
 When they ask what is due, today's tasks, homework, or deadlines, call get_tasks and/or get_assignments for the same date range.
@@ -119,6 +119,13 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "type": "object",
         "properties": {
             "title_query": {"type": "string"},
+            "title_queries": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "start_date": {"type": "string"},
+            "end_date": {"type": "string"},
+            "delete_all_matches": {"type": "boolean"},
         },
         "required": ["title_query"],
         "additionalProperties": False,
@@ -155,8 +162,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "duration unless start_time and end_time are provided."
     ),
     "delete_calendar_block": (
-        "Delete an existing study block or manual calendar event matching title_query. "
-        "Use when the user asks to delete, remove, or cancel an event."
+        "Delete one or more existing study blocks or manual calendar events. "
+        "Use title_queries for multiple named events, optional dates to narrow "
+        "duplicates, and delete_all_matches only when the user explicitly says all."
     ),
 }
 
@@ -272,6 +280,18 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
                     out[key] = None
             else:
                 out[key] = None
+        elif key == "title_queries":
+            out[key] = [
+                coerce_text(item, default="").strip()
+                for item in val
+                if coerce_text(item, default="").strip()
+            ] if isinstance(val, list) else []
+        elif key == "delete_all_matches":
+            out[key] = (
+                val.strip().lower() in {"1", "true", "yes", "all"}
+                if isinstance(val, str)
+                else bool(val)
+            )
         else:
             out[key] = val
     return out
@@ -385,6 +405,10 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if tool == "delete_calendar_block":
         result = chat_agent_tools.delete_calendar_block(
             params.get("title_query") or "event",
+            title_queries=params.get("title_queries"),
+            start_date=params.get("start_date") or "",
+            end_date=params.get("end_date") or "",
+            delete_all_matches=params.get("delete_all_matches", False),
         )
         proposal = result.get("proposal")
         if isinstance(proposal, list):

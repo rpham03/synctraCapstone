@@ -41,6 +41,7 @@ LABELS = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "delete_calendar_block",
     "ai_agent",
 ]
 
@@ -102,6 +103,15 @@ def synthetic_examples() -> list[TrainingExample]:
             "create a calendar block for office hours friday from 1 pm to 2 pm",
             "put project meeting on my calendar monday from 4 pm to 5 pm",
             "add a calendar block tomorrow from 2 pm to 3 pm",
+        ],
+        "delete_calendar_block": [
+            "delete my bible study",
+            "remove the dentist appointment",
+            "cancel office hours tomorrow",
+            "take project meeting off my calendar",
+            "get rid of every study block this week",
+            "clear my calendar tomorrow",
+            "remove bible study and gym",
         ],
         "ai_agent": [
             "explain how the app works",
@@ -182,6 +192,8 @@ def normalize_label(value: object) -> str | None:
         return "get_assignments"
     if any(word in key for word in ("free", "available", "availability", "slot")):
         return "find_free_slots"
+    if any(word in key for word in ("delete_calendar", "remove_calendar", "cancel_event")):
+        return "delete_calendar_block"
     if any(word in key for word in ("create_calendar", "add_calendar", "calendar_block")):
         return "add_calendar_block"
     if any(word in key for word in ("calendar", "event", "meeting", "class", "lecture")):
@@ -232,6 +244,11 @@ def extract_label(row: dict[str, Any]) -> str | None:
 
 def infer_syntra_label(text: str) -> str:
     lower = text.lower()
+    if re.search(
+        r"\b(?:delete|remove|cancel|erase|drop|clear|get rid of|take off)\b",
+        lower,
+    ):
+        return "delete_calendar_block"
     if any(
         phrase in lower
         for phrase in (

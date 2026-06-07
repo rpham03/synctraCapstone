@@ -710,6 +710,217 @@ def test_nlp_router_delete_without_match_asks_instead_of_guessing(monkeypatch):
     assert proposals == []
 
 
+def test_delete_calendar_block_tool_removes_multiple_named_events():
+    from app.services.chat_agent_common import execute_tool
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+
+    async def run_delete():
+        set_calendar_events(
+            [
+                {
+                    "id": "study-bible",
+                    "title": "Bible study",
+                    "start_time": "2026-06-08T10:00:00",
+                    "end_time": "2026-06-08T11:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "manual-gym",
+                    "title": "Gym",
+                    "start_time": "2026-06-08T12:00:00",
+                    "end_time": "2026-06-08T13:00:00",
+                    "source": "manual",
+                },
+            ]
+        )
+        result = await execute_tool(
+            "delete_calendar_block",
+            {
+                "title_query": "Bible study",
+                "title_queries": ["Bible study", "Gym"],
+                "delete_all_matches": False,
+            },
+        )
+        return result, get_schedule_proposals()
+
+    try:
+        result, proposals = asyncio.run(run_delete())
+    finally:
+        clear_client_context()
+
+    assert "removed 2 events" in result["message"].lower()
+    assert {proposal["delete_block_id"] for proposal in proposals} == {
+        "study-bible",
+        "manual-gym",
+    }
+
+
+def test_delete_all_events_on_date_keeps_read_only_course_events():
+    from app.services.chat_agent_common import execute_tool
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+
+    async def run_delete():
+        set_calendar_events(
+            [
+                {
+                    "id": "study-1",
+                    "title": "Study",
+                    "start_time": "2026-06-08T10:00:00",
+                    "end_time": "2026-06-08T11:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "manual-1",
+                    "title": "Dentist",
+                    "start_time": "2026-06-08T12:00:00",
+                    "end_time": "2026-06-08T13:00:00",
+                    "source": "manual",
+                },
+                {
+                    "id": "course-1",
+                    "title": "Lecture",
+                    "start_time": "2026-06-08T14:00:00",
+                    "end_time": "2026-06-08T15:00:00",
+                    "source": "course",
+                },
+                {
+                    "id": "study-next-day",
+                    "title": "Study",
+                    "start_time": "2026-06-09T10:00:00",
+                    "end_time": "2026-06-09T11:00:00",
+                    "source": "study_block",
+                },
+            ]
+        )
+        result = await execute_tool(
+            "delete_calendar_block",
+            {
+                "title_query": "event",
+                "title_queries": [],
+                "start_date": "2026-06-08",
+                "end_date": "2026-06-08",
+                "delete_all_matches": True,
+            },
+        )
+        return result, get_schedule_proposals()
+
+    try:
+        result, proposals = asyncio.run(run_delete())
+    finally:
+        clear_client_context()
+
+    assert "removed 2 events" in result["message"].lower()
+    assert {proposal["delete_block_id"] for proposal in proposals} == {
+        "study-1",
+        "manual-1",
+    }
+
+
+def test_delete_duplicate_title_without_scope_asks_for_date():
+    from app.services.chat_agent_common import execute_tool
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+
+    async def run_delete():
+        set_calendar_events(
+            [
+                {
+                    "id": "bible-1",
+                    "title": "Bible study",
+                    "start_time": "2026-06-08T10:00:00",
+                    "end_time": "2026-06-08T11:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "bible-2",
+                    "title": "Bible study",
+                    "start_time": "2026-06-09T10:00:00",
+                    "end_time": "2026-06-09T11:00:00",
+                    "source": "study_block",
+                },
+            ]
+        )
+        result = await execute_tool(
+            "delete_calendar_block",
+            {"title_query": "Bible study"},
+        )
+        return result, get_schedule_proposals()
+
+    try:
+        result, proposals = asyncio.run(run_delete())
+    finally:
+        clear_client_context()
+
+    assert "include a date" in result["message"].lower()
+    assert proposals == []
+
+
+def test_nlp_router_misrouted_multiple_delete_still_deletes_all_named(monkeypatch):
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "cancel bible study and gym"}}]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("delete must not fall through to the AI agent")
+
+    async def run_turn():
+        set_calendar_events(
+            [
+                {
+                    "id": "bible-1",
+                    "title": "Bible study",
+                    "start_time": "2026-06-08T10:00:00",
+                    "end_time": "2026-06-08T11:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "gym-1",
+                    "title": "Gym",
+                    "start_time": "2026-06-08T12:00:00",
+                    "end_time": "2026-06-08T13:00:00",
+                    "source": "manual",
+                },
+            ]
+        )
+        reply = await service.run_turn(
+            "cancel bible study and gym",
+            user_id="delete-many-user",
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "removed 2 events" in reply.lower()
+    assert {proposal["delete_block_id"] for proposal in proposals} == {
+        "bible-1",
+        "gym-1",
+    }
+
+
 def test_nlp_router_move_with_duplicate_titles_picks_one_not_loops(monkeypatch):
     """Two blocks share a title -> move the earliest, don't ask an unanswerable Q."""
 

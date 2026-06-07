@@ -24,6 +24,7 @@ TOOLS = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "delete_calendar_block",
     "ai_agent",
 ]
 INTENTS = {
@@ -33,6 +34,7 @@ INTENTS = {
     "get_tasks": "list_tasks",
     "propose_schedule_change": "propose_study_schedule",
     "add_calendar_block": "create_calendar_event",
+    "delete_calendar_block": "delete_calendar_event",
     "ai_agent": "general_assistance",
 }
 
@@ -82,6 +84,22 @@ def _base_examples() -> list[dict[str, Any]]:
             slots={"date": "tomorrow", "start_time": "2 PM", "end_time": "3 PM"},
             missing_slots=("title",),
             followup_question="What event name should I use?",
+        ),
+        example(
+            "Delete my Bible study",
+            "delete_calendar_block",
+            slots={"title": "Bible study"},
+        ),
+        example(
+            "Remove Bible study and dentist tomorrow",
+            "delete_calendar_block",
+            slots={"title": "Bible study and dentist", "date": "tomorrow"},
+        ),
+        example(
+            "Delete an event",
+            "delete_calendar_block",
+            missing_slots=("title",),
+            followup_question="Which event should I remove?",
         ),
         example(
             "Plan today",
@@ -394,6 +412,70 @@ def _candidate_examples() -> dict[str, list[dict[str, Any]]]:
                 slots={"date": date_value, "start_time": start_time, "end_time": end_time},
                 missing_slots=("title",),
                 followup_question="What event name should I use?",
+            )
+        )
+
+    delete_templates = [
+        "Delete my {title} {date}",
+        "Remove the {title} from my calendar {date}",
+        "Cancel {title} on {date}",
+        "Take {title} off my calendar {date}",
+        "Get rid of {title} from my schedule {date}",
+        "Erase {title} {date}",
+        "Drop {title} from the calendar {date}",
+    ]
+    for title, date_value, template in product(
+        calendar_titles,
+        dates[:9],
+        delete_templates,
+    ):
+        pools["delete_calendar_block"].append(
+            example(
+                template.format(title=title, date=date_value),
+                "delete_calendar_block",
+                slots={"title": title, "date": date_value},
+            )
+        )
+    for first, second, date_value in product(
+        calendar_titles[:6],
+        calendar_titles[6:],
+        dates[:9],
+    ):
+        combined = f"{first} and {second}"
+        pools["delete_calendar_block"].append(
+            example(
+                f"Cancel both {combined} {date_value}",
+                "delete_calendar_block",
+                slots={"title": combined, "date": date_value},
+            )
+        )
+    for date_value in dates:
+        pools["delete_calendar_block"].append(
+            example(
+                f"Clear every event from my calendar {date_value}",
+                "delete_calendar_block",
+                slots={"date": date_value},
+            )
+        )
+        pools["delete_calendar_block"].append(
+            example(
+                f"Remove all study blocks {date_value}",
+                "delete_calendar_block",
+                slots={"title": "study blocks", "date": date_value},
+            )
+        )
+    for message in (
+        "Delete an event",
+        "Remove something from my calendar",
+        "Cancel a calendar block",
+        "Take an appointment off my schedule",
+    ):
+        pools["delete_calendar_block"].append(
+            example(
+                message,
+                "delete_calendar_block",
+                missing_slots=("title",),
+                followup_question="Which event should I remove?",
             )
         )
 
