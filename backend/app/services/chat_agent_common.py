@@ -5,7 +5,12 @@ import re
 from typing import Any
 
 from app.services import chat_agent_tools
-from app.services.chat_client_context import append_schedule_proposals
+from app.services import event_classification, productivity_preferences
+from app.services.chat_client_context import (
+    append_schedule_proposals,
+    get_calendar_events,
+    get_user_id,
+)
 
 
 def system_instructions() -> str:
@@ -130,6 +135,51 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": ["title_query"],
         "additionalProperties": False,
     },
+    "set_productivity_preferences": {
+        "type": "object",
+        "properties": {
+            "periods": {"type": "array", "items": {"type": "string"}},
+            "text": {"type": "string"},
+            "start_time": {"type": "string"},
+            "end_time": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "get_productivity_preferences": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "remove_productivity_preferences": {
+        "type": "object",
+        "properties": {
+            "periods": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    },
+    "classify_all_calendar_events": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "classify_calendar_item": {
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string"},
+            "title": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "set_event_flexibility_override": {
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string"},
+            "title": {"type": "string"},
+            "flexibility": {"type": "string"},
+        },
+        "required": ["flexibility"],
+        "additionalProperties": False,
+    },
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -165,6 +215,25 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Delete one or more existing study blocks or manual calendar events. "
         "Use title_queries for multiple named events, optional dates to narrow "
         "duplicates, and delete_all_matches only when the user explicitly says all."
+    ),
+    "set_productivity_preferences": (
+        "Save the user's productive periods (morning/afternoon/evening/night), "
+        "optionally with explicit start/end times. Then ask if they want a schedule."
+    ),
+    "get_productivity_preferences": "Return the user's saved productive periods.",
+    "remove_productivity_preferences": (
+        "Remove specific productive periods, or all when none are given."
+    ),
+    "classify_all_calendar_events": (
+        "Classify every calendar event as fixed or flexible (with type and "
+        "confidence), using safety rules and cached results."
+    ),
+    "classify_calendar_item": (
+        "Classify a single calendar event (by event_id or title) as fixed/flexible."
+    ),
+    "set_event_flexibility_override": (
+        "Persist the user's explicit fixed/flexible choice for an event; this "
+        "override always wins over rules and AI."
     ),
 }
 
@@ -415,4 +484,90 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         if isinstance(proposal, list):
             append_schedule_proposals(proposal)
         return result
+    if tool == "set_productivity_preferences":
+        periods = _periods_arg(params)
+        if not periods:
+            return {
+                "error": "Which time of day are you most productive — morning, "
+                "afternoon, evening, or night?",
+                "preferences": productivity_preferences.get_preferences(get_user_id()),
+            }
+        prefs = productivity_preferences.set_preferences(
+            get_user_id(),
+            periods,
+            start=params.get("start_time") or "",
+            end=params.get("end_time") or "",
+        )
+        return {"preferences": prefs, "saved": periods}
+    if tool == "get_productivity_preferences":
+        return {"preferences": productivity_preferences.get_preferences(get_user_id())}
+    if tool == "remove_productivity_preferences":
+        remaining = productivity_preferences.remove_preferences(
+            get_user_id(), _periods_arg(params) or None
+        )
+        return {"preferences": remaining}
+    if tool == "classify_all_calendar_events":
+        return event_classification.classify_all_calendar_events(
+            get_calendar_events(), user_id=get_user_id()
+        )
+    if tool == "classify_calendar_item":
+        event = _resolve_event(params.get("event_id"), params.get("title"))
+        if event is None:
+            return {"error": "I couldn't find that event to classify."}
+        user_id = get_user_id()
+        override = event_classification.get_override(
+            user_id, str(event.get("id") or "")
+        )
+        result = event_classification.classify_deterministic(event)
+        if override:
+            result = {**result, "fixed_or_flexible": override, "classified_by": "override"}
+        return {"event": result}
+    if tool == "set_event_flexibility_override":
+        event = _resolve_event(params.get("event_id"), params.get("title"))
+        event_id = str((event or {}).get("id") or params.get("event_id") or "").strip()
+        flexibility = str(params.get("flexibility") or "").strip().lower()
+        if not event_id or flexibility not in {"fixed", "flexible"}:
+            return {"error": "Tell me the event and whether it is fixed or flexible."}
+        event_classification.set_override(get_user_id(), event_id, flexibility)
+        return {
+            "event_id": event_id,
+            "flexibility": flexibility,
+            "title": str((event or {}).get("title") or ""),
+        }
     return {"error": f"Unknown tool: {tool}"}
+
+
+def _periods_arg(params: dict[str, Any]) -> list[str]:
+    """Normalize a periods list and/or free text into canonical periods."""
+
+    raw = params.get("periods")
+    periods: list[str] = []
+    if isinstance(raw, list):
+        periods = [
+            str(p).strip().lower()
+            for p in raw
+            if str(p).strip().lower() in productivity_preferences.DEFAULT_RANGES
+        ]
+    if not periods:
+        periods = productivity_preferences.detect_periods(str(params.get("text") or ""))
+    # De-dup, preserve order.
+    seen: set[str] = set()
+    return [p for p in periods if not (p in seen or seen.add(p))]
+
+
+def _resolve_event(event_id: object, title: object) -> dict[str, Any] | None:
+    """Find a calendar event by id, else by case-insensitive title match."""
+
+    events = get_calendar_events()
+    wanted_id = str(event_id or "").strip()
+    if wanted_id:
+        for event in events:
+            if str(event.get("id") or "").strip() == wanted_id:
+                return event
+    query = str(title or "").strip().lower()
+    if query:
+        for event in events:
+            name = str(event.get("title") or "").strip().lower()
+            if name and (query == name or query in name or name in query):
+                return event
+    return None

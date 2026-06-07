@@ -23,6 +23,17 @@ _timezone_name: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _schedule_proposals: contextvars.ContextVar[list[dict[str, Any]] | None] = (
     contextvars.ContextVar("chat_schedule_proposals", default=None)
 )
+_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "chat_user_id", default=None
+)
+
+
+def set_user_id(value: str | None) -> None:
+    _user_id.set((value or "").strip() or None)
+
+
+def get_user_id() -> str:
+    return _user_id.get() or "app-user"
 
 
 def set_calendar_events(events: list[dict[str, Any]] | None) -> None:
@@ -131,3 +142,4 @@ def clear_client_context() -> None:
     _timezone_offset.set(None)
     _timezone_name.set(None)
     _schedule_proposals.set(None)
+    _user_id.set(None)

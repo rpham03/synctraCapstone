@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from app.core.config.settings import settings
-from app.services import chat_agent_tools
+from app.services import chat_agent_tools, productivity_preferences
 from app.services.chat_agent_common import execute_tool, sanitize_chat_reply
 from app.services.chat_client_context import effective_today
 
@@ -23,6 +23,12 @@ LOCAL_TOOL_NAMES = {
     "add_calendar_block",
     "move_calendar_block",
     "delete_calendar_block",
+    "set_productivity_preferences",
+    "get_productivity_preferences",
+    "remove_productivity_preferences",
+    "classify_all_calendar_events",
+    "classify_calendar_item",
+    "set_event_flexibility_override",
 }
 TUNNEL_REQUEST_HEADERS = {
     "Accept": "application/json",
@@ -128,6 +134,14 @@ class NlpRouterChatService:
                 pending,
                 user_id=user_id,
             )
+
+        # Productivity preferences + classification are backend-only intents the
+        # trained router doesn't know — handle them deterministically first.
+        preference_reply = await self._maybe_handle_preferences(
+            user_message, pending, user_id=user_id
+        )
+        if preference_reply is not None:
+            return preference_reply
 
         if pending and normalized_reply in _AFFIRMATIVE_REPLIES:
             pending_call = pending.get("pending_call")
@@ -809,6 +823,251 @@ class NlpRouterChatService:
             if day:
                 return day.isoformat(), day.isoformat()
         return None
+
+    # ---- productivity preferences + classification (backend-only intents) ----
+
+    _PRODUCTIVE_CUE = re.compile(
+        r"\b(?:productive|productivity|work[s]? best|focus(?:es)? best|"
+        r"most productive|preferred (?:productive )?(?:time|period|hours)|"
+        r"productivity preference)\b",
+        re.IGNORECASE,
+    )
+
+    async def _maybe_handle_preferences(
+        self,
+        message: str,
+        pending: dict[str, Any] | None,
+        *,
+        user_id: str | None,
+    ) -> str | None:
+        lower = message.strip().lower()
+        norm = self._normalized_reply(message)
+
+        # Follow-up to "want me to suggest a schedule?" after saving a preference.
+        if pending and pending.get("awaiting_preference_suggest"):
+            if norm in _AFFIRMATIVE_REPLIES:
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
+                result = await execute_tool("classify_all_calendar_events", {})
+                return sanitize_chat_reply(
+                    self._format_preference_suggestion(result, pending)
+                )
+            if norm in _CANCEL_REPLIES:
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
+                return "Okay — your preference is saved. Just ask whenever you want a schedule."
+
+        # Follow-up to "which period?" — the user names a period on its own.
+        if pending and pending.get("predicted_tool") == "set_productivity_preferences":
+            periods = productivity_preferences.detect_periods(lower)
+            if periods:
+                result = await execute_tool(
+                    "set_productivity_preferences", {"periods": periods}
+                )
+                if user_id:
+                    _pending_nlu_context[user_id] = {
+                        "message": message,
+                        "predicted_tool": "suggest_preference_schedule",
+                        "awaiting_preference_suggest": True,
+                        "periods": periods,
+                    }
+                return sanitize_chat_reply(
+                    self._format_set_preferences(result, periods)
+                )
+
+        has_cue = bool(self._PRODUCTIVE_CUE.search(lower)) or "preference" in lower
+
+        # Remove preferences.
+        if has_cue and re.search(r"\b(?:remove|clear|delete|forget|reset|drop)\b", lower):
+            periods = productivity_preferences.detect_periods(lower)
+            result = await execute_tool(
+                "remove_productivity_preferences", {"periods": periods}
+            )
+            return sanitize_chat_reply(self._format_remove_preferences(result, periods))
+
+        # Look up preferences.
+        if has_cue and re.search(
+            r"\b(?:what|what's|whats|show|list|tell me|when am i|do i have)\b", lower
+        ):
+            result = await execute_tool("get_productivity_preferences", {})
+            return sanitize_chat_reply(self._format_get_preferences(result))
+
+        # Save / set a preference.
+        if has_cue:
+            periods = productivity_preferences.detect_periods(lower)
+            if not periods:
+                if user_id:
+                    _pending_nlu_context[user_id] = {
+                        "message": message,
+                        "predicted_tool": "set_productivity_preferences",
+                        "missing_slots": ["period"],
+                        "question": "Which time of day are you most productive?",
+                    }
+                return (
+                    "Which time of day are you most productive — morning, "
+                    "afternoon, evening, or night?"
+                )
+            result = await execute_tool(
+                "set_productivity_preferences", {"periods": periods}
+            )
+            if user_id:
+                _pending_nlu_context[user_id] = {
+                    "message": message,
+                    "predicted_tool": "suggest_preference_schedule",
+                    "awaiting_preference_suggest": True,
+                    "periods": periods,
+                }
+            return sanitize_chat_reply(self._format_set_preferences(result, periods))
+
+        # Mark an event fixed/flexible (explicit override).
+        override = re.search(
+            r"\b(?:mark|set|treat|make)\b\s+(?:my\s+|the\s+|this\s+)?(.+?)\s+"
+            r"(?:as\s+)?(fixed|flexible)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if override:
+            title = " ".join(override.group(1).strip(" .,:;-").split())
+            result = await execute_tool(
+                "set_event_flexibility_override",
+                {"title": title, "flexibility": override.group(2).lower()},
+            )
+            return sanitize_chat_reply(self._format_override(result))
+
+        # Classify the whole calendar.
+        if (
+            re.search(r"\bclassif", lower)
+            and re.search(r"\b(?:all|calendar|events?|everything|schedule)\b", lower)
+        ) or re.search(r"\b(?:what|which)\b.*\b(?:fixed|flexible)\b", lower):
+            result = await execute_tool("classify_all_calendar_events", {})
+            return sanitize_chat_reply(self._format_classify_all(result))
+
+        # Classify a single event ("is my X fixed or flexible?", "classify X").
+        one = re.search(
+            r"\bis\s+(?:my\s+|the\s+)?(.+?)\s+(?:fixed|flexible)\b",
+            message,
+            flags=re.IGNORECASE,
+        ) or re.search(r"\bclassify\s+(?:my\s+|the\s+)?(.+)$", message, flags=re.IGNORECASE)
+        if one:
+            title = " ".join(one.group(1).strip(" .,:;-?").split())
+            if title:
+                result = await execute_tool("classify_calendar_item", {"title": title})
+                return sanitize_chat_reply(self._format_classify_one(result))
+
+        return None
+
+    def _format_period(self, pref: dict[str, str]) -> str:
+        return (
+            f"{pref['period']} "
+            f"({self._short_clock(pref['start'])}–{self._short_clock(pref['end'])})"
+        )
+
+    def _short_clock(self, hhmm: str) -> str:
+        try:
+            hour, minute = (int(x) for x in str(hhmm).split(":"))
+        except (ValueError, TypeError):
+            return str(hhmm)
+        suffix = "AM" if hour < 12 else "PM"
+        h12 = hour % 12 or 12
+        return f"{h12}:{minute:02d} {suffix}" if minute else f"{h12} {suffix}"
+
+    def _join_periods(self, periods: list[str]) -> str:
+        if len(periods) <= 1:
+            return periods[0] if periods else "that time"
+        return ", ".join(periods[:-1]) + f" and {periods[-1]}"
+
+    def _format_set_preferences(self, result: dict[str, Any], periods: list[str]) -> str:
+        if result.get("error"):
+            return str(result["error"])
+        label = self._join_periods(periods)
+        return (
+            f"I saved {label} as your preferred productive "
+            f"{'periods' if len(periods) > 1 else 'period'}. Would you like me to "
+            "suggest a schedule for your flexible tasks and events based on this "
+            "preference?"
+        )
+
+    def _format_get_preferences(self, result: dict[str, Any]) -> str:
+        prefs = result.get("preferences") or []
+        if not prefs:
+            return "You haven't set any productivity preferences yet."
+        lines = ["You're most productive:"]
+        for pref in prefs:
+            lines.append(f"- {self._format_period(pref)}")
+        return "\n".join(lines)
+
+    def _format_remove_preferences(
+        self, result: dict[str, Any], periods: list[str]
+    ) -> str:
+        if periods:
+            return f"Removed your {self._join_periods(periods)} preference."
+        return "Cleared your productivity preferences."
+
+    def _format_override(self, result: dict[str, Any]) -> str:
+        if result.get("error"):
+            return str(result["error"])
+        title = result.get("title") or "that event"
+        return f"Got it — I'll treat {title} as {result.get('flexibility')}."
+
+    def _format_classify_all(self, result: dict[str, Any]) -> str:
+        counts = result.get("counts") or {}
+        if not result.get("events"):
+            return "There's nothing on your calendar to classify yet."
+        lines = [
+            f"I classified {len(result['events'])} events: "
+            f"{counts.get('fixed', 0)} fixed, {counts.get('flexible', 0)} flexible"
+            + (f", {counts.get('uncertain', 0)} uncertain" if counts.get("uncertain") else "")
+            + "."
+        ]
+        flexible = [
+            e for e in result["events"] if e.get("fixed_or_flexible") == "flexible"
+        ]
+        for event in flexible[:5]:
+            lines.append(f"- {event.get('event_name')} (flexible)")
+        uncertain = [
+            e for e in result["events"] if e.get("fixed_or_flexible") == "uncertain"
+        ]
+        if uncertain:
+            names = ", ".join(e.get("event_name", "?") for e in uncertain[:3])
+            lines.append(f"I'm unsure about: {names}. Are those fixed or flexible?")
+        return "\n".join(lines)
+
+    def _format_classify_one(self, result: dict[str, Any]) -> str:
+        if result.get("error"):
+            return str(result["error"])
+        event = result.get("event") or {}
+        return (
+            f"{event.get('event_name', 'That event')} is "
+            f"{event.get('fixed_or_flexible')} ({event.get('event_type')}) — "
+            f"{event.get('reason')}"
+        )
+
+    def _format_preference_suggestion(
+        self, result: dict[str, Any], pending: dict[str, Any]
+    ) -> str:
+        periods = pending.get("periods") or []
+        label = self._join_periods(periods) if periods else "your preferred time"
+        flexible = [
+            e
+            for e in (result.get("events") or [])
+            if e.get("fixed_or_flexible") == "flexible"
+        ]
+        if not flexible:
+            return (
+                "I classified your calendar but didn't find any flexible tasks or "
+                "events to schedule. Add a study block or task and I'll place it near "
+                f"{label}."
+            )
+        lines = [
+            f"Here are the flexible items I can schedule near {label}:"
+        ]
+        for event in flexible[:8]:
+            lines.append(f"- {event.get('event_name')}")
+        lines.append(
+            "Want me to propose specific times near your preferred period and "
+            "show them before changing anything?"
+        )
+        return "\n".join(lines)
 
     def _coerce_delete_intent(
         self,

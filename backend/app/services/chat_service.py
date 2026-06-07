@@ -16,6 +16,7 @@ from app.services.chat_client_context import (
     set_tasks,
     set_timezone_name,
     set_timezone_offset_minutes,
+    set_user_id,
 )
 from app.services.ollama_agent_service import OllamaAgentService
 from app.services.openai_agent_service import OpenAIAgentService
@@ -77,6 +78,7 @@ class ChatService:
         set_client_today(client_today)
         set_timezone_offset_minutes(timezone_offset_minutes)
         set_timezone_name(timezone_name)
+        set_user_id(user_id)
         try:
             reply, proposals = await self._process_message_inner(text, user_id)
             append_conversation_turn(
