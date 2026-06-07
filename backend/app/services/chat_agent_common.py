@@ -180,6 +180,16 @@ TOOL_PARAMETERS: dict[str, dict[str, Any]] = {
         "required": ["flexibility"],
         "additionalProperties": False,
     },
+    "suggest_preference_schedule": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "apply_preference_schedule": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
 }
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -234,6 +244,13 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "set_event_flexibility_override": (
         "Persist the user's explicit fixed/flexible choice for an event; this "
         "override always wins over rules and AI."
+    ),
+    "suggest_preference_schedule": (
+        "Preview blocks that place flexible work near the user's preferred "
+        "periods without moving fixed events. Preview only — not applied."
+    ),
+    "apply_preference_schedule": (
+        "Apply the preference-based schedule after the user confirms."
     ),
 }
 
@@ -534,6 +551,18 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             "flexibility": flexibility,
             "title": str((event or {}).get("title") or ""),
         }
+    if tool == "suggest_preference_schedule":
+        from app.services import preference_scheduler
+
+        return preference_scheduler.suggest_preference_schedule(user_id=get_user_id())
+    if tool == "apply_preference_schedule":
+        from app.services import preference_scheduler
+
+        result = preference_scheduler.suggest_preference_schedule(user_id=get_user_id())
+        proposal = result.get("proposals")
+        if isinstance(proposal, list):
+            append_schedule_proposals(proposal)
+        return result
     return {"error": f"Unknown tool: {tool}"}
 
 

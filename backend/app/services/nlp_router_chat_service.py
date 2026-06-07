@@ -29,6 +29,8 @@ LOCAL_TOOL_NAMES = {
     "classify_all_calendar_events",
     "classify_calendar_item",
     "set_event_flexibility_override",
+    "suggest_preference_schedule",
+    "apply_preference_schedule",
 }
 TUNNEL_REQUEST_HEADERS = {
     "Accept": "application/json",
@@ -843,15 +845,40 @@ class NlpRouterChatService:
         lower = message.strip().lower()
         norm = self._normalized_reply(message)
 
+        # Follow-up to "apply these suggested times?" — write only on confirm.
+        if pending and pending.get("awaiting_preference_apply"):
+            if norm in _AFFIRMATIVE_REPLIES:
+                proposals = pending.get("preference_proposals") or []
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
+                if proposals:
+                    from app.services.chat_client_context import append_schedule_proposals
+
+                    append_schedule_proposals(proposals)
+                    return f"Done — I applied {len(proposals)} block(s) to your calendar."
+                return "There was nothing to apply."
+            if norm in _CANCEL_REPLIES:
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
+                return "Okay, I didn't change your calendar."
+
         # Follow-up to "want me to suggest a schedule?" after saving a preference.
         if pending and pending.get("awaiting_preference_suggest"):
             if norm in _AFFIRMATIVE_REPLIES:
-                if user_id:
+                from app.services import preference_scheduler
+
+                result = preference_scheduler.suggest_preference_schedule(user_id=user_id)
+                proposals = result.get("proposals") or []
+                if user_id and proposals:
+                    _pending_nlu_context[user_id] = {
+                        "message": message,
+                        "predicted_tool": "apply_preference_schedule",
+                        "awaiting_preference_apply": True,
+                        "preference_proposals": proposals,
+                    }
+                elif user_id:
                     _pending_nlu_context.pop(user_id, None)
-                result = await execute_tool("classify_all_calendar_events", {})
-                return sanitize_chat_reply(
-                    self._format_preference_suggestion(result, pending)
-                )
+                return sanitize_chat_reply(self._format_schedule_suggestion(result))
             if norm in _CANCEL_REPLIES:
                 if user_id:
                     _pending_nlu_context.pop(user_id, None)
@@ -1041,6 +1068,20 @@ class NlpRouterChatService:
             f"{event.get('fixed_or_flexible')} ({event.get('event_type')}) — "
             f"{event.get('reason')}"
         )
+
+    def _format_schedule_suggestion(self, result: dict[str, Any]) -> str:
+        message = str(result.get("message") or "").strip()
+        proposals = result.get("proposals") or []
+        if not proposals:
+            return message or "I couldn't find any flexible work to schedule."
+        lines = [message or "Here's a suggested schedule:"]
+        for block in proposals[:12]:
+            title = block.get("task_title") or "Block"
+            start = self._short_time(block.get("start_time"))
+            end = self._short_time(block.get("end_time"))
+            lines.append(f"- {title}: {start} to {end}")
+        lines.append("Apply these to your calendar? (yes/no)")
+        return "\n".join(lines)
 
     def _format_preference_suggestion(
         self, result: dict[str, Any], pending: dict[str, Any]
