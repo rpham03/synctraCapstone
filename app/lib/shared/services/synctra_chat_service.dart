@@ -126,11 +126,14 @@ class SynctraChatService {
         final start = DateTime.parse(startRaw).toLocal();
         final end = DateTime.parse(endRaw).toLocal();
         final replaceId = p['replace_block_id']?.toString();
-        if (replaceId != null &&
-            replaceId.isNotEmpty &&
-            _store.blocks.any((block) => block.id == replaceId)) {
-          _store.updateBlockTimes(id: replaceId, start: start, end: end);
-          applied++;
+        // A proposal carrying replace_block_id is a MOVE: relocate the existing
+        // block in place. Never fall through to adding a new one, or the move
+        // would duplicate the event instead of moving it.
+        if (replaceId != null && replaceId.isNotEmpty) {
+          if (_store.blocks.any((block) => block.id == replaceId)) {
+            _store.updateBlockTimes(id: replaceId, start: start, end: end);
+            applied++;
+          }
           continue;
         }
         blocks.add(

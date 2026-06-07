@@ -915,7 +915,12 @@ class NlpToolCallingAgent:
         if not title:
             return None
         if time_range is None:
-            return self._calendar_time_period_clarification(text, slots)
+            # Only ask AM/PM when the user actually gave clock numbers that are
+            # ambiguous. With no start/end times at all, asking for a period
+            # loops forever — the answer can never add the missing numbers.
+            if slots.get("start_time") and slots.get("end_time"):
+                return self._calendar_time_period_clarification(text, slots)
+            return None
 
         start_time, end_time = time_range
         resolved_date = self._date_from_slot(date_text) if date_text else date_value
@@ -1323,6 +1328,12 @@ class NlpToolCallingAgent:
             return "am"
         if re.search(r"\b(?:afternoon|evening|tonight|after noon)\b", lower):
             return "pm"
+        # A bare AM/PM at the very end is the answer to "AM or PM?" (e.g. the
+        # times "10:30 to 11:30" followed by "pm"). Anchor to the end so it
+        # never picks up "am" inside phrases like "i am free".
+        tail = re.search(r"\b(a\.?m\.?|p\.?m\.?)\s*$", lower)
+        if tail:
+            return "am" if tail.group(1).replace(".", "").startswith("a") else "pm"
         return None
 
     def _parse_time_token(self, raw: str, *, default_ampm: str | None = None) -> Any | None:

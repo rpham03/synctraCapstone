@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -165,14 +165,30 @@ class NlpRouterChatService:
                 args = raw_call.get("arguments") if isinstance(raw_call, dict) else {}
                 arguments = args if isinstance(args, dict) else {}
 
+                name, arguments = self._coerce_move_intent(
+                    name, arguments, planning_message
+                )
+
                 if name == CLARIFICATION_ACTION:
                     question = str(arguments.get("question") or "").strip()
+                    new_missing = list(arguments.get("missing_slots") or [])
+                    # Loop guard: the user just answered a clarification and the
+                    # router wants to ask the exact same thing again. Re-asking
+                    # spins forever (e.g. asking AM/PM when no time was given),
+                    # so break out instead of repeating the prompt.
+                    if pending and self._is_repeat_clarification(
+                        pending, question, new_missing
+                    ):
+                        if user_id:
+                            _pending_nlu_context.pop(user_id, None)
+                        return self._loop_break_message(pending)
                     if user_id:
                         _pending_nlu_context[user_id] = {
                             "message": planning_message,
                             "slots": dict(arguments.get("slots") or {}),
-                            "missing_slots": list(arguments.get("missing_slots") or []),
+                            "missing_slots": new_missing,
                             "predicted_tool": str(arguments.get("predicted_tool") or ""),
+                            "question": question,
                         }
                     return question or "Can you clarify what you want me to do?"
 
@@ -252,6 +268,34 @@ class NlpRouterChatService:
                 return f"{original} {match.group(0)}".strip()
         return f"{original} {reply}".strip()
 
+    def _is_repeat_clarification(
+        self,
+        pending: dict[str, Any],
+        question: str,
+        missing_slots: list[str],
+    ) -> bool:
+        """True when we are about to re-ask the clarification just answered."""
+
+        prev_question = self._normalized_reply(str(pending.get("question") or ""))
+        new_question = self._normalized_reply(question)
+        if prev_question and new_question and prev_question == new_question:
+            return True
+        prev_missing = set(pending.get("missing_slots") or [])
+        return bool(prev_missing) and prev_missing == set(missing_slots or [])
+
+    def _loop_break_message(self, pending: dict[str, Any]) -> str:
+        if "time_period" in set(pending.get("missing_slots") or []):
+            return (
+                "I still couldn't work out the times. Send the whole event in "
+                "one message with AM or PM — for example: "
+                '"add bible study Sunday 9 pm to 10 pm".'
+            )
+        return (
+            "Let's start over. Tell me what you need in one message, including "
+            "the event name, date, and time range — for example: "
+            '"add bible study Sunday 9 pm to 10 pm".'
+        )
+
     def _explicit_request_tool(self, message: str) -> str | None:
         lower = message.strip().lower()
         if re.search(r"\b(?:move|reschedule|shift)\b", lower):
@@ -296,6 +340,120 @@ class NlpRouterChatService:
         ):
             return "ai_agent"
         return None
+
+    def _is_move_request(self, text: str) -> bool:
+        return bool(
+            re.search(r"\b(?:move|reschedule|shift)\b", text, flags=re.IGNORECASE)
+        )
+
+    def _coerce_move_intent(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reroute add/schedule calls to a move when the user clearly says 'move'.
+
+        The trained router sometimes predicts add_calendar_block for phrasing
+        like "move my bible study to Sunday 9pm to 10pm", which would duplicate
+        the event instead of relocating it. When the message is a move request
+        and names an existing preview block, rebuild the call as
+        move_calendar_block so the original block is replaced, not duplicated.
+        """
+
+        if name not in {"add_calendar_block", "propose_schedule_change"}:
+            return name, arguments
+        if not self._is_move_request(message):
+            return name, arguments
+
+        title_query = str(
+            arguments.get("title")
+            or arguments.get("task_name")
+            or arguments.get("title_query")
+            or ""
+        ).strip()
+        # Only reroute when we can actually find the block the user means;
+        # otherwise let the original path ask for clarification.
+        if not chat_agent_tools.matching_study_blocks(title_query or "study block"):
+            return name, arguments
+
+        start_dt = self._parse_naive_datetime(arguments.get("start_time"))
+        end_dt = self._parse_naive_datetime(arguments.get("end_time"))
+        # The router fills start/end using the *source* date for phrasing like
+        # "move X tomorrow to today" (it grabs the first date it sees). Trust the
+        # user's own words for the target day and reuse only the time-of-day.
+        target_day = self._move_target_date(message) or (
+            start_dt.date() if start_dt else None
+        )
+
+        moved_args: dict[str, Any] = {
+            "title_query": title_query or "study block",
+            "target_date": target_day.isoformat() if target_day else "",
+        }
+        # Preserve an explicit new time range on the target day; otherwise the
+        # move keeps the block's existing time.
+        if start_dt and end_dt and target_day:
+            moved_args["start_time"] = datetime.combine(
+                target_day, start_dt.time()
+            ).isoformat()
+            moved_args["end_time"] = datetime.combine(
+                target_day, end_dt.time()
+            ).isoformat()
+        return "move_calendar_block", moved_args
+
+    _WEEKDAY_TOKENS = {
+        "monday": 0, "mon": 0,
+        "tuesday": 1, "tues": 1, "tue": 1,
+        "wednesday": 2, "wed": 2,
+        "thursday": 3, "thurs": 3, "thur": 3, "thu": 3,
+        "friday": 4, "fri": 4,
+        "saturday": 5, "sat": 5,
+        "sunday": 6, "sun": 6,
+    }
+
+    def _parse_naive_datetime(self, value: object) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(
+                tzinfo=None
+            )
+        except ValueError:
+            return None
+
+    def _move_target_date(self, message: str) -> date | None:
+        """Resolve the day the user wants to move an event ONTO.
+
+        For "move X <source> to <target> at <time>" the target is the last
+        day token before the time range, so take the last date token in the
+        message (times like "8pm" are never date tokens).
+        """
+
+        tokens = re.findall(
+            r"\b(today|tomorrow|monday|mon|tuesday|tues|tue|wednesday|wed|"
+            r"thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun|"
+            r"\d{4}-\d{2}-\d{2})\b",
+            message.lower(),
+        )
+        if not tokens:
+            return None
+        return self._resolve_date_token(tokens[-1])
+
+    def _resolve_date_token(self, token: str) -> date | None:
+        token = token.strip().lower()
+        today = effective_today()
+        if token == "today":
+            return today
+        if token == "tomorrow":
+            return today + timedelta(days=1)
+        if token in self._WEEKDAY_TOKENS:
+            delta = (self._WEEKDAY_TOKENS[token] - today.weekday()) % 7
+            return today + timedelta(days=delta)
+        try:
+            return date.fromisoformat(token[:10])
+        except ValueError:
+            return None
 
     def _safe_confirmation_call(
         self,
@@ -348,6 +506,11 @@ class NlpRouterChatService:
 
         lower = user_message.lower()
         if name == "add_calendar_block":
+            if self._is_move_request(lower):
+                return (
+                    "I could not find that event in your calendar preview to move. "
+                    "What is the exact name of the block you want to move?"
+                )
             if not (
                 self._looks_like_calendar_block_request(lower)
                 or self._looks_like_calendar_block_details(lower)

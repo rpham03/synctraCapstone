@@ -304,6 +304,38 @@ def test_evening_resolves_ambiguous_calendar_times_to_pm():
     }
 
 
+def test_bare_pm_reply_resolves_ambiguous_calendar_times():
+    """Answering an AM/PM clarification with a bare 'pm' must resolve, not loop."""
+
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    # Mirrors the backend merge: the original ambiguous request + the user's
+    # bare period answer appended at the end (not adjacent to the time).
+    call = agent.plan(
+        "bible study from 10:30 to 11:30 tomorrow pm",
+        clarification_pending=True,
+    )[0]
+
+    assert call.name == ADD_CALENDAR_BLOCK_ACTION
+    assert call.arguments["start_time"] == "2026-06-07T22:30:00"
+    assert call.arguments["end_time"] == "2026-06-07T23:30:00"
+
+
+def test_calendar_details_without_times_does_not_ask_am_pm():
+    """No clock numbers -> never ask AM/PM (that loop is unanswerable)."""
+
+    agent = NlpToolCallingAgent(today=date(2026, 6, 6))
+
+    calls = agent.plan(
+        "bible study tomorrow please",
+        clarification_pending=True,
+    )
+    # Must not return an unbreakable time_period clarification.
+    for call in calls:
+        if call.name == CLARIFICATION_ACTION:
+            assert call.arguments.get("missing_slots") != ["time_period"]
+
+
 def test_calendar_block_accepts_polite_between_phrase():
     agent = NlpToolCallingAgent(today=date(2026, 6, 6))
 

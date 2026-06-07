@@ -520,6 +520,182 @@ def test_nlp_router_move_request_never_calls_ai_agent(monkeypatch):
     assert proposals[0]["replace_block_id"] == "study-1"
 
 
+def test_nlp_router_move_phrasing_reroutes_add_to_move(monkeypatch):
+    """A 'move ...' message must relocate the block, never duplicate it.
+
+    Reproduces the bug where the router predicted add_calendar_block for
+    'move my bible study to sunday 9pm to 10pm' and added a second block.
+    """
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "bible study",
+                    "start_time": "2026-06-07T21:00:00",
+                    "end_time": "2026-06-07T22:00:00",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("move request must not reach Qwen")
+
+    async def run_turn():
+        set_calendar_events(
+            [
+                {
+                    "id": "study-7",
+                    "title": "bible study",
+                    "start_time": "2026-06-06T17:00:00",
+                    "end_time": "2026-06-06T18:00:00",
+                    "source": "study_block",
+                    "is_ai_generated": True,
+                }
+            ]
+        )
+        reply = await service.run_turn(
+            "move my bible study to sunday 9 pm to 10 pm",
+            user_id="move-bible-user",
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "added this calendar block" not in reply.lower()
+    assert "moved" in reply.lower()
+    # Exactly one proposal that replaces the original block (no duplicate).
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "study-7"
+    assert proposals[0]["start_time"] == "2026-06-07T21:00:00"
+    assert proposals[0]["end_time"] == "2026-06-07T22:00:00"
+
+
+def test_nlp_router_move_uses_target_day_after_to_not_source_day(monkeypatch):
+    """"move X tomorrow to today" must land on today, reusing the time-of-day.
+
+    The router fills start/end with the source date (the first date it sees);
+    the backend must trust the day after "to" and not duplicate the block.
+    """
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        # Router grabbed "tomorrow" (the source day) for both times.
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "bible study",
+                    "start_time": "2026-06-07T20:00:00",
+                    "end_time": "2026-06-07T21:00:00",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("move request must not reach Qwen")
+
+    async def run_turn():
+        set_client_today("2026-06-06")
+        set_calendar_events(
+            [
+                {
+                    "id": "study-9",
+                    "title": "bible study",
+                    "start_time": "2026-06-07T20:00:00",
+                    "end_time": "2026-06-07T21:00:00",
+                    "source": "study_block",
+                    "is_ai_generated": True,
+                }
+            ]
+        )
+        reply = await service.run_turn(
+            "move bible study tomorrow to today at 8 pm to 9 pm",
+            user_id="move-target-user",
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "added this calendar block" not in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "study-9"
+    # Lands on today (Jun 6), keeping the 8-9 PM time-of-day.
+    assert proposals[0]["start_time"] == "2026-06-06T20:00:00"
+    assert proposals[0]["end_time"] == "2026-06-06T21:00:00"
+
+
+def test_nlp_router_move_phrasing_without_match_asks_instead_of_adding(monkeypatch):
+    """If no block matches a move request, ask — never add a duplicate."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "add_calendar_block",
+                "arguments": {
+                    "title": "bible study",
+                    "start_time": "2026-06-07T21:00:00",
+                    "end_time": "2026-06-07T22:00:00",
+                },
+            }
+        ]
+
+    async def run_turn():
+        set_calendar_events([])
+        reply = await service.run_turn(
+            "move my bible study to sunday 9 pm to 10 pm",
+            user_id="move-nomatch-user",
+        )
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "added this calendar block" not in reply.lower()
+    assert proposals == []
+
+
 def test_nlp_router_run_turn_adds_calendar_block(monkeypatch):
     from app.services.chat_client_context import clear_client_context, get_schedule_proposals
     from app.services.nlp_router_chat_service import NlpRouterChatService
@@ -1154,6 +1330,59 @@ def test_nlp_router_time_period_followup_does_not_duplicate_event_details(monkey
 
     assert seen == [(f"{original} morning", True)]
     assert reply == f"{original} morning"
+
+
+def test_nlp_router_breaks_repeated_time_period_clarification(monkeypatch):
+    """The router must not re-ask the same clarification in a loop."""
+
+    from app.services.chat_client_context import clear_client_context
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+    repeat_question = (
+        "Should I use morning (AM) or afternoon/evening (PM) for those times?"
+    )
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        # The router keeps asking the identical clarification regardless of the
+        # user's answer — exactly the looping behavior we must break.
+        return [
+            {
+                "name": "clarification",
+                "arguments": {
+                    "question": repeat_question,
+                    "missing_slots": ["time_period"],
+                    "predicted_tool": "add_calendar_block",
+                },
+            }
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("loop break should not call the AI agent here")
+
+    try:
+        _pending_nlu_context.clear()
+        _pending_nlu_context["loop-user"] = {
+            "message": "bible study saturday",
+            "predicted_tool": "add_calendar_block",
+            "missing_slots": ["time_period"],
+            "question": repeat_question,
+        }
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply = asyncio.run(service.run_turn("PM", user_id="loop-user"))
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    # Loop is broken: we do not return the same AM/PM question again, and the
+    # pending state is cleared so the next message starts fresh.
+    assert reply != repeat_question
+    assert "AM or PM" in reply or "one message" in reply
+    assert "loop-user" not in _pending_nlu_context
 
 
 def test_nlp_router_yes_executes_safe_pending_call_without_replanning(monkeypatch):
