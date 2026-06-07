@@ -280,7 +280,7 @@ def normalize_tool_args(args: dict[str, Any]) -> dict[str, Any]:
                     out[key] = None
             else:
                 out[key] = None
-        elif key == "title_queries":
+        elif key in {"title_queries", "delete_block_ids"}:
             out[key] = [
                 coerce_text(item, default="").strip()
                 for item in val
@@ -406,6 +406,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         result = chat_agent_tools.delete_calendar_block(
             params.get("title_query") or "event",
             title_queries=params.get("title_queries"),
+            delete_block_ids=params.get("delete_block_ids"),
             start_date=params.get("start_date") or "",
             end_date=params.get("end_date") or "",
             delete_all_matches=params.get("delete_all_matches", False),

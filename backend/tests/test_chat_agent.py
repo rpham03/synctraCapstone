@@ -866,6 +866,175 @@ def test_delete_duplicate_title_without_scope_asks_for_date():
     assert proposals == []
 
 
+def test_nlp_router_duplicate_delete_waits_for_choice_then_deletes_selected_and_unique(
+    monkeypatch,
+):
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+    fetch_count = 0
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        nonlocal fetch_count
+        fetch_count += 1
+        return [
+            {
+                "name": "ai_agent",
+                "arguments": {"message": "Cancel Bible study, dentist, and gym"},
+            }
+        ]
+
+    async def run_conversation():
+        set_client_today("2026-06-07")
+        set_calendar_events(
+            [
+                {
+                    "id": "bible-monday",
+                    "title": "Bible study",
+                    "start_time": "2026-06-08T10:00:00",
+                    "end_time": "2026-06-08T11:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "bible-tuesday",
+                    "title": "Bible study",
+                    "start_time": "2026-06-09T19:00:00",
+                    "end_time": "2026-06-09T20:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "dentist",
+                    "title": "Dentist",
+                    "start_time": "2026-06-10T12:00:00",
+                    "end_time": "2026-06-10T13:00:00",
+                    "source": "manual",
+                },
+                {
+                    "id": "gym",
+                    "title": "Gym",
+                    "start_time": "2026-06-11T17:00:00",
+                    "end_time": "2026-06-11T18:00:00",
+                    "source": "manual",
+                },
+            ]
+        )
+        first = await service.run_turn(
+            "Cancel Bible study, dentist, and gym",
+            user_id="duplicate-delete-user",
+        )
+        before_choice = list(get_schedule_proposals())
+        vague_reply = await service.run_turn(
+            "yes",
+            user_id="duplicate-delete-user",
+        )
+        after_vague_reply = list(get_schedule_proposals())
+        second = await service.run_turn(
+            "the June 9 one",
+            user_id="duplicate-delete-user",
+        )
+        return (
+            first,
+            before_choice,
+            vague_reply,
+            after_vague_reply,
+            second,
+            get_schedule_proposals(),
+        )
+
+    try:
+        _pending_nlu_context.clear()
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        first, before_choice, vague_reply, after_vague_reply, second, proposals = (
+            asyncio.run(run_conversation())
+        )
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "multiple matches for bible study" in first.lower()
+    assert "monday" in first.lower()
+    assert "tuesday" in first.lower()
+    assert before_choice == []
+    assert "specific choice" in vague_reply.lower()
+    assert after_vague_reply == []
+    assert fetch_count == 1
+    assert "removed 3 events" in second.lower()
+    assert {proposal["delete_block_id"] for proposal in proposals} == {
+        "bible-tuesday",
+        "dentist",
+        "gym",
+    }
+
+
+def test_nlp_router_duplicate_delete_accepts_specific_time(monkeypatch):
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+    )
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {
+                "name": "delete_calendar_block",
+                "arguments": {
+                    "title_query": "Bible study",
+                    "title_queries": ["Bible study"],
+                    "delete_all_matches": False,
+                },
+            }
+        ]
+
+    async def run_conversation(selection: str):
+        set_calendar_events(
+            [
+                {
+                    "id": "bible-morning",
+                    "title": "Bible study",
+                    "start_time": "2026-06-08T10:00:00",
+                    "end_time": "2026-06-08T11:00:00",
+                    "source": "study_block",
+                },
+                {
+                    "id": "bible-evening",
+                    "title": "Bible study",
+                    "start_time": "2026-06-08T19:00:00",
+                    "end_time": "2026-06-08T20:00:00",
+                    "source": "study_block",
+                },
+            ]
+        )
+        await service.run_turn("delete Bible study", user_id="same-day-delete-user")
+        reply = await service.run_turn(selection, user_id="same-day-delete-user")
+        return reply, get_schedule_proposals()
+
+    try:
+        _pending_nlu_context.clear()
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        reply, proposals = asyncio.run(run_conversation("the 7 PM one"))
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "removed bible study" in reply.lower()
+    assert [proposal["delete_block_id"] for proposal in proposals] == ["bible-evening"]
+
+
 def test_nlp_router_misrouted_multiple_delete_still_deletes_all_named(monkeypatch):
     from app.services.chat_client_context import (
         clear_client_context,

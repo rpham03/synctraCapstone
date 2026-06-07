@@ -745,11 +745,33 @@ def delete_calendar_block(
     title_query: object,
     *,
     title_queries: object = None,
+    delete_block_ids: object = None,
     start_date: object = "",
     end_date: object = "",
     delete_all_matches: object = False,
 ) -> dict:
     """Return proposals that remove one or more matching editable events."""
+
+    requested_ids = {
+        _as_str(value).strip()
+        for value in delete_block_ids
+        if _as_str(value).strip()
+    } if isinstance(delete_block_ids, list) else set()
+    if requested_ids:
+        selected = [
+            block
+            for block in matching_study_blocks("event")
+            if _as_str(block.get("id")).strip() in requested_ids
+        ]
+        if len(selected) != len(requested_ids):
+            return {
+                "proposal": [],
+                "message": (
+                    "I could not safely identify every selected event. "
+                    "Please choose the event again."
+                ),
+            }
+        return _delete_calendar_block_result(selected)
 
     raw_queries = title_queries if isinstance(title_queries, list) else []
     queries = [
@@ -819,6 +841,12 @@ def delete_calendar_block(
                 }
             if len(matches) == 1:
                 selected.append(matches[0])
+
+    return _delete_calendar_block_result(selected)
+
+
+def _delete_calendar_block_result(selected: list[dict]) -> dict:
+    """Build deletion proposals for already-validated editable events."""
 
     proposal = [
         {

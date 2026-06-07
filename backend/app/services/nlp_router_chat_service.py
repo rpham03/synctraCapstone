@@ -117,6 +117,18 @@ class NlpRouterChatService:
                 _pending_nlu_context.pop(user_id, None)
             return "Okay, I canceled that request."
 
+        if pending and self._starts_new_request(user_message, pending):
+            if user_id:
+                _pending_nlu_context.pop(user_id, None)
+            pending = None
+
+        if pending and isinstance(pending.get("delete_disambiguation"), dict):
+            return await self._continue_pending_delete_selection(
+                user_message,
+                pending,
+                user_id=user_id,
+            )
+
         if pending and normalized_reply in _AFFIRMATIVE_REPLIES:
             pending_call = pending.get("pending_call")
             if isinstance(pending_call, dict):
@@ -128,11 +140,6 @@ class NlpRouterChatService:
                         _pending_nlu_context.pop(user_id, None)
                     result = await execute_tool(name, arguments)
                     return sanitize_chat_reply(self._format_tool_result(name, result))
-
-        if pending and self._starts_new_request(user_message, pending):
-            if user_id:
-                _pending_nlu_context.pop(user_id, None)
-            pending = None
 
         planning_message = user_message
         if pending:
@@ -208,6 +215,24 @@ class NlpRouterChatService:
                     message = str(arguments.get("message") or user_message)
                     return await ai_reply(message)
 
+                delete_disambiguation = (
+                    self._delete_disambiguation_state(arguments)
+                    if name == "delete_calendar_block"
+                    else None
+                )
+                if delete_disambiguation:
+                    question = self._delete_choice_question(delete_disambiguation)
+                    if user_id:
+                        _pending_nlu_context[user_id] = {
+                            "message": planning_message,
+                            "slots": {},
+                            "missing_slots": ["event_selection"],
+                            "predicted_tool": name,
+                            "question": question,
+                            "delete_disambiguation": delete_disambiguation,
+                        }
+                    return question
+
                 verification_question = self._verify_local_tool_call(
                     name,
                     arguments,
@@ -280,6 +305,220 @@ class NlpRouterChatService:
             if match:
                 return f"{original} {match.group(0)}".strip()
         return f"{original} {reply}".strip()
+
+    def _delete_disambiguation_state(
+        self,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Build safe choice state when one or more delete names are duplicated."""
+
+        if bool(arguments.get("delete_all_matches")):
+            return None
+        raw_queries = arguments.get("title_queries")
+        queries = [
+            str(value).strip()
+            for value in raw_queries
+            if str(value).strip()
+        ] if isinstance(raw_queries, list) else []
+        if not queries:
+            query = str(arguments.get("title_query") or "").strip()
+            if query:
+                queries = [query]
+
+        resolved_ids: list[str] = []
+        groups: list[dict[str, Any]] = []
+        for query in queries:
+            matches = chat_agent_tools.matching_study_blocks(
+                query,
+                start_date=arguments.get("start_date") or "",
+                end_date=arguments.get("end_date") or "",
+            )
+            if " ".join(query.lower().split()) in {
+                "study block",
+                "study blocks",
+                "study time",
+            }:
+                matches = [
+                    block
+                    for block in matches
+                    if str(block.get("source") or "").lower() == "study_block"
+                ]
+            candidates = [
+                self._delete_candidate(block)
+                for block in matches
+                if str(block.get("id") or "").strip()
+            ]
+            if len(candidates) > 1:
+                groups.append({"query": query, "candidates": candidates})
+            elif len(candidates) == 1:
+                resolved_ids.append(str(candidates[0]["id"]))
+
+        if not groups:
+            return None
+        return {
+            "groups": groups,
+            "selected_ids": list(dict.fromkeys(resolved_ids)),
+        }
+
+    def _delete_candidate(self, block: dict[str, Any]) -> dict[str, str]:
+        start = self._parse_naive_datetime(block.get("start_time"))
+        day = chat_agent_tools._event_local_date(block)
+        return {
+            "id": str(block.get("id") or "").strip(),
+            "title": str(block.get("title") or "Event").strip() or "Event",
+            "date": day.isoformat() if day else "",
+            "day_label": day.strftime("%A, %b ") + str(day.day) if day else "unknown date",
+            "time_label": start.strftime("%I:%M %p").lstrip("0") if start else "unknown time",
+            "start_time": start.isoformat() if start else "",
+        }
+
+    def _delete_choice_question(self, state: dict[str, Any], *, retry: bool = False) -> str:
+        groups = state.get("groups")
+        group = groups[0] if isinstance(groups, list) and groups else {}
+        query = str(group.get("query") or "event")
+        candidates = group.get("candidates")
+        choices = candidates if isinstance(candidates, list) else []
+        details = "; ".join(
+            f"{index}. {candidate.get('title', 'Event')} on "
+            f"{candidate.get('day_label', 'unknown date')} at "
+            f"{candidate.get('time_label', 'unknown time')}"
+            for index, candidate in enumerate(choices, start=1)
+            if isinstance(candidate, dict)
+        )
+        prefix = "I still need a specific choice. " if retry else ""
+        return (
+            f"{prefix}I found multiple matches for {query}: {details}. "
+            "Which one should I remove? Reply with the number, date, time, "
+            f"or say \"all {query}\"."
+        )
+
+    async def _continue_pending_delete_selection(
+        self,
+        reply: str,
+        pending: dict[str, Any],
+        *,
+        user_id: str | None,
+    ) -> str:
+        state = pending.get("delete_disambiguation")
+        if not isinstance(state, dict):
+            return "Which event should I remove?"
+        groups = state.get("groups")
+        if not isinstance(groups, list) or not groups:
+            if user_id:
+                _pending_nlu_context.pop(user_id, None)
+            return "Which event should I remove?"
+
+        group = groups[0] if isinstance(groups[0], dict) else {}
+        raw_candidates = group.get("candidates")
+        candidates = [
+            candidate
+            for candidate in raw_candidates
+            if isinstance(candidate, dict)
+        ] if isinstance(raw_candidates, list) else []
+        selected = self._select_delete_candidates(reply, candidates)
+        if not selected:
+            question = self._delete_choice_question(state, retry=True)
+            pending["question"] = question
+            if user_id:
+                _pending_nlu_context[user_id] = pending
+            return question
+
+        selected_ids = [
+            str(value)
+            for value in state.get("selected_ids") or []
+            if str(value).strip()
+        ]
+        selected_ids.extend(str(candidate.get("id") or "") for candidate in selected)
+        state["selected_ids"] = list(dict.fromkeys(value for value in selected_ids if value))
+        groups.pop(0)
+        state["groups"] = groups
+        if groups:
+            question = self._delete_choice_question(state)
+            pending["question"] = question
+            pending["delete_disambiguation"] = state
+            if user_id:
+                _pending_nlu_context[user_id] = pending
+            return question
+
+        if user_id:
+            _pending_nlu_context.pop(user_id, None)
+        result = await execute_tool(
+            "delete_calendar_block",
+            {
+                "title_query": "event",
+                "delete_block_ids": state["selected_ids"],
+            },
+        )
+        return sanitize_chat_reply(self._format_tool_result("delete_calendar_block", result))
+
+    def _select_delete_candidates(
+        self,
+        reply: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        lower = self._normalized_reply(reply)
+        if re.search(r"\b(?:all|both|every|each)\b", lower):
+            return candidates
+
+        ordinal_words = {
+            "first": 1,
+            "second": 2,
+            "third": 3,
+            "fourth": 4,
+            "fifth": 5,
+            "sixth": 6,
+        }
+        number_match = re.search(r"\b(?:number\s*)?([1-6])\b", lower)
+        choice = int(number_match.group(1)) if number_match else None
+        if choice is None:
+            for word, index in ordinal_words.items():
+                if re.search(rf"\b{word}\b", lower):
+                    choice = index
+                    break
+        if choice is not None and 1 <= choice <= len(candidates):
+            return [candidates[choice - 1]]
+
+        narrowed = candidates
+        date_range = self._delete_date_range(reply)
+        if date_range:
+            start_date, end_date = date_range
+            narrowed = [
+                candidate
+                for candidate in narrowed
+                if start_date <= str(candidate.get("date") or "") <= end_date
+            ]
+
+        clock_minutes = self._reply_clock_minutes(reply)
+        if clock_minutes is not None:
+            narrowed = [
+                candidate
+                for candidate in narrowed
+                if self._candidate_clock_minutes(candidate) == clock_minutes
+            ]
+        return narrowed if len(narrowed) == 1 else []
+
+    def _reply_clock_minutes(self, message: str) -> int | None:
+        match = re.search(
+            r"\b(\d{1,2})(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        period = match.group(3).lower().replace(".", "")
+        if not 1 <= hour <= 12:
+            return None
+        if period == "pm" and hour != 12:
+            hour += 12
+        elif period == "am" and hour == 12:
+            hour = 0
+        return hour * 60 + minute
+
+    def _candidate_clock_minutes(self, candidate: dict[str, Any]) -> int | None:
+        start = self._parse_naive_datetime(candidate.get("start_time"))
+        return start.hour * 60 + start.minute if start else None
 
     def _is_repeat_clarification(
         self,
@@ -515,6 +754,51 @@ class NlpRouterChatService:
             if "next weekend" in lower:
                 saturday += timedelta(days=7)
             return saturday.isoformat(), (saturday + timedelta(days=1)).isoformat()
+        named_date = re.search(
+            r"\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|"
+            r"july|jul|august|aug|september|sep|sept|october|oct|"
+            r"november|nov|december|dec)\s+(\d{1,2})(?:st|nd|rd|th)?"
+            r"(?:,\s*(\d{4}))?\b",
+            lower,
+        )
+        if named_date:
+            months = {
+                "jan": 1,
+                "feb": 2,
+                "mar": 3,
+                "apr": 4,
+                "may": 5,
+                "jun": 6,
+                "jul": 7,
+                "aug": 8,
+                "sep": 9,
+                "oct": 10,
+                "nov": 11,
+                "dec": 12,
+            }
+            try:
+                day = date(
+                    int(named_date.group(3) or today.year),
+                    months[named_date.group(1)[:3]],
+                    int(named_date.group(2)),
+                )
+                return day.isoformat(), day.isoformat()
+            except ValueError:
+                return None
+        numeric_date = re.search(
+            r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b",
+            lower,
+        )
+        if numeric_date:
+            year_text = numeric_date.group(3)
+            year = int(year_text) if year_text else today.year
+            if year_text and len(year_text) == 2:
+                year += 2000
+            try:
+                day = date(year, int(numeric_date.group(1)), int(numeric_date.group(2)))
+                return day.isoformat(), day.isoformat()
+            except ValueError:
+                return None
         tokens = re.findall(
             r"\b(monday|mon|tuesday|tue|wednesday|wed|thursday|thu|"
             r"friday|fri|saturday|sat|sunday|sun|\d{4}-\d{2}-\d{2})\b",
