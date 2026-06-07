@@ -524,7 +524,7 @@ async def execute_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         )
         return {"preferences": remaining}
     if tool == "classify_all_calendar_events":
-        return event_classification.classify_all_calendar_events(
+        return await event_classification.classify_all_calendar_events_with_ai(
             get_calendar_events(), user_id=get_user_id()
         )
     if tool == "classify_calendar_item":

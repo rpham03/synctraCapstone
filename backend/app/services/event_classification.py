@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 from pathlib import Path
 from typing import Any
+
+import httpx
+
+from app.core.config.settings import settings
 
 _backend_dir = Path(__file__).resolve().parents[2]
 _store_path = _backend_dir / "data" / "event_classifications.json"
@@ -210,9 +215,12 @@ def classify_all_calendar_events(
             counts["cached"] += 1
         else:
             result = classify_deterministic(event)
-            cache[h] = {k: v for k, v in result.items() if k != "classified_by"}
+            # Only cache a resolved verdict — leave uncertain events uncached so
+            # a later run (e.g. once an AI agent is reachable) can retry them.
+            if result["fixed_or_flexible"] != "uncertain":
+                cache[h] = {k: v for k, v in result.items() if k != "classified_by"}
+                dirty = True
             counts["newly_classified"] += 1
-            dirty = True
 
         fx = result.get("fixed_or_flexible")
         if fx in counts:
@@ -224,3 +232,172 @@ def classify_all_calendar_events(
         _write_all(data)
 
     return {"events": results, "counts": counts}
+
+
+# ---- optional AI assist for the uncertain remainder ------------------------
+
+_AI_EVENT_TYPES = (
+    "class, lecture, lab, exam, quiz, meeting, appointment, homework, "
+    "assignment, study_session, personal, work_shift, task, unknown"
+)
+
+
+def _ai_host() -> str:
+    return (
+        os.getenv("COLAB_AI_AGENT_HOST")
+        or settings.colab_ai_agent_host
+        or os.getenv("COLAB_COURSE_IMPORT_HOST")
+        or settings.colab_course_import_host
+        or os.getenv("OLLAMA_HOST")
+        or os.getenv("COLAB_NLP_ROUTER_HOST")
+        or settings.colab_nlp_router_host
+        or ""
+    ).strip().rstrip("/")
+
+
+def _build_ai_prompt(payload: list[dict]) -> str:
+    lines = [
+        "Classify each calendar event as fixed or flexible.",
+        "Fixed = a required time the user cannot move (classes, exams, meetings, "
+        "appointments, work shifts). Flexible = work the user chooses when to do "
+        "(homework, assignments, study sessions, personal tasks).",
+        f"event_type must be one of: {_AI_EVENT_TYPES}.",
+        'Return ONLY JSON: {"events":[{"event_id":"...","event_name":"...",'
+        '"event_type":"...","fixed_or_flexible":"fixed|flexible",'
+        '"confidence":0.0,"reason":"..."}]}',
+        "Events:",
+    ]
+    for item in payload:
+        lines.append(
+            f'- event_id={item["event_id"]} name="{item["event_name"]}" '
+            f'guess_type={item["event_type"]}'
+        )
+    return "\n".join(lines)
+
+
+def _parse_ai_json(text: str) -> list[dict]:
+    """Pull the events array out of the agent's reply (tolerant of prose around it)."""
+
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return []
+        try:
+            data = json.loads(match.group(0))
+        except ValueError:
+            return []
+    events = data.get("events") if isinstance(data, dict) else None
+    return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
+
+
+async def _call_ai_agent(host: str, payload: list[dict]) -> list[dict]:
+    """POST the uncertain events to the Qwen agent and parse its JSON reply."""
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"{host}/api/generate",
+            json={
+                "prompt": _build_ai_prompt(payload),
+                "stream": False,
+                "options": {"syntra_mode": "ai_agent", "temperature": 0.1},
+            },
+            headers={"Accept": "application/json", "ngrok-skip-browser-warning": "true"},
+        )
+        response.raise_for_status()
+        body = response.json()
+    text = str(body.get("response") or body.get("assistant_message") or "")
+    return _parse_ai_json(text)
+
+
+async def classify_all_calendar_events_with_ai(
+    events: list[dict],
+    *,
+    user_id: str,
+) -> dict:
+    """Deterministic classification, then ask the AI agent for the uncertain ones.
+
+    Only the uncertain events' id/name/guessed-type are sent — never private
+    descriptions. Deterministic safety rules still override the AI (it can never
+    turn a fixed event flexible). Failures are swallowed so classification (and
+    the rest of the app) keep working.
+    """
+
+    base = classify_all_calendar_events(events, user_id=user_id)
+    uncertain = [e for e in base["events"] if e.get("fixed_or_flexible") == "uncertain"]
+    host = _ai_host()
+    if not uncertain or not host:
+        return base
+
+    by_id = {
+        _as_str(ev.get("id")).strip(): ev for ev in events if isinstance(ev, dict)
+    }
+    payload = [
+        {
+            "event_id": u["event_id"],
+            "event_name": u["event_name"],
+            "event_type": u["event_type"],
+        }
+        for u in uncertain
+    ]
+    try:
+        ai_results = await _call_ai_agent(host, payload)
+    except (httpx.HTTPError, ValueError, KeyError):
+        return base  # AI unavailable / bad response — keep deterministic result
+    if not ai_results:
+        return base
+
+    ai_by_id = {_as_str(r.get("event_id")): r for r in ai_results}
+    data = _read_all()
+    rec = _user_record(data, user_id)
+    cache = rec["cache"]
+    dirty = False
+
+    for result in base["events"]:
+        if result.get("fixed_or_flexible") != "uncertain":
+            continue
+        ai = ai_by_id.get(result["event_id"])
+        if not ai:
+            continue
+        fx = _as_str(ai.get("fixed_or_flexible")).lower()
+        if fx not in _VALID_OVERRIDES:
+            continue
+        original = by_id.get(result["event_id"])
+        # Safety: never let the AI turn a deterministically-fixed event flexible.
+        if (
+            fx == "flexible"
+            and original is not None
+            and classify_deterministic(original)["fixed_or_flexible"] == "fixed"
+        ):
+            fx = "fixed"
+        try:
+            confidence = float(ai.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = 0.7
+        result["fixed_or_flexible"] = fx
+        result["event_type"] = _as_str(ai.get("event_type")) or result["event_type"]
+        result["confidence"] = max(0.0, min(confidence, 1.0))
+        result["reason"] = _as_str(ai.get("reason")) or "Classified by AI agent."
+        result["classified_by"] = "ai"
+        if original is not None:
+            cache[content_hash(original)] = {
+                k: v for k, v in result.items() if k != "classified_by"
+            }
+            dirty = True
+
+    if dirty:
+        data[user_id] = rec
+        _write_all(data)
+
+    base["counts"] = {
+        "fixed": sum(1 for e in base["events"] if e["fixed_or_flexible"] == "fixed"),
+        "flexible": sum(1 for e in base["events"] if e["fixed_or_flexible"] == "flexible"),
+        "uncertain": sum(1 for e in base["events"] if e["fixed_or_flexible"] == "uncertain"),
+        "cached": base["counts"].get("cached", 0),
+        "newly_classified": base["counts"].get("newly_classified", 0),
+        "ai_resolved": sum(1 for e in base["events"] if e.get("classified_by") == "ai"),
+    }
+    return base

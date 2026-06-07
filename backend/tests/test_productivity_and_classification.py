@@ -81,6 +81,74 @@ def test_classify_all_counts_caches_and_reclassifies(tmp_path, monkeypatch):
     assert r3["counts"]["newly_classified"] == 1
 
 
+def test_ai_resolves_uncertain_events_and_caches(tmp_path, monkeypatch):
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "clf.json")
+    monkeypatch.setattr(clf, "_ai_host", lambda: "http://fake-agent")
+
+    sent_payloads = []
+
+    async def fake_call(host, payload):
+        sent_payloads.append(payload)
+        return [
+            {
+                "event_id": "x1",
+                "event_name": "Mystery thing",
+                "event_type": "personal",
+                "fixed_or_flexible": "flexible",
+                "confidence": 0.8,
+                "reason": "Looks like a personal task.",
+            }
+        ]
+
+    monkeypatch.setattr(clf, "_call_ai_agent", fake_call)
+
+    events = [_ev("x1", "Mystery thing", "weird")]  # deterministic -> uncertain
+
+    r1 = asyncio.run(clf.classify_all_calendar_events_with_ai(events, user_id="u"))
+    resolved = r1["events"][0]
+    assert resolved["fixed_or_flexible"] == "flexible"
+    assert resolved["classified_by"] == "ai"
+    assert r1["counts"]["ai_resolved"] == 1
+
+    # The AI only saw id/name/type — never a description or other private data.
+    assert sent_payloads and set(sent_payloads[0][0]) == {"event_id", "event_name", "event_type"}
+
+    # Now cached — a plain deterministic run returns the AI verdict, no re-call.
+    sent_payloads.clear()
+    r2 = clf.classify_all_calendar_events(events, user_id="u")
+    assert r2["events"][0]["fixed_or_flexible"] == "flexible"
+    assert r2["counts"]["cached"] == 1
+
+
+def test_ai_failure_leaves_event_uncertain(tmp_path, monkeypatch):
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "clf.json")
+    monkeypatch.setattr(clf, "_ai_host", lambda: "http://fake-agent")
+
+    async def boom(host, payload):
+        raise clf.httpx.ConnectError("no agent")
+
+    monkeypatch.setattr(clf, "_call_ai_agent", boom)
+
+    events = [_ev("x2", "Mystery", "weird")]
+    result = asyncio.run(clf.classify_all_calendar_events_with_ai(events, user_id="u"))
+    assert result["events"][0]["fixed_or_flexible"] == "uncertain"  # graceful, not crashed
+
+
+def test_ai_cannot_make_a_fixed_event_flexible(tmp_path, monkeypatch):
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "clf.json")
+    monkeypatch.setattr(clf, "_ai_host", lambda: "http://fake-agent")
+
+    # A course event is deterministically fixed, so it's never even sent to the AI.
+    async def fake_call(host, payload):
+        assert all(p["event_id"] != "c1" for p in payload)
+        return []
+
+    monkeypatch.setattr(clf, "_call_ai_agent", fake_call)
+    events = [_ev("c1", "CSE 369 Lecture", "course")]
+    result = asyncio.run(clf.classify_all_calendar_events_with_ai(events, user_id="u"))
+    assert result["events"][0]["fixed_or_flexible"] == "fixed"
+
+
 def test_user_override_persists_and_wins_over_rules(tmp_path, monkeypatch):
     monkeypatch.setattr(clf, "_store_path", tmp_path / "clf.json")
     assert clf.set_override("u", "ev1", "flexible") is True
