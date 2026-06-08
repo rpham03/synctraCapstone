@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import httpx
@@ -190,6 +190,9 @@ class NlpRouterChatService:
                 arguments = args if isinstance(args, dict) else {}
 
                 name, arguments = self._coerce_move_intent(
+                    name, arguments, planning_message
+                )
+                name, arguments = self._coerce_resize_intent(
                     name, arguments, planning_message
                 )
                 name, arguments = self._coerce_delete_intent(
@@ -627,6 +630,61 @@ class NlpRouterChatService:
                 flags=re.IGNORECASE,
             )
         )
+
+    def _parse_clock_times(self, text: str) -> list[time]:
+        """Unambiguous clock times in order (12h with AM/PM, or 24h HH:MM)."""
+
+        out: list[time] = []
+        for match in re.finditer(
+            r"\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            hour = int(match.group(1))
+            minute = int(match.group(2) or 0)
+            ampm = (match.group(3) or "").replace(".", "").lower()
+            if ampm:
+                if not 1 <= hour <= 12 or minute > 59:
+                    continue
+                if ampm.startswith("p") and hour != 12:
+                    hour += 12
+                if ampm.startswith("a") and hour == 12:
+                    hour = 0
+            elif 13 <= hour <= 23 and minute <= 59:
+                pass  # unambiguous 24-hour time
+            else:
+                continue  # bare hour without AM/PM is ambiguous — skip
+            out.append(time(hour, minute))
+        return out
+
+    def _retime_block(
+        self, message: str, block: dict[str, Any]
+    ) -> tuple[datetime, datetime] | None:
+        """Compute a moved block's new start/end from times in the message."""
+
+        cur_start = self._parse_naive_datetime(block.get("start_time"))
+        cur_end = self._parse_naive_datetime(block.get("end_time"))
+        if cur_start is None or cur_end is None:
+            return None
+        duration = cur_end - cur_start
+        day = self._move_target_date(message) or cur_start.date()
+        times = self._parse_clock_times(message)
+        if not times:
+            return None
+        # "move X from <src> to <dst>" relocates to the dst time, keeping length.
+        if re.search(r"\bfrom\b", message, flags=re.IGNORECASE) and len(times) >= 2:
+            new_start = datetime.combine(day, times[-1])
+            return new_start, new_start + duration
+        # An explicit new range ("... 8pm to 9pm").
+        if len(times) >= 2:
+            new_start = datetime.combine(day, times[0])
+            new_end = datetime.combine(day, times[1])
+            if new_end <= new_start:
+                new_end = new_start + duration
+            return new_start, new_end
+        # A single new start time, keep the length.
+        new_start = datetime.combine(day, times[0])
+        return new_start, new_start + duration
 
     # Pronouns/adverbs that aren't real event names ("move it", "move on").
     _NON_TITLE_WORDS = {"it", "that", "this", "them", "those", "on", "forward", "ahead", "along"}
@@ -1186,11 +1244,27 @@ class NlpRouterChatService:
 
         start_dt = self._parse_naive_datetime(arguments.get("start_time"))
         end_dt = self._parse_naive_datetime(arguments.get("end_time"))
-        # The user gave a clock time but the router hasn't resolved it into
-        # start/end yet (e.g. it asked AM/PM). Don't move with the wrong time —
-        # let that flow resolve first; the resolved add then re-routes here.
+        # The user gave a clock time but the router didn't resolve it (e.g. it
+        # chatted via ai_agent, or asked AM/PM). Try to parse the new time from
+        # the message against the matched block ("move gaming from 2pm to 7pm").
         if start_dt is None and self._message_has_clock_time(message):
-            return name, arguments
+            block = chat_agent_tools.resolve_single_block(
+                chat_agent_tools.matching_study_blocks(title_query)
+            )
+            retimed = self._retime_block(message, block) if block else None
+            if retimed:
+                new_start, new_end = retimed
+                return "move_calendar_block", {
+                    "title_query": title_query,
+                    "target_date": new_start.date().isoformat(),
+                    "start_time": new_start.isoformat(),
+                    "end_time": new_end.isoformat(),
+                }
+            # Couldn't parse it. Only the add/clarification paths will resolve the
+            # time on a follow-up; for ai_agent etc. don't strand the request —
+            # fall through to a day-only move if a day was named.
+            if name in {"add_calendar_block", "propose_schedule_change", CLARIFICATION_ACTION}:
+                return name, arguments
         # The router fills start/end using the *source* date for phrasing like
         # "move X tomorrow to today" (it grabs the first date it sees). Trust the
         # user's own words for the target day and reuse only the time-of-day.
@@ -1216,6 +1290,54 @@ class NlpRouterChatService:
                 target_day, end_dt.time()
             ).isoformat()
         return "move_calendar_block", moved_args
+
+    def _coerce_resize_intent(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Reroute "extend/shorten X by N hours" to a move that resizes the block."""
+
+        if name == "move_calendar_block":
+            return name, arguments
+        match = re.search(
+            r"\b(extend|lengthen|stretch|shorten|cut|reduce|trim)\b\s+"
+            r"(?:my\s+|the\s+|this\s+)?(.+?)\s+(?:by\s+)?(\d+)\s*"
+            r"(hours?|hrs?|hr|h|minutes?|mins?|min|m)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return name, arguments
+        verb = match.group(1).lower()
+        title = " ".join(match.group(2).strip(" .,:;-").split())
+        if not title or title.lower() in self._NON_TITLE_WORDS:
+            return name, arguments
+        amount = int(match.group(3))
+        unit = match.group(4).lower()
+        minutes = amount * 60 if unit.startswith("h") else amount
+        if verb in {"shorten", "cut", "reduce", "trim"}:
+            minutes = -minutes
+
+        block = chat_agent_tools.resolve_single_block(
+            chat_agent_tools.matching_study_blocks(title)
+        )
+        if block is None:
+            return name, arguments
+        cur_start = self._parse_naive_datetime(block.get("start_time"))
+        cur_end = self._parse_naive_datetime(block.get("end_time"))
+        if cur_start is None or cur_end is None:
+            return name, arguments
+        new_end = cur_end + timedelta(minutes=minutes)
+        if new_end <= cur_start:
+            return name, arguments
+        return "move_calendar_block", {
+            "title_query": title,
+            "target_date": cur_start.date().isoformat(),
+            "start_time": cur_start.isoformat(),
+            "end_time": new_end.isoformat(),
+        }
 
     _WEEKDAY_TOKENS = {
         "monday": 0, "mon": 0,
@@ -1342,7 +1464,14 @@ class NlpRouterChatService:
                 )
             return self._verify_add_calendar_block(arguments)
         if name == "move_calendar_block":
-            if not self._has_any(lower, ("move", "reschedule", "shift")):
+            # Resizing (extend/shorten) is a move too — accept those verbs.
+            if not self._has_any(
+                lower,
+                (
+                    "move", "reschedule", "shift",
+                    "extend", "lengthen", "stretch", "shorten", "cut", "reduce", "trim",
+                ),
+            ):
                 return "Do you want me to move an existing study block?"
             target_date = str(arguments.get("target_date") or "").strip()
             if not target_date:
