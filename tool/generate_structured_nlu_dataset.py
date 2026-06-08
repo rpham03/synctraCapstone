@@ -612,7 +612,8 @@ def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
     ]
     for tmpl, p in product(set_templates, periods):
         pools["set_productivity_preferences"].append(
-            example(_cap(tmpl.format(p=p)), "set_productivity_preferences")
+            example(_cap(tmpl.format(p=p)), "set_productivity_preferences",
+                    slots={"period": p})
         )
     pairs = [("morning", "night"), ("morning", "evening"), ("afternoon", "evening"),
              ("morning", "afternoon"), ("evening", "night"), ("afternoon", "night")]
@@ -667,7 +668,8 @@ def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
          "my {p} productivity preference"],
     ):
         pools["remove_productivity_preferences"].append(
-            example(f"{verb} {tmpl.format(p=p)}", "remove_productivity_preferences")
+            example(f"{verb} {tmpl.format(p=p)}", "remove_productivity_preferences",
+                    slots={"period": p})
         )
 
     # ---- classify_all_calendar_events ----
@@ -818,7 +820,8 @@ def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
         periods,
     ):
         pools["set_productivity_preferences"].append(
-            example(_cap(tmpl.format(p=p)), "set_productivity_preferences")
+            example(_cap(tmpl.format(p=p)), "set_productivity_preferences",
+                    slots={"period": p})
         )
 
     # get_productivity_preferences — extra nouns.

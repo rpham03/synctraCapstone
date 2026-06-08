@@ -893,6 +893,56 @@ class NlpRouterChatService:
         re.IGNORECASE,
     )
 
+    def _infer_period(self, start: time) -> str:
+        """Map a start hour to a productive period bucket."""
+        hour = start.hour
+        if 6 <= hour < 12:
+            return "morning"
+        if 12 <= hour < 17:
+            return "afternoon"
+        if 17 <= hour < 21:
+            return "evening"
+        return "night"
+
+    def _preference_set_args(self, message: str) -> tuple[list[str], str, str]:
+        """Extract productive periods and an optional custom time window.
+
+        Handles "I'm productive at night", "I'm productive from 8pm to 11pm"
+        (period inferred from the start time), and combinations.
+        """
+        periods = productivity_preferences.detect_periods(message.lower())
+        times = self._parse_clock_times(message)
+        start_str = end_str = ""
+        if len(times) >= 2:
+            start_str = f"{times[0].hour:02d}:{times[0].minute:02d}"
+            end_str = f"{times[1].hour:02d}:{times[1].minute:02d}"
+            if not periods:
+                periods = [self._infer_period(times[0])]
+        return periods, start_str, end_str
+
+    async def _save_preference(
+        self,
+        message: str,
+        periods: list[str],
+        start_str: str,
+        end_str: str,
+        *,
+        user_id: str | None,
+    ) -> str:
+        args: dict[str, Any] = {"periods": periods}
+        if start_str and end_str:
+            args["start_time"] = start_str
+            args["end_time"] = end_str
+        result = await execute_tool("set_productivity_preferences", args)
+        if user_id:
+            _pending_nlu_context[user_id] = {
+                "message": message,
+                "predicted_tool": "suggest_preference_schedule",
+                "awaiting_preference_suggest": True,
+                "periods": periods,
+            }
+        return sanitize_chat_reply(self._format_set_preferences(result, periods))
+
     async def _maybe_handle_preferences(
         self,
         message: str,
@@ -942,22 +992,12 @@ class NlpRouterChatService:
                     _pending_nlu_context.pop(user_id, None)
                 return "Okay — your preference is saved. Just ask whenever you want a schedule."
 
-        # Follow-up to "which period?" — the user names a period on its own.
+        # Follow-up to "which period?" — the user names a period (or a time range).
         if pending and pending.get("predicted_tool") == "set_productivity_preferences":
-            periods = productivity_preferences.detect_periods(lower)
+            periods, start_str, end_str = self._preference_set_args(message)
             if periods:
-                result = await execute_tool(
-                    "set_productivity_preferences", {"periods": periods}
-                )
-                if user_id:
-                    _pending_nlu_context[user_id] = {
-                        "message": message,
-                        "predicted_tool": "suggest_preference_schedule",
-                        "awaiting_preference_suggest": True,
-                        "periods": periods,
-                    }
-                return sanitize_chat_reply(
-                    self._format_set_preferences(result, periods)
+                return await self._save_preference(
+                    message, periods, start_str, end_str, user_id=user_id
                 )
 
         has_cue = bool(self._PRODUCTIVE_CUE.search(lower)) or "preference" in lower
@@ -979,7 +1019,7 @@ class NlpRouterChatService:
 
         # Save / set a preference.
         if has_cue:
-            periods = productivity_preferences.detect_periods(lower)
+            periods, start_str, end_str = self._preference_set_args(message)
             if not periods:
                 if user_id:
                     _pending_nlu_context[user_id] = {
@@ -992,17 +1032,9 @@ class NlpRouterChatService:
                     "Which time of day are you most productive — morning, "
                     "afternoon, evening, or night?"
                 )
-            result = await execute_tool(
-                "set_productivity_preferences", {"periods": periods}
+            return await self._save_preference(
+                message, periods, start_str, end_str, user_id=user_id
             )
-            if user_id:
-                _pending_nlu_context[user_id] = {
-                    "message": message,
-                    "predicted_tool": "suggest_preference_schedule",
-                    "awaiting_preference_suggest": True,
-                    "periods": periods,
-                }
-            return sanitize_chat_reply(self._format_set_preferences(result, periods))
 
         # Mark an event fixed/flexible (explicit override).
         override = re.search(

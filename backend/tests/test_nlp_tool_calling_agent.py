@@ -117,6 +117,31 @@ def test_intent_dataset_selection_is_exact_size_and_balanced():
     assert max(counts.values()) - min(counts.values()) <= 1
 
 
+def test_router_eval_separates_intents_on_held_out_split():
+    from eval_nlp_router import evaluate
+
+    report = evaluate()
+
+    assert report["train"] == 3500 and report["test"] == 1500
+    assert set(report["per_tool"]) == set(TOOLS)
+    # A dependency-free NB proxy should cleanly separate the intents.
+    assert report["accuracy"] >= 0.90
+    assert min(report["per_tool"].values()) >= 0.70
+
+
+def test_dataset_teaches_period_slots_for_preferences():
+    """Productivity-preference examples carry an extractable period slot."""
+
+    examples = load_examples(TOOL_DIR / "syntra_nlu_training_data.jsonl")
+    period_examples = [e for e in examples if e.slots.get("period")]
+
+    assert len(period_examples) >= 100
+    assert all(
+        find_slot_spans(e.user_message, {"period": e.slots["period"]})
+        for e in period_examples
+    )
+
+
 def test_canonical_nlu_data_contains_slots_and_followup_ground_truth():
     examples = load_examples(TOOL_DIR / "syntra_nlu_training_data.jsonl")
 

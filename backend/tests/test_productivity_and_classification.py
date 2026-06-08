@@ -40,6 +40,57 @@ def test_set_get_remove_preferences_with_defaults_and_custom(tmp_path, monkeypat
     assert prefs.get_preferences(user) == []
 
 
+def test_preference_set_args_extracts_custom_times_and_infers_period():
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    periods, start, end = service._preference_set_args("I'm productive from 8 pm to 11 pm")
+    assert periods == ["evening"]  # 8 PM falls in the evening bucket
+    assert start == "20:00" and end == "23:00"
+
+    periods2, start2, end2 = service._preference_set_args("I'm productive at night")
+    assert periods2 == ["night"] and start2 == "" and end2 == ""
+
+    periods3, start3, end3 = service._preference_set_args(
+        "I work best in the morning from 6 am to 9 am"
+    )
+    assert periods3 == ["morning"] and start3 == "06:00" and end3 == "09:00"
+
+
+def test_router_saves_preference_with_custom_times(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs, "_store_path", tmp_path / "prefs.json")
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        set_calendar_events,
+        set_user_id,
+    )
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+
+    async def run():
+        set_user_id("ct")
+        set_calendar_events([])
+        return await service.run_turn("I'm productive from 8 pm to 11 pm", user_id="ct")
+
+    try:
+        _pending_nlu_context.clear()
+        reply = asyncio.run(run())
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "saved" in reply.lower()
+    assert prefs.get_preferences("ct") == [
+        {"period": "evening", "start": "20:00", "end": "23:00"}
+    ]
+
+
 def test_preferences_are_isolated_per_user(tmp_path, monkeypatch):
     monkeypatch.setattr(prefs, "_store_path", tmp_path / "prefs.json")
     prefs.set_preferences("a", ["night"])

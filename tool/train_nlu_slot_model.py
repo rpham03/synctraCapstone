@@ -49,6 +49,7 @@ SUPPORTED_SLOT_KEYS = (
     "duration",
     "deadline",
     "course",
+    "period",
 )
 SLOT_LABELS = ["O"] + [
     label
