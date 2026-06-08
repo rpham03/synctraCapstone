@@ -7,6 +7,7 @@ requires the user to confirm before apply_* writes anything to the calendar.
 
 from __future__ import annotations
 
+import random
 from datetime import datetime, time, timedelta
 
 from app.services import event_classification, productivity_preferences
@@ -78,8 +79,19 @@ def _task_deadline(task: dict) -> datetime | None:
     return None
 
 
-def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int = 7) -> dict:
-    """Return preview proposals placing flexible work near preferred periods."""
+def suggest_preference_schedule(
+    *,
+    user_id: str | None = None,
+    days_ahead: int = 7,
+    seed: int | None = None,
+    break_minutes: int = 15,
+) -> dict:
+    """Return preview proposals placing flexible work near preferred periods.
+
+    With ``seed`` set, task order and slot choice are randomized so a "try again"
+    produces a different arrangement. ``break_minutes`` keeps a gap after each
+    placed study session so they aren't scheduled back to back.
+    """
 
     uid = user_id or get_user_id()
     prefs = productivity_preferences.get_preferences(uid)
@@ -109,11 +121,21 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
 
     today = effective_today()
     now = effective_now()
-    placed: list[tuple[datetime, datetime]] = list(busy)
+    placed: list[tuple[datetime, datetime]] = list(busy)  # fixed events only
+    rng = random.Random(seed) if seed is not None else None
+    break_delta = timedelta(minutes=max(0, break_minutes))
+
+    def reserve(start: datetime, end: datetime) -> None:
+        # Reserve the session plus a trailing break so the next one isn't adjacent.
+        placed.append((start, end + break_delta))
+
+    if rng is not None:
+        rng.shuffle(flexible_events)
 
     def find_slot(
         duration: timedelta, deadline: datetime | None, *, start_offset: int = 0
     ) -> tuple[datetime, datetime] | None:
+        candidates: list[tuple[datetime, datetime]] = []
         for offset in range(start_offset, days_ahead + 1):
             day = today + timedelta(days=offset)
             for pref in prefs:
@@ -126,8 +148,10 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
                 ):
                     cand_end = gap_start + duration
                     if cand_end <= gap_end and (deadline is None or cand_end <= deadline):
-                        return gap_start, cand_end
-        return None
+                        if rng is None:
+                            return gap_start, cand_end  # earliest — deterministic
+                        candidates.append((gap_start, cand_end))
+        return rng.choice(candidates) if (rng is not None and candidates) else None
 
     proposals: list[dict] = []
 
@@ -140,11 +164,11 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
             continue
         duration = end - start
         if _in_any_window(start, prefs):
-            placed.append((start, end))  # already good — keep it as busy
+            reserve(start, end)  # already good — keep it as busy
             continue
         slot = find_slot(duration, None)
         if slot:
-            placed.append(slot)
+            reserve(slot[0], slot[1])
             proposals.append(
                 {
                     "task_title": str(raw.get("title") or "Study block"),
@@ -157,12 +181,15 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
                 }
             )
         else:
-            placed.append((start, end))
+            reserve(start, end)
         if len(proposals) >= _MAX_PROPOSALS:
             break
 
     # 2) Flexible tasks: split long ones into <=2h sessions across the week.
-    for task in get_tasks():
+    tasks = list(get_tasks())
+    if rng is not None:
+        rng.shuffle(tasks)
+    for task in tasks:
         if len(proposals) >= _MAX_PROPOSALS:
             break
         if task.get("is_completed"):
@@ -182,7 +209,7 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
                 slot = find_slot(duration, deadline)
             if slot is None:
                 break
-            placed.append(slot)
+            reserve(slot[0], slot[1])
             label = title if len(sessions) == 1 else f"{title} ({index + 1}/{len(sessions)})"
             proposals.append(
                 {

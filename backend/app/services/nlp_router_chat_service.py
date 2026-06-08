@@ -943,6 +943,40 @@ class NlpRouterChatService:
             }
         return sanitize_chat_reply(self._format_set_preferences(result, periods))
 
+    def _is_retry_reply(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:try again|another|different|regenerate|redo|reshuffle|"
+                r"shuffle|retry|other option|other options|something else|"
+                r"not these|not those|mix it up)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    async def _offer_preference_schedule(
+        self, message: str, *, seed: int | None, user_id: str | None
+    ) -> str:
+        """Suggest a (optionally randomized) schedule and await apply/try-again."""
+
+        from app.services import preference_scheduler
+
+        result = preference_scheduler.suggest_preference_schedule(
+            user_id=user_id, seed=seed
+        )
+        proposals = result.get("proposals") or []
+        if user_id and proposals:
+            _pending_nlu_context[user_id] = {
+                "message": message,
+                "predicted_tool": "apply_preference_schedule",
+                "awaiting_preference_apply": True,
+                "preference_proposals": proposals,
+                "seed": seed or 0,
+            }
+        elif user_id:
+            _pending_nlu_context.pop(user_id, None)
+        return sanitize_chat_reply(self._format_schedule_suggestion(result))
+
     async def _maybe_handle_preferences(
         self,
         message: str,
@@ -965,6 +999,12 @@ class NlpRouterChatService:
                     append_schedule_proposals(proposals)
                     return f"Done — I applied {len(proposals)} block(s) to your calendar."
                 return "There was nothing to apply."
+            if self._is_retry_reply(lower):
+                # Regenerate a different arrangement near the same preferences.
+                seed = int(pending.get("seed") or 0) + 1
+                return await self._offer_preference_schedule(
+                    message, seed=seed, user_id=user_id
+                )
             if norm in _CANCEL_REPLIES:
                 if user_id:
                     _pending_nlu_context.pop(user_id, None)
@@ -973,20 +1013,9 @@ class NlpRouterChatService:
         # Follow-up to "want me to suggest a schedule?" after saving a preference.
         if pending and pending.get("awaiting_preference_suggest"):
             if norm in _AFFIRMATIVE_REPLIES:
-                from app.services import preference_scheduler
-
-                result = preference_scheduler.suggest_preference_schedule(user_id=user_id)
-                proposals = result.get("proposals") or []
-                if user_id and proposals:
-                    _pending_nlu_context[user_id] = {
-                        "message": message,
-                        "predicted_tool": "apply_preference_schedule",
-                        "awaiting_preference_apply": True,
-                        "preference_proposals": proposals,
-                    }
-                elif user_id:
-                    _pending_nlu_context.pop(user_id, None)
-                return sanitize_chat_reply(self._format_schedule_suggestion(result))
+                return await self._offer_preference_schedule(
+                    message, seed=None, user_id=user_id
+                )
             if norm in _CANCEL_REPLIES:
                 if user_id:
                     _pending_nlu_context.pop(user_id, None)
@@ -1170,7 +1199,7 @@ class NlpRouterChatService:
             start = self._short_time(block.get("start_time"))
             end = self._short_time(block.get("end_time"))
             lines.append(f"- {title}: {start} to {end}")
-        lines.append("Apply these to your calendar? (yes/no)")
+        lines.append('Apply these? Say "yes" to add them, or "try again" for a different option.')
         return "\n".join(lines)
 
     def _format_preference_suggestion(

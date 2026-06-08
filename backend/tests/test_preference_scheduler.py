@@ -56,6 +56,122 @@ def test_suggest_splits_long_task_into_sessions_across_days(tmp_path, monkeypatc
     assert {p["task_title"] for p in essay} == {"Essay (1/2)", "Essay (2/2)"}
 
 
+def test_suggest_keeps_a_break_between_same_day_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "c.json")
+
+    from datetime import datetime, timedelta
+
+    from app.services import preference_scheduler as sched
+    from app.services.chat_client_context import (
+        clear_client_context,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+        set_user_id,
+    )
+
+    try:
+        set_user_id("u")
+        set_client_today("2026-06-08")
+        prefs.set_preferences("u", ["night"])
+        set_calendar_events([])
+        set_tasks([
+            {"title": "A", "estimated_minutes": 60, "due_date": "2026-06-20T23:59:00"},
+            {"title": "B", "estimated_minutes": 60, "due_date": "2026-06-20T23:59:00"},
+        ])
+        result = sched.suggest_preference_schedule(user_id="u", break_minutes=15)
+    finally:
+        clear_client_context()
+
+    blocks = sorted(result["proposals"], key=lambda p: p["start_time"])
+    for a, b in zip(blocks, blocks[1:]):
+        end_a = datetime.fromisoformat(a["end_time"])
+        start_b = datetime.fromisoformat(b["start_time"])
+        if end_a.date() == start_b.date():
+            assert start_b >= end_a + timedelta(minutes=15)  # 15-min break kept
+
+
+def test_seeded_suggest_is_deterministic_per_seed(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "c.json")
+
+    from app.services import preference_scheduler as sched
+    from app.services.chat_client_context import (
+        clear_client_context,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+        set_user_id,
+    )
+
+    try:
+        set_user_id("u")
+        set_client_today("2026-06-08")
+        prefs.set_preferences("u", ["night", "afternoon"])
+        set_calendar_events([])
+        set_tasks([
+            {"title": "Essay", "estimated_minutes": 240, "due_date": "2026-06-20T23:59:00"},
+            {"title": "Lab", "estimated_minutes": 120, "due_date": "2026-06-20T23:59:00"},
+        ])
+        first = sched.suggest_preference_schedule(user_id="u", seed=5)
+        again = sched.suggest_preference_schedule(user_id="u", seed=5)
+    finally:
+        clear_client_context()
+
+    assert [p["start_time"] for p in first["proposals"]] == [
+        p["start_time"] for p in again["proposals"]
+    ]
+
+
+def test_router_try_again_regenerates_without_applying(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "c.json")
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+        set_user_id,
+    )
+    from app.services.nlp_router_chat_service import (
+        NlpRouterChatService,
+        _pending_nlu_context,
+    )
+
+    service = NlpRouterChatService()
+
+    async def run():
+        set_user_id("u")
+        set_client_today("2026-06-08")
+        set_calendar_events([])
+        set_tasks([
+            {"title": "Essay", "estimated_minutes": 120, "due_date": "2026-06-20T23:59:00"}
+        ])
+        await service.run_turn("I'm productive at night", user_id="u")
+        await service.run_turn("yes", user_id="u")  # first suggestion
+        before = get_schedule_proposals()
+        retry = await service.run_turn("try again", user_id="u")  # regenerate
+        mid = get_schedule_proposals()
+        applied = await service.run_turn("yes", user_id="u")  # apply
+        after = get_schedule_proposals()
+        return retry, applied, before, mid, after
+
+    try:
+        _pending_nlu_context.clear()
+        retry, applied, before, mid, after = asyncio.run(run())
+    finally:
+        _pending_nlu_context.clear()
+        clear_client_context()
+
+    assert "apply these" in retry.lower()  # a fresh suggestion, not an apply
+    assert before == [] and mid == []  # nothing written while previewing/retrying
+    assert "applied" in applied.lower()
+    assert len(after) >= 1
+
+
 def test_suggest_never_moves_fixed_and_relocates_flexible(tmp_path, monkeypatch):
     monkeypatch.setattr(prefs, "_store_path", tmp_path / "p.json")
     monkeypatch.setattr(clf, "_store_path", tmp_path / "c.json")
