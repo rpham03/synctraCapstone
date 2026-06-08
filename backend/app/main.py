@@ -5,6 +5,7 @@ from app.api.v1.routes import (
     auth,
     canvas,
     chat,
+    collab,
     course_import_colab,
     events,
     schedule,
@@ -27,6 +28,7 @@ app.include_router(events.router,   prefix="/api/v1/events",   tags=["events"])
 app.include_router(tasks.router,    prefix="/api/v1/tasks",    tags=["tasks"])
 app.include_router(schedule.router, prefix="/api/v1/schedule", tags=["schedule"])
 app.include_router(chat.router,     prefix="/api/v1/chat",     tags=["chat"])
+app.include_router(collab.router,   prefix="/api/v1/collab",   tags=["collab"])
 app.include_router(canvas.router,   prefix="/api/v1/canvas",   tags=["canvas"])
 # Temporarily route course imports through the Colab-backed agent only.
 app.include_router(
