@@ -13,6 +13,49 @@ def _ev(eid, title, source, start, end):
     return {"id": eid, "title": title, "source": source, "start_time": start, "end_time": end}
 
 
+def test_split_minutes_caps_sessions_at_two_hours():
+    from app.services.preference_scheduler import _split_minutes
+
+    assert _split_minutes(60) == [60]
+    assert _split_minutes(120) == [120]
+    assert _split_minutes(180) == [90, 90]   # 3h -> two 1.5h sessions
+    assert _split_minutes(240) == [120, 120]  # 4h -> two 2h sessions
+    assert _split_minutes(300) == [100, 100, 100]  # 5h -> three sessions
+
+
+def test_suggest_splits_long_task_into_sessions_across_days(tmp_path, monkeypatch):
+    monkeypatch.setattr(prefs, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf, "_store_path", tmp_path / "c.json")
+
+    from app.services import preference_scheduler as sched
+    from app.services.chat_client_context import (
+        clear_client_context,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+        set_user_id,
+    )
+
+    try:
+        set_user_id("u")
+        set_client_today("2026-06-08")
+        prefs.set_preferences("u", ["night"])
+        set_calendar_events([])
+        set_tasks([
+            {"title": "Essay", "estimated_minutes": 240, "due_date": "2026-06-20T23:59:00"}
+        ])
+        result = sched.suggest_preference_schedule(user_id="u")
+    finally:
+        clear_client_context()
+
+    essay = [p for p in result["proposals"] if "Essay" in p["task_title"]]
+    assert len(essay) == 2  # 4h split into two sessions
+    assert all(p["duration_minutes"] == 120 for p in essay)
+    assert sum(p["duration_minutes"] for p in essay) == 240
+    assert len({p["start_time"][:10] for p in essay}) == 2  # spread across two days
+    assert {p["task_title"] for p in essay} == {"Essay (1/2)", "Essay (2/2)"}
+
+
 def test_suggest_never_moves_fixed_and_relocates_flexible(tmp_path, monkeypatch):
     monkeypatch.setattr(prefs, "_store_path", tmp_path / "p.json")
     monkeypatch.setattr(clf, "_store_path", tmp_path / "c.json")

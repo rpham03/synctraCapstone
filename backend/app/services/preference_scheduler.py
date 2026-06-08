@@ -25,6 +25,19 @@ from app.services.chat_client_context import (
 
 _MAX_PROPOSALS = 12
 _DEFAULT_TASK_MINUTES = 60
+# Long tasks are split into study sessions of at most this many minutes, spread
+# across different days (e.g. a 4h task -> two 2h sessions; 3h -> 90+90).
+_MAX_SESSION_MINUTES = 120
+
+
+def _split_minutes(total: int) -> list[int]:
+    """Split a task's total minutes into evenly-sized sessions of <= 2 hours."""
+    total = max(int(total), 1)
+    if total <= _MAX_SESSION_MINUTES:
+        return [total]
+    sessions = -(-total // _MAX_SESSION_MINUTES)  # ceil
+    base, remainder = divmod(total, sessions)
+    return [base + (1 if i < remainder else 0) for i in range(sessions)]
 
 
 def _window_for(day, start_hhmm: str, end_hhmm: str) -> tuple[datetime, datetime]:
@@ -98,8 +111,10 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
     now = effective_now()
     placed: list[tuple[datetime, datetime]] = list(busy)
 
-    def find_slot(duration: timedelta, deadline: datetime | None) -> tuple[datetime, datetime] | None:
-        for offset in range(days_ahead + 1):
+    def find_slot(
+        duration: timedelta, deadline: datetime | None, *, start_offset: int = 0
+    ) -> tuple[datetime, datetime] | None:
+        for offset in range(start_offset, days_ahead + 1):
             day = today + timedelta(days=offset)
             for pref in prefs:
                 ws, we = _window_for(day, pref["start"], pref["end"])
@@ -146,27 +161,40 @@ def suggest_preference_schedule(*, user_id: str | None = None, days_ahead: int =
         if len(proposals) >= _MAX_PROPOSALS:
             break
 
-    # 2) New blocks for flexible tasks before their deadline.
+    # 2) Flexible tasks: split long ones into <=2h sessions across the week.
     for task in get_tasks():
         if len(proposals) >= _MAX_PROPOSALS:
             break
         if task.get("is_completed"):
             continue
-        minutes = _task_minutes(task)
-        slot = find_slot(timedelta(minutes=minutes), _task_deadline(task))
-        if not slot:
-            continue
-        placed.append(slot)
-        proposals.append(
-            {
-                "task_title": str(task.get("title") or "Study block"),
-                "start_time": slot[0].isoformat(),
-                "end_time": slot[1].isoformat(),
-                "duration_minutes": minutes,
-                "is_ai_generated": True,
-                "written_to_calendar": False,
-            }
-        )
+        deadline = _task_deadline(task)
+        sessions = _split_minutes(_task_minutes(task))
+        title = str(task.get("title") or "Study block")
+        next_offset = 0
+        for index, minutes in enumerate(sessions):
+            if len(proposals) >= _MAX_PROPOSALS:
+                break
+            duration = timedelta(minutes=minutes)
+            # Prefer a later day so the sessions spread out; if nothing's left
+            # before the deadline, fall back to any open day.
+            slot = find_slot(duration, deadline, start_offset=next_offset)
+            if slot is None and next_offset > 0:
+                slot = find_slot(duration, deadline)
+            if slot is None:
+                break
+            placed.append(slot)
+            label = title if len(sessions) == 1 else f"{title} ({index + 1}/{len(sessions)})"
+            proposals.append(
+                {
+                    "task_title": label,
+                    "start_time": slot[0].isoformat(),
+                    "end_time": slot[1].isoformat(),
+                    "duration_minutes": minutes,
+                    "is_ai_generated": True,
+                    "written_to_calendar": False,
+                }
+            )
+            next_offset = (slot[0].date() - today).days + 1
 
     period_label = ", ".join(p["period"] for p in prefs)
     if not proposals:
