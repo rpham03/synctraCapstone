@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-DEFAULT_DATASET_SIZE = 1000
+DEFAULT_DATASET_SIZE = 3000
 DEFAULT_SEED = 13
 TRAIN_RATIO = 0.70
 TEST_RATIO = 0.30
@@ -24,7 +24,16 @@ TOOLS = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "move_calendar_block",
     "delete_calendar_block",
+    "set_productivity_preferences",
+    "get_productivity_preferences",
+    "remove_productivity_preferences",
+    "classify_all_calendar_events",
+    "classify_calendar_item",
+    "set_event_flexibility_override",
+    "suggest_preference_schedule",
+    "apply_preference_schedule",
     "ai_agent",
 ]
 INTENTS = {
@@ -34,7 +43,16 @@ INTENTS = {
     "get_tasks": "list_tasks",
     "propose_schedule_change": "propose_study_schedule",
     "add_calendar_block": "create_calendar_event",
+    "move_calendar_block": "move_calendar_event",
     "delete_calendar_block": "delete_calendar_event",
+    "set_productivity_preferences": "set_productive_period",
+    "get_productivity_preferences": "get_productive_period",
+    "remove_productivity_preferences": "remove_productive_period",
+    "classify_all_calendar_events": "classify_calendar",
+    "classify_calendar_item": "classify_event",
+    "set_event_flexibility_override": "override_event_flexibility",
+    "suggest_preference_schedule": "suggest_schedule",
+    "apply_preference_schedule": "apply_schedule",
     "ai_agent": "general_assistance",
 }
 
@@ -528,7 +546,213 @@ def _candidate_examples() -> dict[str, list[dict[str, Any]]]:
     ]:
         pools["ai_agent"].append(example(greeting, "ai_agent"))
 
+    _add_feature_pools(pools)
     return pools
+
+
+def _cap(message: str) -> str:
+    return message[0].upper() + message[1:] if message else message
+
+
+def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
+    """Move, productivity-preference, classification, and scheduling examples."""
+
+    titles = [
+        "study block", "bible study", "gaming", "workout", "meeting", "dentist",
+        "lab 7", "reading", "group study", "office hours", "piano practice",
+        "review session", "standup", "project work", "CSE 369 review", "book club",
+    ]
+    days = [
+        "today", "tomorrow", "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday", "this weekend", "next week",
+    ]
+    times = ["9 AM", "10 AM", "1 PM", "2 PM", "3 PM", "5 PM", "7 PM", "8 PM", "9 PM"]
+
+    # ---- move_calendar_block ----
+    for verb, title, day in product(["Move", "Reschedule", "Shift"], titles, days):
+        pools["move_calendar_block"].append(
+            example(f"{verb} my {title} to {day}", "move_calendar_block",
+                    slots={"title": title, "date": day})
+        )
+    for title, day, t in product(titles, ["Friday", "Monday", "tomorrow", "Saturday"], times):
+        pools["move_calendar_block"].append(
+            example(f"Move my {title} to {day} at {t}", "move_calendar_block",
+                    slots={"title": title, "date": day, "start_time": t})
+        )
+    for title, (t1, t2) in product(
+        titles, [("2 PM", "7 PM"), ("9 AM", "11 AM"), ("1 PM", "4 PM"), ("8 PM", "9 PM")]
+    ):
+        pools["move_calendar_block"].append(
+            example(f"Move my {title} from {t1} to {t2}", "move_calendar_block",
+                    slots={"title": title, "start_time": t1, "end_time": t2})
+        )
+    for verb, title, dur in product(
+        ["Extend", "Shorten", "Lengthen"], titles, ["1 hour", "2 hours", "30 minutes"]
+    ):
+        pools["move_calendar_block"].append(
+            example(f"{verb} my {title} by {dur}", "move_calendar_block")
+        )
+
+    # ---- set_productivity_preferences ----
+    periods = ["morning", "afternoon", "evening", "night"]
+    set_templates = [
+        "I'm productive in the {p}", "I work best in the {p}",
+        "I focus best in the {p}", "I'm most productive in the {p}",
+        "I do my best work in the {p}", "I get the most done in the {p}",
+        "I'm sharpest in the {p}", "I concentrate best in the {p}",
+        "I have the most energy in the {p}", "I prefer to work in the {p}",
+        "I like working in the {p}", "{p} is when I'm most productive",
+        "I'm at my best in the {p}", "set my productive time to the {p}",
+        "save the {p} as my productive time", "I'm a {p} person",
+        "my most productive time is the {p}", "I do focused work in the {p}",
+        "I study best in the {p}", "I'm productive during the {p}",
+        "I tend to focus in the {p}", "the {p} is my productive window",
+        "I usually work best in the {p}", "I'm most alert in the {p}",
+        "I get my best work done in the {p}",
+    ]
+    for tmpl, p in product(set_templates, periods):
+        pools["set_productivity_preferences"].append(
+            example(_cap(tmpl.format(p=p)), "set_productivity_preferences")
+        )
+    pairs = [("morning", "night"), ("morning", "evening"), ("afternoon", "evening"),
+             ("morning", "afternoon"), ("evening", "night"), ("afternoon", "night")]
+    pair_templates = [
+        "I'm productive in the {a} and at {b}", "I work best in the {a} and {b}",
+        "I'm most productive in the {a} and the {b}", "I focus in the {a} and the {b}",
+        "I do my best work in the {a} and {b}", "my productive times are {a} and {b}",
+    ]
+    for tmpl, (a, b) in product(pair_templates, pairs):
+        pools["set_productivity_preferences"].append(
+            example(_cap(tmpl.format(a=a, b=b)), "set_productivity_preferences")
+        )
+    tr = [("8 PM", "11 PM"), ("6 AM", "9 AM"), ("9 PM", "12 AM"), ("1 PM", "4 PM"),
+          ("7 AM", "10 AM"), ("8 AM", "11 AM"), ("6 PM", "9 PM"), ("5 PM", "8 PM"),
+          ("2 PM", "5 PM"), ("10 AM", "1 PM")]
+    tr_templates = [
+        "I'm productive from {t1} to {t2}", "I work best from {t1} to {t2}",
+        "my productive hours are {t1} to {t2}", "I do my best work from {t1} to {t2}",
+        "set my productive time to {t1} to {t2}",
+    ]
+    for tmpl, (t1, t2) in product(tr_templates, tr):
+        pools["set_productivity_preferences"].append(
+            example(_cap(tmpl.format(t1=t1, t2=t2)), "set_productivity_preferences",
+                    slots={"start_time": t1, "end_time": t2})
+        )
+
+    # ---- get_productivity_preferences ----
+    pref_nouns = [
+        "productivity preferences", "productive times", "productive periods",
+        "preferred work hours", "focus times", "productive hours",
+        "preferred productive times", "productivity settings",
+    ]
+    for lead, noun, tail in product(
+        ["What are", "Show me", "Tell me", "Remind me of", "List", "Get",
+         "Can you list", "What did I set for", "Do you remember", "Look up"],
+        pref_nouns,
+        ["", "?", " please"],
+    ):
+        pools["get_productivity_preferences"].append(
+            example(f"{lead} my {noun}{tail}".strip(), "get_productivity_preferences")
+        )
+
+    # ---- remove_productivity_preferences ----
+    rm_verbs = ["Remove", "Clear", "Delete", "Forget", "Reset", "Drop"]
+    for verb, noun, tail in product(rm_verbs, pref_nouns, ["", " now"]):
+        pools["remove_productivity_preferences"].append(
+            example(f"{verb} my {noun}{tail}".strip(), "remove_productivity_preferences")
+        )
+    for verb, p, tmpl in product(
+        rm_verbs, periods,
+        ["my {p} preference", "the {p} productive time", "{p} from my preferences",
+         "my {p} productivity preference"],
+    ):
+        pools["remove_productivity_preferences"].append(
+            example(f"{verb} {tmpl.format(p=p)}", "remove_productivity_preferences")
+        )
+
+    # ---- classify_all_calendar_events ----
+    for v, s, suf in product(
+        ["Classify", "Sort", "Label", "Categorize", "Organize", "Mark"],
+        ["my calendar", "all my events", "everything on my calendar",
+         "my whole calendar", "my schedule", "my events", "my week",
+         "all my calendar events"],
+        ["", "into fixed and flexible", "as fixed or flexible", "by type"],
+    ):
+        pools["classify_all_calendar_events"].append(
+            example(f"{v} {s} {suf}".strip(), "classify_all_calendar_events")
+        )
+    for q in [
+        "Which events are fixed or flexible", "What's fixed and what's flexible on my calendar",
+        "Tell me which events are fixed or flexible", "Which of my events are flexible",
+        "What on my calendar is fixed", "Go through my calendar and mark fixed or flexible",
+    ]:
+        pools["classify_all_calendar_events"].append(
+            example(q, "classify_all_calendar_events")
+        )
+
+    # ---- classify_calendar_item ----
+    item_templates = [
+        "Is my {t} fixed or flexible", "Classify my {t}", "Is {t} fixed or flexible",
+        "What is {t}, fixed or flexible", "Tell me if my {t} is fixed or flexible",
+        "Is the {t} fixed or flexible", "Classify the {t} on my calendar",
+        "Is my {t} a fixed event", "Would you classify my {t}",
+        "Is {t} flexible or fixed", "Check if my {t} is fixed",
+        "Decide if my {t} is fixed or flexible",
+    ]
+    for tmpl, t in product(item_templates, titles):
+        pools["classify_calendar_item"].append(
+            example(tmpl.format(t=t), "classify_calendar_item", slots={"title": t})
+        )
+
+    # ---- set_event_flexibility_override ----
+    for v, t, fx in product(["Mark", "Set", "Treat", "Make"], titles, ["fixed", "flexible"]):
+        pools["set_event_flexibility_override"].append(
+            example(f"{v} my {t} as {fx}", "set_event_flexibility_override",
+                    slots={"title": t})
+        )
+    for t, fx in product(titles, ["fixed", "flexible"]):
+        pools["set_event_flexibility_override"].append(
+            example(f"My {t} is {fx}", "set_event_flexibility_override", slots={"title": t})
+        )
+        pools["set_event_flexibility_override"].append(
+            example(f"Treat the {t} as {fx}", "set_event_flexibility_override",
+                    slots={"title": t})
+        )
+
+    # ---- suggest_preference_schedule ----
+    for core, obj, lead in product(
+        ["Suggest", "Plan", "Build", "Create", "Propose", "Put together", "Draft", "Arrange"],
+        ["a schedule for my flexible work", "my flexible tasks",
+         "a study schedule near my productive time", "blocks for my flexible events",
+         "my week around my productive hours", "time for my flexible tasks",
+         "a plan for my flexible work", "my flexible study blocks"],
+        ["", "please ", "can you ", "could you "],
+    ):
+        pools["suggest_preference_schedule"].append(
+            example(_cap(f"{lead}{core} {obj}".strip()), "suggest_preference_schedule")
+        )
+
+    # ---- apply_preference_schedule ----
+    for core, obj, lead in product(
+        ["Apply", "Confirm", "Lock in", "Save", "Add", "Accept", "Use", "Go ahead with"],
+        ["the schedule", "those blocks", "that schedule", "the suggested times",
+         "those study blocks", "the plan", "these times", "the suggested schedule"],
+        ["", "yes ", "please ", "ok "],
+    ):
+        pools["apply_preference_schedule"].append(
+            example(_cap(f"{lead}{core} {obj}".strip()), "apply_preference_schedule")
+        )
+
+    # ---- extra ai_agent variety (more tools now share the 3,000 rows) ----
+    for action, lead in product(
+        ["summarize this article", "explain recursion", "help me write a cover letter",
+         "give me study tips", "motivate me to study", "explain this concept",
+         "help me brainstorm a project", "proofread my essay", "translate this sentence",
+         "recommend a good book", "tell me a fun fact", "help me relax",
+         "explain the water cycle", "help me prepare for an interview"],
+        ["", "Can you ", "Please "],
+    ):
+        pools["ai_agent"].append(example(_cap(f"{lead}{action}"), "ai_agent"))
 
 
 def build_structured_examples(

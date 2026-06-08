@@ -41,7 +41,16 @@ LABELS = [
     "get_tasks",
     "propose_schedule_change",
     "add_calendar_block",
+    "move_calendar_block",
     "delete_calendar_block",
+    "set_productivity_preferences",
+    "get_productivity_preferences",
+    "remove_productivity_preferences",
+    "classify_all_calendar_events",
+    "classify_calendar_item",
+    "set_event_flexibility_override",
+    "suggest_preference_schedule",
+    "apply_preference_schedule",
     "ai_agent",
 ]
 

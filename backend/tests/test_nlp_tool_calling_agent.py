@@ -39,13 +39,13 @@ def test_shared_structured_nlu_dataset_has_1000_balanced_examples():
     rows = build_structured_examples()
     counts = Counter(row["tool"] for row in rows)
 
-    assert len(rows) == DEFAULT_DATASET_SIZE == 1000
-    assert int(len(rows) * TRAIN_RATIO) == 700
-    assert len(rows) - int(len(rows) * TRAIN_RATIO) == 300
+    assert len(rows) == DEFAULT_DATASET_SIZE == 3000
+    assert int(len(rows) * TRAIN_RATIO) == 2100
+    assert len(rows) - int(len(rows) * TRAIN_RATIO) == 900
     assert TEST_RATIO == 0.30
     assert set(counts) == set(TOOLS)
     assert max(counts.values()) - min(counts.values()) <= 1
-    assert len({" ".join(row["user_message"].lower().split()) for row in rows}) == 1000
+    assert len({" ".join(row["user_message"].lower().split()) for row in rows}) == 3000
 
 
 def test_calendar_training_data_uses_general_natural_phrasing():
@@ -96,11 +96,11 @@ def test_shared_dataset_split_is_700_300_and_label_balanced():
     train_counts = Counter(labels[index] for index in train_indices)
     test_counts = Counter(labels[index] for index in test_indices)
 
-    assert len(train_indices) == 700
-    assert len(test_indices) == 300
+    assert len(train_indices) == 2100
+    assert len(test_indices) == 900
     assert set(train_indices).isdisjoint(test_indices)
-    assert sorted(train_counts.values()) == [87, 87, 87, 87, 88, 88, 88, 88]
-    assert sorted(test_counts.values()) == [37, 37, 37, 37, 38, 38, 38, 38]
+    assert sorted(train_counts.values()) == [123] * 8 + [124] * 9
+    assert sorted(test_counts.values()) == [52] + [53] * 16
 
 
 def test_intent_dataset_selection_is_exactly_1000_and_balanced():
@@ -112,7 +112,7 @@ def test_intent_dataset_selection_is_exactly_1000_and_balanced():
     selected = select_balanced_dataset(rows, DEFAULT_DATASET_SIZE, seed=13)
     counts = Counter(example.label for example in selected)
 
-    assert len(selected) == 1000
+    assert len(selected) == 3000
     assert max(counts.values()) - min(counts.values()) <= 1
 
 
