@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-DEFAULT_DATASET_SIZE = 3000
+DEFAULT_DATASET_SIZE = 5000
 DEFAULT_SEED = 13
 TRAIN_RATIO = 0.70
 TEST_RATIO = 0.30
@@ -743,16 +743,156 @@ def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
             example(_cap(f"{lead}{core} {obj}".strip()), "apply_preference_schedule")
         )
 
-    # ---- extra ai_agent variety (more tools now share the 3,000 rows) ----
+    # ---- extra ai_agent variety (more tools now share the dataset) ----
     for action, lead in product(
         ["summarize this article", "explain recursion", "help me write a cover letter",
          "give me study tips", "motivate me to study", "explain this concept",
          "help me brainstorm a project", "proofread my essay", "translate this sentence",
          "recommend a good book", "tell me a fun fact", "help me relax",
-         "explain the water cycle", "help me prepare for an interview"],
-        ["", "Can you ", "Please "],
+         "explain the water cycle", "help me prepare for an interview",
+         "help me outline an essay", "explain photosynthesis", "give me a pep talk",
+         "help me word an email", "suggest a topic for my paper", "explain big-O notation",
+         "help me make a study plan idea", "rewrite this more formally",
+         "summarize these notes", "explain this error message",
+         "help me with my resume", "explain this theorem", "give me motivation",
+         "help me destress", "explain quantum computing", "suggest a workout",
+         "help me journal", "explain the stock market", "give me a recipe",
+         "help me set a goal", "explain machine learning", "suggest a podcast",
+         "help me write a poem", "explain gravity", "tips for better sleep",
+         "help me plan a trip", "explain inflation", "suggest a hobby",
+         "help me focus better", "explain how DNA works"],
+        ["", "Can you ", "Please ", "Could you "],
     ):
         pools["ai_agent"].append(example(_cap(f"{lead}{action}"), "ai_agent"))
+
+    # ---- larger pools so the dataset can scale (e.g. 5,000 rows) ----
+    titles2 = titles + [
+        "calculus homework", "chemistry lab", "history reading", "team meeting",
+        "therapy appointment", "club meeting", "volunteer shift", "language practice",
+        "research session", "thesis writing", "coding practice", "art class",
+    ]
+
+    # get_assignments — Canvas-sync flavored.
+    for lead, obj, tail in product(
+        ["Check Canvas for", "Sync my", "Pull my", "Refresh my", "Fetch my",
+         "Update my", "Get my", "Show me my", "Are there new", "List my",
+         "Look up my", "Load my"],
+        ["assignments", "Canvas assignments", "homework from Canvas", "new assignments",
+         "assignment list", "Canvas homework", "upcoming assignments", "graded work"],
+        ["", "?", " from Canvas"],
+    ):
+        pools["get_assignments"].append(
+            example(f"{lead} {obj}{tail}".strip(), "get_assignments")
+        )
+
+    # find_free_slots — open-time questions with a date slot.
+    for tmpl, d in product(
+        ["When am I free {d}", "What free time do I have {d}", "When am I available {d}",
+         "Show my open slots {d}", "Find free time {d}", "Where do I have gaps {d}",
+         "When can I study {d}", "What's my availability {d}", "Do I have free time {d}",
+         "When am I open {d}", "Find an open slot {d}", "What times am I free {d}"],
+        ["today", "tomorrow", "this week", "Monday", "Tuesday", "Wednesday",
+         "Thursday", "Friday", "this weekend", "next week"],
+    ):
+        pools["find_free_slots"].append(
+            example(tmpl.format(d=d), "find_free_slots", slots={"date": d})
+        )
+
+    # set_productivity_preferences — more single-period phrasings.
+    for tmpl, p in product(
+        ["I'm productive mainly in the {p}", "I tend to do my best work in the {p}",
+         "the {p} works best for me", "I'd rather work in the {p}",
+         "I'm wired for the {p}", "I get a lot done in the {p}",
+         "I think most clearly in the {p}", "I'm freshest in the {p}",
+         "count me as a {p} worker", "my focus peaks in the {p}",
+         "I'm productive especially in the {p}", "I have great focus in the {p}",
+         "I work most efficiently in the {p}", "I'm energized in the {p}",
+         "I prefer the {p} for deep work", "{p} works for my focus",
+         "I really focus in the {p}", "the {p} is best for my studying",
+         "I lock in during the {p}", "I'm dialed in during the {p}",
+         "set my best work time to the {p}", "remember I'm productive in the {p}",
+         "note that I work best in the {p}", "log my productive time as the {p}",
+         "I'm a strong worker in the {p}", "I crush my work in the {p}",
+         "my productivity peaks in the {p}", "I do deep work in the {p}",
+         "I'm most disciplined in the {p}", "I'm at peak focus in the {p}"],
+        periods,
+    ):
+        pools["set_productivity_preferences"].append(
+            example(_cap(tmpl.format(p=p)), "set_productivity_preferences")
+        )
+
+    # get_productivity_preferences — extra nouns.
+    for lead, noun, tail in product(
+        ["What are", "Show me", "Tell me", "Remind me of", "List", "Get",
+         "Can you list", "What did I set for", "Do you remember", "Look up"],
+        ["preferred study times", "preferred focus times"],
+        ["", "?", " please"],
+    ):
+        pools["get_productivity_preferences"].append(
+            example(f"{lead} my {noun}{tail}".strip(), "get_productivity_preferences")
+        )
+
+    # remove_productivity_preferences — more phrasings.
+    for verb, noun, tail in product(
+        rm_verbs, pref_nouns, [" entirely", " for now", " from settings"],
+    ):
+        pools["remove_productivity_preferences"].append(
+            example(f"{verb} my {noun}{tail}".strip(), "remove_productivity_preferences")
+        )
+    for verb, p in product(rm_verbs, periods):
+        pools["remove_productivity_preferences"].append(
+            example(f"I'm no longer productive in the {p}", "remove_productivity_preferences")
+        )
+
+    # classify_all_calendar_events — extra suffix variety.
+    for v, s, suf in product(
+        ["Classify", "Sort", "Label", "Categorize", "Organize", "Mark", "Tag", "Group"],
+        ["my calendar", "all my events", "everything on my calendar",
+         "my whole calendar", "my schedule", "my events", "my week",
+         "all my calendar events"],
+        ["right now", "for me", "today", "please"],
+    ):
+        pools["classify_all_calendar_events"].append(
+            example(f"{v} {s} {suf}".strip(), "classify_all_calendar_events")
+        )
+
+    # classify_calendar_item — more titles.
+    for tmpl, t in product(item_templates, titles2):
+        pools["classify_calendar_item"].append(
+            example(tmpl.format(t=t), "classify_calendar_item", slots={"title": t})
+        )
+
+    # set_event_flexibility_override — more titles and verbs.
+    for v, t, fx in product(
+        ["Mark", "Set", "Treat", "Make", "Tag", "Label"], titles2, ["fixed", "flexible"]
+    ):
+        pools["set_event_flexibility_override"].append(
+            example(f"{v} my {t} as {fx}", "set_event_flexibility_override",
+                    slots={"title": t})
+        )
+
+    # suggest_preference_schedule — more objects.
+    for core, obj, lead in product(
+        ["Suggest", "Plan", "Build", "Create", "Propose", "Put together", "Draft", "Arrange"],
+        ["a schedule around my productive hours", "study time near my best hours",
+         "my flexible work for the week", "blocks during my productive period",
+         "a study plan near my focus time"],
+        ["", "please ", "can you ", "could you "],
+    ):
+        pools["suggest_preference_schedule"].append(
+            example(_cap(f"{lead}{core} {obj}".strip()), "suggest_preference_schedule")
+        )
+
+    # apply_preference_schedule — more objects.
+    for core, obj, lead in product(
+        ["Apply", "Confirm", "Lock in", "Save", "Add", "Accept", "Use", "Go ahead with"],
+        ["the suggestion", "those suggested blocks", "the proposed schedule",
+         "the proposed times", "that plan"],
+        ["", "yes ", "please ", "ok "],
+    ):
+        pools["apply_preference_schedule"].append(
+            example(_cap(f"{lead}{core} {obj}".strip()), "apply_preference_schedule")
+        )
 
 
 def build_structured_examples(

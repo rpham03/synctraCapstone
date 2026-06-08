@@ -35,17 +35,17 @@ from one_click_train_nlp_router_colab import (
 from train_nlu_slot_model import SLOT_LABELS, align_token_labels, find_slot_spans, load_examples
 
 
-def test_shared_structured_nlu_dataset_has_1000_balanced_examples():
+def test_shared_structured_nlu_dataset_has_5000_balanced_examples():
     rows = build_structured_examples()
     counts = Counter(row["tool"] for row in rows)
 
-    assert len(rows) == DEFAULT_DATASET_SIZE == 3000
-    assert int(len(rows) * TRAIN_RATIO) == 2100
-    assert len(rows) - int(len(rows) * TRAIN_RATIO) == 900
+    assert len(rows) == DEFAULT_DATASET_SIZE == 5000
+    assert int(len(rows) * TRAIN_RATIO) == 3500
+    assert len(rows) - int(len(rows) * TRAIN_RATIO) == 1500
     assert TEST_RATIO == 0.30
     assert set(counts) == set(TOOLS)
     assert max(counts.values()) - min(counts.values()) <= 1
-    assert len({" ".join(row["user_message"].lower().split()) for row in rows}) == 3000
+    assert len({" ".join(row["user_message"].lower().split()) for row in rows}) == 5000
 
 
 def test_calendar_training_data_uses_general_natural_phrasing():
@@ -78,7 +78,7 @@ def test_delete_training_data_uses_general_and_multiple_event_phrasing():
     assert any("every event" in message or "all study blocks" in message for message in messages)
 
 
-def test_checked_in_structured_nlu_dataset_matches_generated_1000_rows():
+def test_checked_in_structured_nlu_dataset_matches_generated_rows():
     examples = load_examples(TOOL_DIR / "syntra_nlu_training_data.jsonl")
 
     assert len(examples) == DEFAULT_DATASET_SIZE
@@ -88,7 +88,7 @@ def test_checked_in_structured_nlu_dataset_matches_generated_1000_rows():
     )
 
 
-def test_shared_dataset_split_is_700_300_and_label_balanced():
+def test_shared_dataset_split_is_3500_1500_and_label_balanced():
     rows = build_structured_examples()
     labels = [row["tool"] for row in rows]
 
@@ -96,14 +96,15 @@ def test_shared_dataset_split_is_700_300_and_label_balanced():
     train_counts = Counter(labels[index] for index in train_indices)
     test_counts = Counter(labels[index] for index in test_indices)
 
-    assert len(train_indices) == 2100
-    assert len(test_indices) == 900
+    assert len(train_indices) == 3500
+    assert len(test_indices) == 1500
     assert set(train_indices).isdisjoint(test_indices)
-    assert sorted(train_counts.values()) == [123] * 8 + [124] * 9
-    assert sorted(test_counts.values()) == [52] + [53] * 16
+    assert max(train_counts.values()) - min(train_counts.values()) <= 1
+    assert max(test_counts.values()) - min(test_counts.values()) <= 1
+    assert set(train_counts) == set(test_counts) == set(TOOLS)
 
 
-def test_intent_dataset_selection_is_exactly_1000_and_balanced():
+def test_intent_dataset_selection_is_exact_size_and_balanced():
     rows = [
         TrainingExample(text=row["user_message"], label=row["tool"])
         for row in build_structured_examples()
@@ -112,7 +113,7 @@ def test_intent_dataset_selection_is_exactly_1000_and_balanced():
     selected = select_balanced_dataset(rows, DEFAULT_DATASET_SIZE, seed=13)
     counts = Counter(example.label for example in selected)
 
-    assert len(selected) == 3000
+    assert len(selected) == 5000
     assert max(counts.values()) - min(counts.values()) <= 1
 
 
