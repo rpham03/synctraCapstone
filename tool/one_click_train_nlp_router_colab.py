@@ -14,7 +14,8 @@ Default behavior:
 - supports json/jsonl/csv/txt/tsv/parquet and dialogue JSON with turns
 - trains a transformer intent classifier
 - trains a second token-classification model for slots from structured NLU JSONL
-- uses the same 1,000 structured examples and 70/30 split for both models
+- uses the same 5,000 structured examples and 70/30 split for both models
+- records real held-out per-tool/per-slot metrics, model size, parameters, and latency
 - saves the model to /content/syntra_tool_router
 - tests several prompts and prints the predicted Syntra tool calls
 """
@@ -40,6 +41,15 @@ from generate_structured_nlu_dataset import (
     DEFAULT_DATASET_SIZE,
     TEST_RATIO,
     balanced_split_indices,
+)
+from training_metrics import (
+    benchmark_model,
+    classification_report,
+    label_counts,
+    model_information,
+    text_fingerprint,
+    write_confusion_csv,
+    write_json,
 )
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -1904,6 +1914,13 @@ def select_balanced_dataset(
         label: base_count + (1 if index < remainder else 0)
         for index, label in enumerate(LABELS)
     }
+    if len(examples) == target_size and all(
+        len(by_label[label]) == targets[label] for label in LABELS
+    ):
+        # Preserve canonical order so the intent and slot trainers produce the
+        # same deterministic held-out split from the shared structured dataset.
+        return examples
+
     rng = random.Random(seed)
     selected: list[TrainingExample] = []
     for label in LABELS:
@@ -2152,9 +2169,10 @@ def train_and_test(args: argparse.Namespace) -> None:
         trainer_kwargs["tokenizer"] = tokenizer
 
     trainer = Trainer(**trainer_kwargs)
-    trainer.train()
-    metrics = trainer.evaluate()
-    eval_loss = metrics.get("eval_loss")
+    train_result = trainer.train()
+    prediction_output = trainer.predict(tokenized["test"])
+    metrics = prediction_output.metrics
+    eval_loss = metrics.get("test_loss", metrics.get("eval_loss"))
     if eval_loss is not None and not np.isfinite(eval_loss):
         print(
             "[warning] eval loss is not finite. The model is not usable yet. "
@@ -2167,23 +2185,172 @@ def train_and_test(args: argparse.Namespace) -> None:
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
     (output_dir / "labels.json").write_text(json.dumps({"labels": LABELS}, indent=2))
-    (output_dir / "training_meta.json").write_text(
-        json.dumps(
-            {
+    logits = np.asarray(prediction_output.predictions)
+    expected_ids = np.asarray(prediction_output.label_ids).astype(int)
+    predicted_ids = np.argmax(logits, axis=-1).astype(int)
+    shifted = logits - np.max(logits, axis=-1, keepdims=True)
+    probabilities = np.exp(shifted) / np.exp(shifted).sum(axis=-1, keepdims=True)
+    confidences = np.max(probabilities, axis=-1)
+    held_out_texts = [examples[index].text for index in test_indices]
+    held_out_labels = [examples[index].label for index in test_indices]
+    report = classification_report(
+        expected_ids.tolist(),
+        predicted_ids.tolist(),
+        LABELS,
+        confidences.tolist(),
+    )
+    report.update(
+        {
+            "report_type": "trained_intent_classifier_held_out_test",
+            "split": {
+                "seed": args.seed,
+                "train_ratio": round(1 - args.test_ratio, 6),
+                "test_ratio": args.test_ratio,
                 "total_examples": len(examples),
                 "train_examples": len(dataset["train"]),
                 "test_examples": len(dataset["test"]),
-                "test_ratio": args.test_ratio,
-                "structured_nlu_examples": len(structured),
-                "base_model": args.base_model,
-                "label_counts": counts,
+                "train_label_counts": label_counts(
+                    [examples[index].label for index in train_indices]
+                ),
+                "test_label_counts": label_counts(held_out_labels),
+                "train_text_sha256": text_fingerprint(
+                    [examples[index].text for index in train_indices]
+                ),
+                "test_text_sha256": text_fingerprint(held_out_texts),
+            },
+            "training": {
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "learning_rate": args.learning_rate,
+                "weight_decay": training_kwargs["weight_decay"],
+                "max_grad_norm": args.max_grad_norm,
+                "warmup_steps": args.warmup_steps,
+                "max_steps": args.max_steps,
+                "max_sequence_length": 256,
+                "train_runtime_seconds": train_result.metrics.get("train_runtime"),
+                "train_samples_per_second": train_result.metrics.get(
+                    "train_samples_per_second"
+                ),
+                "train_steps_per_second": train_result.metrics.get(
+                    "train_steps_per_second"
+                ),
+                "train_loss": train_result.metrics.get("train_loss"),
+                "eval_loss": eval_loss,
+                "eval_runtime_seconds": metrics.get(
+                    "test_runtime", metrics.get("eval_runtime")
+                ),
+                "eval_samples_per_second": metrics.get(
+                    "test_samples_per_second", metrics.get("eval_samples_per_second")
+                ),
+            },
+            "model": model_information(
+                model,
+                output_dir,
+                base_model=args.base_model,
+                task="17-label intent/tool classification",
+            ),
+            "latency": benchmark_model(model, tokenizer, held_out_texts),
+            "training_history": trainer.state.log_history,
+        }
+    )
+    write_json(output_dir / "intent_metrics.json", report)
+    confusion = report["confusion_matrix"]
+    write_confusion_csv(
+        output_dir / "intent_confusion_matrix.csv",
+        confusion["labels"],
+        confusion["rows_expected_columns_predicted"],
+    )
+    with (output_dir / "intent_test_predictions.jsonl").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        for text, expected, predicted, confidence in zip(
+            held_out_texts,
+            held_out_labels,
+            predicted_ids.tolist(),
+            confidences.tolist(),
+        ):
+            handle.write(
+                json.dumps(
+                    {
+                        "user_message": text,
+                        "expected_tool": expected,
+                        "predicted_tool": LABELS[predicted],
+                        "confidence": round(float(confidence), 6),
+                        "correct": expected == LABELS[predicted],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    write_json(
+        output_dir / "training_meta.json",
+        {
+            "total_examples": len(examples),
+            "train_examples": len(dataset["train"]),
+            "test_examples": len(dataset["test"]),
+            "test_ratio": args.test_ratio,
+            "seed": args.seed,
+            "structured_nlu_examples": len(structured),
+            "base_model": args.base_model,
+            "label_counts": counts,
+            "held_out_accuracy": report["accuracy"],
+            "held_out_macro_f1": report["macro_average"]["f1"],
+            "metrics_artifact": "intent_metrics.json",
+            "predictions_artifact": "intent_test_predictions.jsonl",
+            "confusion_matrix_artifact": "intent_confusion_matrix.csv",
+        },
+    )
+    print("\n[intent-metrics] real held-out transformer results")
+    print(
+        json.dumps(
+            {
+                "accuracy": report["accuracy"],
+                "macro_f1": report["macro_average"]["f1"],
+                "weighted_f1": report["weighted_average"]["f1"],
+                "test_examples": report["total"],
+                "parameters": report["model"]["total_parameters"],
+                "artifact_size_mb": report["model"]["saved_artifact_size_mb"],
+                "latency": report["latency"],
             },
             indent=2,
-        ),
-        encoding="utf-8",
+        )
     )
+    print("\n[intent-metrics] per-tool held-out metrics")
+    print(
+        f"{'tool':38} {'accuracy':>9} {'precision':>9} "
+        f"{'recall':>8} {'f1':>8} {'support':>8}"
+    )
+    for label in LABELS:
+        row = report["per_tool"][label]
+        print(
+            f"{label:38} {row['accuracy']:>9.4f} {row['precision']:>9.4f} "
+            f"{row['recall']:>8.4f} {row['f1']:>8.4f} {row['support']:>8}"
+        )
     print(f"[model] saved to {output_dir}")
     train_slot_model(args, output_dir)
+    slot_metrics_path = output_dir / "slot_model" / "slot_metrics.json"
+    write_json(
+        output_dir / "model_metrics_summary.json",
+        {
+            "intent_model": report,
+            "slot_model": (
+                json.loads(slot_metrics_path.read_text(encoding="utf-8"))
+                if slot_metrics_path.exists()
+                else None
+            ),
+            "artifacts": {
+                "intent_metrics": str(output_dir / "intent_metrics.json"),
+                "intent_predictions": str(
+                    output_dir / "intent_test_predictions.jsonl"
+                ),
+                "intent_confusion_matrix": str(
+                    output_dir / "intent_confusion_matrix.csv"
+                ),
+                "slot_metrics": str(slot_metrics_path),
+            },
+        },
+    )
+    print(f"[metrics] combined report: {output_dir / 'model_metrics_summary.json'}")
     if not args.skip_manual_eval_files:
         eval_path = (
             Path(args.manual_eval_path)
@@ -2241,13 +2408,13 @@ def parse_args() -> argparse.Namespace:
         "--dataset-size",
         type=int,
         default=DEFAULT_DATASET_SIZE,
-        help="Exact shared dataset size for both intent and slot models. Default: 1000.",
+        help="Exact shared dataset size for both intent and slot models. Default: 5000.",
     )
     parser.add_argument(
         "--test-ratio",
         type=float,
         default=TEST_RATIO,
-        help="Evaluation split used by both models. Default: 0.30 (700/300).",
+        help="Evaluation split used by both models. Default: 0.30 (3500/1500).",
     )
     parser.add_argument("--base-model", default="distilbert-base-uncased")
     parser.add_argument("--epochs", type=float, default=6.0)
