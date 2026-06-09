@@ -26,6 +26,56 @@ _schedule_proposals: contextvars.ContextVar[list[dict[str, Any]] | None] = (
 _user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "chat_user_id", default=None
 )
+_study_preferences: contextvars.ContextVar[dict[str, Any] | None] = (
+    contextvars.ContextVar("chat_study_preferences", default=None)
+)
+
+
+def set_study_preferences(value: dict[str, Any] | None) -> None:
+    """Latest Settings-screen study window/session/break for this request.
+
+    Shape: {"start": "HH:MM", "end": "HH:MM", "session_minutes": int,
+    "break_minutes": int}. Any missing/invalid key is dropped so the scheduler
+    falls back to its defaults rather than crashing.
+    """
+
+    if not isinstance(value, dict):
+        _study_preferences.set(None)
+        return
+    cleaned: dict[str, Any] = {}
+    start = _normalize_hhmm(value.get("start"))
+    end = _normalize_hhmm(value.get("end"))
+    if start and end:
+        cleaned["start"] = start
+        cleaned["end"] = end
+    for key in ("session_minutes", "break_minutes"):
+        try:
+            minutes = int(value.get(key))
+        except (TypeError, ValueError):
+            continue
+        if minutes > 0:
+            cleaned[key] = minutes
+    _study_preferences.set(cleaned or None)
+
+
+def get_study_preferences() -> dict[str, Any] | None:
+    raw = _study_preferences.get()
+    return raw if isinstance(raw, dict) and raw else None
+
+
+def _normalize_hhmm(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = text.split(":")
+        hour = int(parts[0])
+        minute = int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        return ""
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return ""
+    return f"{hour:02d}:{minute:02d}"
 
 
 def set_user_id(value: str | None) -> None:
@@ -143,3 +193,4 @@ def clear_client_context() -> None:
     _timezone_name.set(None)
     _schedule_proposals.set(None)
     _user_id.set(None)
+    _study_preferences.set(None)

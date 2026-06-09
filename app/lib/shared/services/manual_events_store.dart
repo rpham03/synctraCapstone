@@ -46,6 +46,37 @@ class ManualEventsStore extends ChangeNotifier {
     notifyListeners();
     return true;
   }
+
+  /// Look up a manual event by id (for snapshotting before a move/delete).
+  Future<EventModel?> findById(String id) async {
+    for (final e in await load()) {
+      if (e.id == id) return e;
+    }
+    return null;
+  }
+
+  /// Remove a manual event and return the removed copy, or null if none matched.
+  /// Used by undo so the exact event can be restored later.
+  Future<EventModel?> removeReturning(String id) async {
+    final events = await load();
+    final index = events.indexWhere((e) => e.id == id);
+    if (index < 0) return null;
+    final removed = events.removeAt(index);
+    await _saveAll(events);
+    notifyListeners();
+    return removed;
+  }
+
+  /// Re-add a previously removed manual event (undo of a delete). No-op if an
+  /// event with the same id is already present. Returns true if it was added.
+  Future<bool> restore(EventModel event) async {
+    final events = await load();
+    if (events.any((e) => e.id == event.id)) return false;
+    events.add(event);
+    await _saveAll(events);
+    notifyListeners();
+    return true;
+  }
 }
 
 void registerManualEventsStore() {

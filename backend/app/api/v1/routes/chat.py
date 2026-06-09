@@ -34,6 +34,22 @@ class ChatMessageIn(BaseModel):
         default_factory=list,
         description="Tasks from the Tasks tab (manual + cached Canvas + course).",
     )
+    study_start_time: str = Field(
+        default="",
+        description="Settings study-window start as HH:MM (latest user_settings).",
+    )
+    study_end_time: str = Field(
+        default="",
+        description="Settings study-window end as HH:MM (latest user_settings).",
+    )
+    session_length_minutes: int = Field(
+        default=0,
+        description="Preferred study-session length in minutes (0 = use default).",
+    )
+    break_minutes: int = Field(
+        default=0,
+        description="Break to leave between scheduled blocks in minutes (0 = default).",
+    )
 
 
 @router.post("/message")
@@ -41,9 +57,17 @@ async def post_message(body: ChatMessageIn) -> dict:
     service = ChatService()
     events = list(body.calendar_events)
     tasks = list(body.tasks)
+    study_preferences = {
+        "start": body.study_start_time.strip(),
+        "end": body.study_end_time.strip(),
+        "session_minutes": body.session_length_minutes,
+        "break_minutes": body.break_minutes,
+    }
     print(
         f"[chat] msg={body.message!r} tasks_in={len(tasks)} "
-        f"events_in={len(events)} client_today={body.client_today!r}",
+        f"events_in={len(events)} client_today={body.client_today!r} "
+        f"study_window={body.study_start_time!r}-{body.study_end_time!r} "
+        f"session={body.session_length_minutes} break={body.break_minutes}",
         flush=True,
     )
     reply, proposals = await service.process_message(
@@ -54,5 +78,6 @@ async def post_message(body: ChatMessageIn) -> dict:
         client_today=body.client_today.strip() or None,
         timezone_offset_minutes=body.timezone_offset_minutes,
         timezone_name=body.timezone_name.strip() or None,
+        study_preferences=study_preferences,
     )
     return {"reply": reply, "schedule_proposals": proposals}
