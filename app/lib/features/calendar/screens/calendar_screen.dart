@@ -4814,10 +4814,11 @@ class _StudyBlockChip extends StatelessWidget {
         '${DateFormat('h:mm a').format(block.startTime)} – ${DateFormat('h:mm a').format(block.endTime)}';
 
     // Solid fill so applied blocks read clearly on the grid (not a faint/blurred
-    // preview). The dashed border + sparkle icon still mark an AI suggestion.
+    // preview). Title/time/icon use the contrast color so they stay readable on
+    // the solid fill; the dashed border + sparkle still mark an AI suggestion.
     final fill = color;
     final borderColor =
-        flexible ? color.withValues(alpha: 0.7) : Colors.transparent;
+        flexible ? onColor.withValues(alpha: 0.55) : Colors.transparent;
 
     return Tooltip(
       message: hideContent ? '' : 'Click to edit · drag to move',
@@ -4851,7 +4852,7 @@ class _StudyBlockChip extends StatelessWidget {
                                     Icon(
                                       Icons.auto_awesome,
                                       size: 10,
-                                      color: color,
+                                      color: onColor,
                                     ),
                                     const SizedBox(width: AppTokens.space4),
                                   ],
@@ -4860,9 +4861,7 @@ class _StudyBlockChip extends StatelessWidget {
                                       block.taskTitle,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: CalendarTextStyles.eventTitle(
-                                        flexible ? color : onColor,
-                                      ),
+                                      style: CalendarTextStyles.eventTitle(onColor),
                                     ),
                                   ),
                                 ],
@@ -4872,9 +4871,7 @@ class _StudyBlockChip extends StatelessWidget {
                                   timeLabel,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: CalendarTextStyles.eventTime(
-                                    flexible ? color : onColor,
-                                  ),
+                                  style: CalendarTextStyles.eventTime(onColor),
                                 ),
                             ],
                           ),
