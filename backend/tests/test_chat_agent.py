@@ -1734,7 +1734,9 @@ def test_nlp_router_calls_ollama_generate_for_ai_agent(monkeypatch):
     assert result["assistant_message"] == "Hello from ai_agent"
     assert seen["url"] == "https://ollama.example/api/generate"
     assert seen["headers"]["ngrok-skip-browser-warning"] == "true"
-    assert seen["payload"]["prompt"] == "hi"
+    # The prompt now carries anti-hallucination guardrails plus the user request.
+    assert "User request: hi" in seen["payload"]["prompt"]
+    assert "only Synctra's tools do that" in seen["payload"]["prompt"]
     assert seen["payload"]["options"]["syntra_mode"] == "ai_agent"
 
 
@@ -1768,7 +1770,7 @@ def test_nlp_router_sends_recent_history_to_ai_agent(monkeypatch):
     assert result["assistant_message"] == "Context-aware reply"
     assert "User: hello" in prompt
     assert "Assistant: Hi there" in prompt
-    assert "Current user request: what did I say?" in prompt
+    assert "User request: what did I say?" in prompt
 
 
 def test_nlp_router_run_turn_uses_ai_agent_plan(monkeypatch):
@@ -2709,3 +2711,90 @@ def test_duration_add_coercion_uses_duration_and_clean_title():
         assert name3 == "add_calendar_block" and args3 == {"x": 1}
     finally:
         clear_client_context()
+
+
+def test_busy_block_adds_from_natural_phrasing(monkeypatch, tmp_path):
+    """"i am busy from 3 to 6pm" adds a busy block (today 3-6 PM), no end-time prompt."""
+    from app.services import event_classification as clf_mod
+    from app.services import productivity_preferences as prefs_mod
+
+    monkeypatch.setattr(prefs_mod, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf_mod, "_store_path", tmp_path / "c.json")
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_plan(*_a, **_k):
+        return [{"name": "ai_agent", "arguments": {"message": "i am busy from 3 to 6pm"}}]
+
+    async def fail_ai(*_a, **_k):
+        raise AssertionError("a busy block must not go to the AI agent")
+
+    async def run():
+        set_client_today("2026-06-09")
+        set_calendar_events([])
+        set_tasks([])
+        reply = await service.run_turn("i am busy from 3 to 6pm", user_id="bz")
+        return reply, get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai)
+        reply, proposals = asyncio.run(run())
+    finally:
+        clear_client_context()
+
+    assert "added" in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["start_time"] == "2026-06-09T15:00:00"
+    assert proposals[0]["end_time"] == "2026-06-09T18:00:00"
+    assert "_coerced" not in proposals[0]  # internal flag never leaks to the client
+
+
+def test_do_i_have_fixed_events_lists_only_fixed(monkeypatch, tmp_path):
+    from app.services import event_classification as clf_mod
+    from app.services import productivity_preferences as prefs_mod
+
+    monkeypatch.setattr(prefs_mod, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf_mod, "_store_path", tmp_path / "c.json")
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_plan(*_a, **_k):
+        return [{"name": "ai_agent", "arguments": {"message": "do i have any fixed events"}}]
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_plan)
+        set_client_today("2026-06-09")
+        set_calendar_events([
+            {"id": "c1", "title": "CSE 369 Lecture", "source": "course",
+             "start_time": "2026-06-09T09:00:00", "end_time": "2026-06-09T10:00:00"},
+            {"id": "s1", "title": "Study math", "source": "study_block",
+             "start_time": "2026-06-09T14:00:00", "end_time": "2026-06-09T15:00:00"},
+        ])
+        set_tasks([])
+        fixed_reply = asyncio.run(service.run_turn("do i have any fixed events", user_id="fx"))
+        flex_reply = asyncio.run(service.run_turn("what are my flexible events", user_id="fx"))
+    finally:
+        clear_client_context()
+
+    assert "fixed" in fixed_reply.lower() and "cse 369 lecture" in fixed_reply.lower()
+    assert "study math" not in fixed_reply.lower()
+    assert "flexible" in flex_reply.lower() and "study math" in flex_reply.lower()
+    assert "cse 369 lecture" not in flex_reply.lower()

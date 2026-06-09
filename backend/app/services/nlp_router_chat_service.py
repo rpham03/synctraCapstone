@@ -201,6 +201,9 @@ class NlpRouterChatService:
                 name, arguments = self._coerce_duration_add_intent(
                     name, arguments, planning_message
                 )
+                name, arguments = self._coerce_busy_block_intent(
+                    name, arguments, planning_message
+                )
 
                 if name == CLARIFICATION_ACTION:
                     question = str(arguments.get("question") or "").strip()
@@ -1288,13 +1291,25 @@ class NlpRouterChatService:
             )
             return sanitize_chat_reply(self._format_override(result))
 
-        # Classify the whole calendar.
+        # Classify the calendar / list the fixed (or flexible) events.
         if (
-            re.search(r"\bclassif", lower)
-            and re.search(r"\b(?:all|calendar|events?|everything|schedule)\b", lower)
-        ) or re.search(r"\b(?:what|which)\b.*\b(?:fixed|flexible)\b", lower):
+            (
+                re.search(r"\bclassif", lower)
+                and re.search(r"\b(?:all|calendar|events?|everything|schedule)\b", lower)
+            )
+            or re.search(
+                r"\b(?:what|which|do i have|list|show me|any|are there)\b.{0,40}\b(?:fixed|flexible)\b",
+                lower,
+            )
+            or re.search(r"\b(?:fixed|flexible)\b.{0,20}\b(?:events?|blocks?|schedule|calendar)\b", lower)
+        ):
+            has_fixed = bool(re.search(r"\bfixed\b", lower))
+            has_flex = bool(re.search(r"\bflexible\b", lower))
+            want = "fixed" if (has_fixed and not has_flex) else (
+                "flexible" if (has_flex and not has_fixed) else None
+            )
             result = await execute_tool("classify_all_calendar_events", {})
-            return sanitize_chat_reply(self._format_classify_all(result))
+            return sanitize_chat_reply(self._format_classify_all(result, want))
 
         # Classify a single event ("is my X fixed or flexible?", "classify X").
         one = re.search(
@@ -1363,24 +1378,36 @@ class NlpRouterChatService:
         title = result.get("title") or "that event"
         return f"Got it — I'll treat {title} as {result.get('flexibility')}."
 
-    def _format_classify_all(self, result: dict[str, Any]) -> str:
+    def _format_classify_all(
+        self, result: dict[str, Any], want: str | None = None
+    ) -> str:
         counts = result.get("counts") or {}
-        if not result.get("events"):
+        events = result.get("events") or []
+        if not events:
             return "There's nothing on your calendar to classify yet."
+        fixed = [e for e in events if e.get("fixed_or_flexible") == "fixed"]
+        flexible = [e for e in events if e.get("fixed_or_flexible") == "flexible"]
+        uncertain = [e for e in events if e.get("fixed_or_flexible") == "uncertain"]
+
+        # Asked specifically for fixed (or flexible) — list just those.
+        if want in ("fixed", "flexible"):
+            group = fixed if want == "fixed" else flexible
+            if not group:
+                return f"You don't have any {want} events right now."
+            lines = [f"You have {len(group)} {want} event(s):"]
+            lines += [f"- {e.get('event_name')}" for e in group[:8]]
+            if len(group) > 8:
+                lines.append(f"- plus {len(group) - 8} more")
+            return "\n".join(lines)
+
         lines = [
-            f"I classified {len(result['events'])} events: "
+            f"I classified {len(events)} events: "
             f"{counts.get('fixed', 0)} fixed, {counts.get('flexible', 0)} flexible"
             + (f", {counts.get('uncertain', 0)} uncertain" if counts.get("uncertain") else "")
             + "."
         ]
-        flexible = [
-            e for e in result["events"] if e.get("fixed_or_flexible") == "flexible"
-        ]
         for event in flexible[:5]:
             lines.append(f"- {event.get('event_name')} (flexible)")
-        uncertain = [
-            e for e in result["events"] if e.get("fixed_or_flexible") == "uncertain"
-        ]
         if uncertain:
             names = ", ".join(e.get("event_name", "?") for e in uncertain[:3])
             lines.append(f"I'm unsure about: {names}. Are those fixed or flexible?")
@@ -1561,6 +1588,7 @@ class NlpRouterChatService:
                 "title": title,
                 "start_time": start.isoformat(),
                 "end_time": end.isoformat(),
+                "_coerced": True,
             }
         # No start time given — auto-place a block of this length before the
         # named day's end (or tomorrow if no day was named).
@@ -1570,6 +1598,82 @@ class NlpRouterChatService:
             "hours": minutes / 60.0,
             "deadline": datetime.combine(deadline_day, time(23, 59)).isoformat(),
             "estimated_minutes": minutes,
+        }
+
+    def _parse_time_range(self, message: str) -> tuple[time, time] | None:
+        """Parse "from 3 to 6pm" / "9am-11am" — the end's AM/PM applies to the start."""
+        m = re.search(
+            r"\b(?:from\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*"
+            r"(?:to|until|till|through|[-–—])\s*"
+            r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            return None
+
+        def build(hour: str, minute: str | None, ampm: str | None, fallback: str | None) -> time | None:
+            h = int(hour)
+            mn = int(minute or 0)
+            tag = (ampm or fallback or "").replace(".", "").lower()
+            if tag:
+                if not 1 <= h <= 12 or mn > 59:
+                    return None
+                if tag.startswith("p") and h != 12:
+                    h += 12
+                if tag.startswith("a") and h == 12:
+                    h = 0
+            elif not (13 <= h <= 23 and mn <= 59):
+                return None  # bare hour with no AM/PM anywhere — ambiguous
+            return time(h, mn)
+
+        end_t = build(m.group(4), m.group(5), m.group(6), None)
+        start_t = build(m.group(1), m.group(2), m.group(3), m.group(6))
+        if start_t is None or end_t is None:
+            return None
+        return start_t, end_t
+
+    def _coerce_busy_block_intent(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """"I'm busy from 3 to 6pm" -> add a busy block so scheduling avoids it."""
+        if name == "add_calendar_block" and str(arguments.get("start_time") or "").strip():
+            return name, arguments  # already a concrete add
+        if not re.search(
+            r"\b(?:busy|unavailable|occupied|tied up|booked|not free|"
+            r"have (?:a|an|my|class|practice|meeting|appointment|work|gym|something)|"
+            r"got (?:a|an|class|practice|work))\b",
+            message,
+            flags=re.IGNORECASE,
+        ):
+            return name, arguments
+        rng = self._parse_time_range(message)
+        if rng is None:
+            return name, arguments
+        day = self._move_target_date(message) or effective_today()
+        start = datetime.combine(day, rng[0])
+        end = datetime.combine(day, rng[1])
+        if end <= start:
+            return name, arguments
+        title_match = re.search(
+            r"\bhave\s+(?:a\s+|an\s+|my\s+)?([a-z][a-z ]{1,28}?)\s+(?:from|at|on|today|tomorrow|"
+            r"this|next|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        title = "Busy"
+        if title_match:
+            candidate = " ".join(title_match.group(1).strip().split())
+            if candidate and candidate.lower() not in self._NON_TITLE_WORDS:
+                title = candidate[:40].capitalize()
+        return "add_calendar_block", {
+            "title": title,
+            "start_time": start.isoformat(),
+            "end_time": end.isoformat(),
+            "_coerced": True,
         }
 
     def _coerce_move_intent(
@@ -2008,6 +2112,11 @@ class NlpRouterChatService:
 
         lower = user_message.lower()
         if name == "add_calendar_block":
+            # A block built by a deterministic coercion (busy / duration add) is
+            # already grounded in the user's words — validate the times only,
+            # don't re-ask. Model-produced adds have no flag and stay guarded.
+            if arguments.get("_coerced"):
+                return self._verify_add_calendar_block(arguments)
             if self._is_move_request(lower):
                 return (
                     "I could not find that event in your calendar preview to move. "
@@ -2382,23 +2491,37 @@ class NlpRouterChatService:
             "raw": data,
         }
 
+    # Guardrails so the fallback chat model never *pretends* to edit the calendar
+    # (it can't — only Synctra's tools do) and instead points the user at the
+    # exact command that works. Sent with every ai_agent turn.
+    _AI_AGENT_GUARDRAILS = (
+        "You are Synctra's study and schedule assistant. Keep replies short (1-3 sentences).\n"
+        "You CANNOT view, add, move, delete, extend, reschedule, confirm, cancel, or apply anything "
+        "on the user's calendar or study blocks — only Synctra's tools do that, and they are not "
+        "running in this reply. NEVER say or imply you scheduled, added, moved, deleted, canceled, "
+        "extended, rescheduled, or applied anything, and never invent events, times, or a schedule.\n"
+        "If the user wants a calendar action, DON'T pretend to do it — tell them the exact command to "
+        "type. Examples that work: \"move gaming to Friday\", \"extend gaming by 1 hour\", "
+        "\"delete gaming\", \"add 2h study tomorrow\", \"suggest a schedule for my tasks\", "
+        "\"what's on my calendar today?\", \"do I have any fixed events?\".\n"
+        "Answer general study questions (concepts, tips, planning advice) normally. Do not return JSON."
+    )
+
     def _ai_agent_prompt(
         self,
         message: str,
         history: list[dict[str, str]] | None,
     ) -> str:
-        if not history:
-            return message
-        lines = [
-            "Use this recent conversation only as context. Answer the current user request.",
-            "",
-        ]
-        for item in history[-12:]:
-            role = str(item.get("role") or "user").strip().capitalize()
-            content = str(item.get("content") or "").strip()
-            if content:
-                lines.append(f"{role}: {content}")
-        lines.extend(("", f"Current user request: {message}"))
+        lines = [self._AI_AGENT_GUARDRAILS, ""]
+        if history:
+            lines.append("Recent conversation (context only):")
+            for item in history[-12:]:
+                role = str(item.get("role") or "user").strip().capitalize()
+                content = str(item.get("content") or "").strip()
+                if content:
+                    lines.append(f"{role}: {content}")
+            lines.append("")
+        lines.append(f"User request: {message}")
         return "\n".join(lines)
 
     def _format_tool_result(self, name: str, result: dict[str, Any]) -> str:
