@@ -1488,6 +1488,47 @@ class NlpRouterChatService:
         cut = re.sub(r"^\s*(?:of|for|a|an|the|some|my)\s+", " ", cut, flags=re.IGNORECASE)
         return " ".join(cut.strip(" .,:;-").split())
 
+    # Verbs that introduce a duration-based add ("add/schedule/block 2h study …").
+    _ADD_VERBS = (
+        r"add|schedule|block\s*out|block\s*off|block|set\s*aside|reserve|"
+        r"pencil\s*in|put|plan|create|make|do|study|find\s+time\s+for"
+    )
+    _DUR = r"(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b"
+
+    def _duration_minutes(self, num: str, unit: str) -> int:
+        amount = float(num)
+        return int(round(amount * 60)) if unit.lower().startswith("h") else int(round(amount))
+
+    def _parse_duration_add(self, message: str) -> tuple[str, int] | None:
+        """Return (title, minutes) for a duration-based add phrase, else None."""
+        # 1) verb + duration + name  ("add 2h study tomorrow")
+        m = re.search(
+            rf"\b(?:{self._ADD_VERBS})\b\s+(?:a\s+|an\s+|some\s+)?{self._DUR}\s+"
+            r"(?:of\s+|for\s+)?(.+)$",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            return self._strip_when_and_time(m.group(3)), self._duration_minutes(m.group(1), m.group(2))
+        # 2) verb + name + "for" + duration  ("schedule study for 2 hours tomorrow")
+        m = re.search(
+            rf"\b(?:{self._ADD_VERBS})\b\s+(?:a\s+|an\s+|some\s+)?(.+?)\s+for\s+"
+            rf"(?:a\s+|an\s+)?{self._DUR}\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            return self._strip_when_and_time(m.group(1)), self._duration_minutes(m.group(2), m.group(3))
+        # 3) bare "2h study tomorrow" — must start with the duration.
+        m = re.match(
+            rf"\s*(?:a\s+|an\s+)?{self._DUR}\s+(?:of\s+|for\s+)?(.+)$",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            return self._strip_when_and_time(m.group(3)), self._duration_minutes(m.group(1), m.group(2))
+        return None
+
     def _coerce_duration_add_intent(
         self,
         name: str,
@@ -1498,26 +1539,18 @@ class NlpRouterChatService:
 
         The duration (2h) sets the length, so only a start time is ever needed,
         never an end time. With a start time it adds a concrete block; without
-        one it auto-places the block before the named day. The title is just the
-        event name — the "2h" duration is never prefixed to it.
+        one it auto-places the block before the named day (no start-time prompt).
+        The title is just the event name — the "2h" duration is never prefixed.
+        Covers add/schedule/block/plan/… phrasings and a bare "2h study tomorrow".
         """
 
-        match = re.search(
-            r"\b(?:add|block\s*out|block\s*off|set\s*aside|reserve|pencil\s*in)\b\s+"
-            r"(?:a\s+|an\s+|some\s+)?"
-            r"(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b\s+"
-            r"(.+)$",
-            message,
-            flags=re.IGNORECASE,
-        )
-        if not match:
+        parsed = self._parse_duration_add(message)
+        if parsed is None:
             return name, arguments
-        amount = float(match.group(1))
-        unit = match.group(2).lower()
-        minutes = int(round(amount * 60)) if unit.startswith("h") else int(round(amount))
+        title, minutes = parsed
         if minutes <= 0:
             return name, arguments
-        title = self._strip_when_and_time(match.group(3)) or "Study block"
+        title = title or "Study block"
 
         day = self._move_target_date(message)
         times = self._parse_clock_times(message) or self._parse_bare_hours_after_prep(message)
