@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../data/models/task_model.dart';
+import '../../../shared/utils/duration_format.dart';
 import '../../../shared/utils/task_schedule_utils.dart';
 import '../../../shared/utils/task_timeline_utils.dart';
 
@@ -18,16 +19,37 @@ DateTime weekMondayOf(DateTime anchor) {
 bool taskDueInWeek(TaskModel t, DateTime weekMonday) =>
     taskOverlapsWeek(t, weekMonday);
 
-Color _priorityDotColor(TaskModel t, ThemeData theme) {
+Color _sourceStripeColor(TaskModel t, ThemeData theme) {
   if (t.isCompleted) return theme.colorScheme.outlineVariant;
-  if (t.source == 'manual') return AppColors.manualTask;
-  if (t.source == 'course') return AppColors.deadline;
-  if (t.source == 'canvas') return AppColors.canvasAssignment;
-  final days = _dateOnly(t.dueDate).difference(_dateOnly(DateTime.now())).inDays;
-  if (days < 0) return AppColors.deadline;
-  if (days <= 1) return const Color(0xFFE11D48);
-  if (days <= 3) return const Color(0xFFF59E0B);
-  return theme.colorScheme.outlineVariant;
+  return switch (t.source) {
+    'manual' => AppColors.manualTask,
+    'canvas' => AppColors.canvasAssignment,
+    'course' => AppColors.deadline,
+    _ => theme.colorScheme.outlineVariant,
+  };
+}
+
+String _boardDayCaption(TaskModel task, DateTime day) {
+  final span = taskSpanCalendarDays(task.estimatedMinutes);
+  if (span <= 1) {
+    return taskDueStatusLabel(task, completed: task.isCompleted);
+  }
+  final start = taskWorkStartDate(task.dueDate, task.estimatedMinutes);
+  return manualTaskDayLabel(
+    viewDay: day,
+    rangeStart: start,
+    rangeEnd: task.dueDate,
+  );
+}
+
+String _boardSourceLabel(TaskModel task) {
+  if (task.courseLabel != null) return task.courseLabel!;
+  return switch (task.source) {
+    'canvas' => 'Canvas',
+    'course' => 'Course import',
+    'manual' => 'Your task',
+    _ => 'Task',
+  };
 }
 
 class WeeklyTasksBoard extends StatefulWidget {
@@ -180,12 +202,14 @@ class _DayColumnHeader extends StatelessWidget {
   final DateTime day;
   final bool isToday;
   final bool compact;
+  final int taskCount;
   final VoidCallback onAdd;
 
   const _DayColumnHeader({
     required this.day,
     required this.isToday,
     required this.compact,
+    required this.taskCount,
     required this.onAdd,
   });
 
@@ -237,6 +261,16 @@ class _DayColumnHeader extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                           fontSize: 10,
                         ),
+                      ),
+                    ),
+                  ],
+                  if (taskCount > 1) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      '$taskCount tasks',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ],
@@ -339,6 +373,7 @@ class _DayColumn extends StatelessWidget {
                     day: day,
                     isToday: isToday,
                     compact: compact,
+                    taskCount: tasks.length,
                     onAdd: onOpenAdd,
                   ),
                   if (addOpen) ...[
@@ -397,15 +432,17 @@ class _DayColumn extends StatelessWidget {
                             shrinkWrap: true,
                             physics: const ClampingScrollPhysics(),
                             children: [
-                              for (final t in tasks)
+                              for (var i = 0; i < tasks.length; i++)
                                 Padding(
-                                  padding: const EdgeInsets.only(bottom: 6),
+                                  padding: const EdgeInsets.only(bottom: 8),
                                   child: _BoardTaskCard(
-                                    task: t,
+                                    task: tasks[i],
                                     day: day,
-                                    dotColor: _priorityDotColor(t, theme),
+                                    index: i,
+                                    totalOnDay: tasks.length,
+                                    stripeColor: _sourceStripeColor(tasks[i], theme),
                                     onToggleDone: onToggleDone,
-                                    onDelete: () => onDeleteTask(t),
+                                    onDelete: () => onDeleteTask(tasks[i]),
                                   ),
                                 ),
                             ],
@@ -424,14 +461,18 @@ class _DayColumn extends StatelessWidget {
 class _BoardTaskCard extends StatelessWidget {
   final TaskModel task;
   final DateTime day;
-  final Color dotColor;
+  final int index;
+  final int totalOnDay;
+  final Color stripeColor;
   final void Function(TaskModel task, bool done) onToggleDone;
   final VoidCallback onDelete;
 
   const _BoardTaskCard({
     required this.task,
     required this.day,
-    required this.dotColor,
+    required this.index,
+    required this.totalOnDay,
+    required this.stripeColor,
     required this.onToggleDone,
     required this.onDelete,
   });
@@ -440,84 +481,116 @@ class _BoardTaskCard extends StatelessWidget {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final done = task.isCompleted;
+    final due = taskDateOnly(task.dueDate);
+    final dayOnly = taskDateOnly(day);
+    final spanDays = taskSpanCalendarDays(task.estimatedMinutes);
+    final workStart = taskWorkStartDate(task.dueDate, task.estimatedMinutes);
+    final caption = _boardDayCaption(task, day);
+    final sourceLabel = _boardSourceLabel(task);
+    final estimateLabel = DurationFormat.formatEstimate(task.estimatedMinutes);
+    final showDueDate = dayOnly != due;
 
-    final inner = Padding(
-      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+    final inner = IntrinsicHeight(
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
+          Container(
+            width: 4,
+            decoration: BoxDecoration(
+              color: stripeColor,
+              borderRadius: const BorderRadius.horizontal(
+                left: Radius.circular(8),
+              ),
             ),
           ),
-          const SizedBox(width: 10),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  task.title,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w500,
-                    height: 1.25,
-                    decoration: done ? TextDecoration.lineThrough : null,
-                    color: done ? cs.onSurfaceVariant : cs.onSurface,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 4, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (totalOnDay > 1)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        '${index + 1} of $totalOnDay',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  Text(
+                    task.title,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      height: 1.25,
+                      decoration: done ? TextDecoration.lineThrough : null,
+                      color: done ? cs.onSurfaceVariant : cs.onSurface,
+                    ),
                   ),
-                ),
-                if (task.courseLabel != null) ...[
                   const SizedBox(height: 4),
                   Text(
-                    task.courseLabel!,
-                    maxLines: 2,
+                    sourceLabel,
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: cs.primary.withValues(alpha: 0.9),
-                      fontWeight: FontWeight.w500,
+                      color: stripeColor.withValues(alpha: done ? 0.55 : 0.95),
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                ] else if (task.source == 'course') ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    'Course import',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: cs.primary.withValues(alpha: 0.85),
-                    ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Icon(Icons.schedule, size: 12, color: cs.onSurfaceVariant),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          estimateLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                ] else if (task.source == 'canvas') ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    'Canvas',
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: cs.primary.withValues(alpha: 0.85),
+                  if (spanDays > 1) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Work ${DateFormat('MMM d').format(workStart)} – ${DateFormat('MMM d').format(due)}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                        height: 1.25,
+                      ),
                     ),
-                  ),
-                ],
-                if (taskSpanCalendarDays(task.estimatedMinutes) > 1) ...[
-                  const SizedBox(height: 4),
+                  ],
+                  const SizedBox(height: 6),
+                  if (showDueDate)
+                    Text(
+                      'Due ${DateFormat('MMM d').format(due)}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
                   Text(
-                    taskIsDueDay(task, day)
-                        ? 'Due'
-                        : (taskDateOnly(day) ==
-                                taskWorkStartDate(
-                                    task.dueDate, task.estimatedMinutes)
-                            ? 'Starts'
-                            : 'In progress'),
+                    caption,
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: taskIsDueDay(task, day)
                           ? AppColors.deadline
-                          : cs.onSurfaceVariant,
+                          : (spanDays > 1 ? cs.primary : cs.onSurfaceVariant),
                       fontWeight: FontWeight.w600,
-                      fontSize: 10,
                     ),
                   ),
                 ],
-              ],
+              ),
             ),
           ),
           IconButton(
@@ -533,11 +606,15 @@ class _BoardTaskCard extends StatelessWidget {
     );
 
     return Material(
-      color: cs.surface,
+      color: cs.surfaceContainerHighest.withValues(alpha: 0.35),
       elevation: 0,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
-        side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.85)),
+        side: BorderSide(
+          color: done
+              ? cs.outlineVariant.withValues(alpha: 0.75)
+              : stripeColor.withValues(alpha: 0.45),
+        ),
       ),
       child: interactive
           ? InkWell(

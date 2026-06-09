@@ -32,6 +32,7 @@ import '../../../shared/state/shell_sidebar_controller.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/utils/calendar_display_utils.dart';
+import '../../../shared/utils/local_time_format.dart';
 import '../../../shared/utils/undo_snackbar.dart';
 import '../../../shared/utils/manual_tasks_calendar.dart';
 import '../../../shared/utils/task_schedule_utils.dart';
@@ -348,7 +349,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   DateTime _startOfWeek(DateTime d) {
     final day = DateTime(d.year, d.month, d.day);
-    return day.subtract(Duration(days: day.weekday - DateTime.monday));
+    // Sunday = start of week (DateTime.weekday: Mon=1 … Sun=7).
+    return day.subtract(Duration(days: day.weekday % 7));
   }
 
   List<DateTime> _visibleDays() {
@@ -747,7 +749,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final llm = GetIt.instance<LlmService>();
     final now = DateTime.now();
     final weekStart = DateTime(now.year, now.month, now.day)
-        .subtract(Duration(days: now.weekday - DateTime.monday));
+        .subtract(Duration(days: now.weekday % 7));
     final weekEnd = weekStart.add(const Duration(days: 7));
     final fixed = store.fixedEventsForScheduling();
 
@@ -1799,19 +1801,6 @@ class _CalendarMonthView extends StatelessWidget {
     return items;
   }
 
-  static double _tableCalendarHeight(CalendarFormat format) {
-    final rowCount = switch (format) {
-      CalendarFormat.month => 6,
-      CalendarFormat.twoWeeks => 2,
-      CalendarFormat.week => 1,
-    };
-    const headerH = 56.0;
-    const daysOfWeekH = 20.0;
-    const rowH = 46.0;
-    const buffer = 8.0;
-    return headerH + daysOfWeekH + rowCount * rowH + buffer;
-  }
-
   String _selectedDayHeading(DateTime day) {
     final today = DateTime.now();
     final todayOnly = DateTime(today.year, today.month, today.day);
@@ -1850,18 +1839,15 @@ class _CalendarMonthView extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
-                  height: _tableCalendarHeight(calendarFormat),
-                  child: _MonthTableCalendar(
-                    focusedDay: focusedDay,
-                    selectedDay: selectedDay,
-                    format: calendarFormat,
-                    showFormatButton: isDesktop,
-                    onDaySelected: onDaySelected,
-                    onFormatChanged: onFormatChanged,
-                    onPageChanged: onPageChanged,
-                    eventLoader: eventsForDay,
-                  ),
+                child: _MonthTableCalendar(
+                  focusedDay: focusedDay,
+                  selectedDay: selectedDay,
+                  format: calendarFormat,
+                  showFormatButton: isDesktop,
+                  onDaySelected: onDaySelected,
+                  onFormatChanged: onFormatChanged,
+                  onPageChanged: onPageChanged,
+                  eventLoader: eventsForDay,
                 ),
               ),
             ),
@@ -2284,11 +2270,12 @@ class _MonthTableCalendar extends StatelessWidget {
       onDaySelected: onDaySelected,
       onFormatChanged: onFormatChanged,
       onPageChanged: onPageChanged,
-      startingDayOfWeek: StartingDayOfWeek.monday,
+      startingDayOfWeek: StartingDayOfWeek.sunday,
+      sixWeekMonthsEnforced: false,
       rowHeight: 46,
       daysOfWeekHeight: 20,
       calendarStyle: CalendarStyle(
-        outsideDaysVisible: true,
+        outsideDaysVisible: false,
         cellMargin: const EdgeInsets.all(3),
         weekendTextStyle: TextStyle(color: scheme.onSurfaceVariant),
         defaultTextStyle: TextStyle(
@@ -2383,10 +2370,18 @@ class _WeekDayHeaderRow extends StatelessWidget {
                 width: 56,
                 child: Center(
                   child: Text(
-                    multiDay ? 'GMT' : '',
+                    multiDay
+                        ? LocalTimeFormat.timeZoneLabel(
+                            compact: compactHeader,
+                          )
+                        : '',
+                    maxLines: 2,
+                    textAlign: TextAlign.center,
+                    overflow: TextOverflow.ellipsis,
                     style: theme.labelSmall?.copyWith(
                       color: scheme.onSurfaceVariant,
-                      fontSize: 10,
+                      fontSize: compactHeader ? 9 : 10,
+                      height: 1.1,
                     ),
                   ),
                 ),
@@ -2475,6 +2470,12 @@ const _kMaxOverlapCols = 3;
   return (raw.trim(), null);
 }
 
+/// Squarer corners on narrow overlap chips (avoids tall "pill/cylinder" look).
+BorderRadius timedChipBorderRadius(double width, double height) {
+  final r = math.min(3.0, math.min(width, height) * 0.08);
+  return BorderRadius.circular(r);
+}
+
 /// One timed segment for column packing (events + study blocks).
 class _SegLay {
   _SegLay({
@@ -2491,6 +2492,9 @@ class _SegLay {
   final EventModel? event;
   final ScheduleBlockModel? block;
   int col = 0;
+  int overlapTotal = 1;
+  int overlapIndex = 1;
+  int clusterMaxCols = 1;
 }
 
 class _WeekDayTimeGrid extends StatefulWidget {
@@ -2968,7 +2972,7 @@ class _DayTimeColumn extends StatelessWidget {
     return dt.hour * 60 + dt.minute - firstHour * 60;
   }
 
-  /// Greedy column assignment: overlapping items split column width evenly.
+  /// Greedy column assignment for overlapping items (used for cascade order).
   static List<_SegLay> _packSegments(List<_SegLay> raw) {
     if (raw.isEmpty) return raw;
     raw.sort((a, b) {
@@ -2993,6 +2997,49 @@ class _DayTimeColumn extends StatelessWidget {
       }
     }
     return raw;
+  }
+
+  static void _annotateOverlapClusters(List<_SegLay> segs) {
+    for (final s in segs) {
+      final cluster = segs
+          .where((o) => o.startMin < s.endMin && o.endMin > s.startMin)
+          .toList()
+        ..sort((a, b) => a.col.compareTo(b.col));
+      s.overlapTotal = cluster.length;
+      s.overlapIndex = cluster.indexOf(s) + 1;
+      s.clusterMaxCols =
+          cluster.map((c) => c.col).reduce(math.max) + 1;
+    }
+  }
+
+  /// Side-by-side overlap with a readable minimum width; cascades when tight.
+  static ({double left, double width}) _sideBySideRect({
+    required double pad,
+    required double inner,
+    required int col,
+    required int clusterMaxCols,
+  }) {
+    if (clusterMaxCols <= 1) {
+      return (left: pad, width: inner);
+    }
+    final cols = math.min(clusterMaxCols, _kMaxOverlapCols);
+    const gap = 1.0;
+    const minColW = 28.0;
+    final evenSplit = (inner - gap * (cols - 1)) / cols;
+    final colW = math.max(minColW, evenSplit);
+    final colIndex = col.clamp(0, cols - 1);
+    final totalNeeded = colW * cols + gap * (cols - 1);
+    if (totalNeeded > inner && cols > 1) {
+      final step = math.max(10.0, (inner - minColW) / (cols - 1));
+      return (
+        left: pad + colIndex * step,
+        width: math.min(minColW, inner),
+      );
+    }
+    return (
+      left: pad + colIndex * (colW + gap),
+      width: colW,
+    );
   }
 
   @override
@@ -3037,10 +3084,9 @@ class _DayTimeColumn extends StatelessWidget {
       segs.add(_SegLay(startMin: sm, endMin: em, id: 'b_${b.id}', block: b));
     }
     _packSegments(segs);
-    final maxCols = segs.isEmpty
-        ? 1
-        : segs.map((s) => s.col).reduce((a, b) => a > b ? a : b) + 1;
-    final layoutCols = math.max(1, math.min(maxCols, _kMaxOverlapCols));
+    _annotateOverlapClusters(segs);
+    final paintOrder = List<_SegLay>.from(segs)
+      ..sort((a, b) => a.col.compareTo(b.col));
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -3055,7 +3101,6 @@ class _DayTimeColumn extends StatelessWidget {
           final w = constraints.maxWidth;
           const pad = 4.0;
           final inner = (w - pad * 2).clamp(4.0, w);
-          final colW = inner / layoutCols;
 
           return Stack(
             clipBehavior: Clip.hardEdge,
@@ -3071,14 +3116,13 @@ class _DayTimeColumn extends StatelessWidget {
                   hourHeight: hourHeight,
                 ),
               ),
-              ...segs.map(
+              ...paintOrder.map(
                 (s) => _positionedSeg(
                   context: context,
                   s: s,
                   gridHeight: gridHeight,
                   pad: pad,
-                  colW: colW,
-                  layoutCols: layoutCols,
+                  inner: inner,
                   totalMins: totalMins,
                   dayStart: dayStart,
                 ),
@@ -3116,8 +3160,7 @@ class _DayTimeColumn extends StatelessWidget {
     required _SegLay s,
     required double gridHeight,
     required double pad,
-    required double colW,
-    required int layoutCols,
+    required double inner,
     required int totalMins,
     required DateTime dayStart,
   }) {
@@ -3126,10 +3169,14 @@ class _DayTimeColumn extends StatelessWidget {
     if (h <= 0 || top >= gridHeight) return const SizedBox.shrink();
     final topVis = top.clamp(0.0, gridHeight);
     final maxH = (gridHeight - topVis).clamp(0.0, gridHeight);
-    final colIndex = s.col % layoutCols;
-    final left = pad + colIndex * colW;
-    // Never clamp(min > max): narrow columns use whatever width is available.
-    final width = math.max(1.0, colW - 2);
+    final rect = _sideBySideRect(
+      pad: pad,
+      inner: inner,
+      col: s.col,
+      clusterMaxCols: s.clusterMaxCols,
+    );
+    final left = rect.left;
+    final width = rect.width;
 
     double chipHeight(double minH) {
       if (maxH <= 0) return 0;
@@ -3147,7 +3194,13 @@ class _DayTimeColumn extends StatelessWidget {
       final ht = chipHeight(20);
       if (ht <= 0) return const SizedBox.shrink();
       final canDrag = e.source != 'synctra_preview';
-      final chip = _TimedEventChip(event: e, color: color, onTap: onTap);
+      final chip = _TimedEventChip(
+        event: e,
+        color: color,
+        onTap: onTap,
+        overlapIndex: s.overlapTotal > 1 ? s.overlapIndex : null,
+        overlapTotal: s.overlapTotal > 1 ? s.overlapTotal : null,
+      );
       return Positioned(
         top: topVis,
         left: left,
@@ -3241,11 +3294,13 @@ class _DragTimeChipShellState extends State<_DragTimeChipShell> {
     }
     return LayoutBuilder(
       builder: (context, constraints) {
-        final showGrip = constraints.maxWidth >= 48;
+        final w = constraints.maxWidth;
+        final showGrip = w >= 52;
+        final radius = timedChipBorderRadius(w, widget.heightPx);
         return SizedBox(
           height: widget.heightPx,
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: radius,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -3333,12 +3388,45 @@ class _TimedEventChip extends StatelessWidget {
   final EventModel event;
   final Color color;
   final VoidCallback? onTap;
+  final int? overlapIndex;
+  final int? overlapTotal;
 
   const _TimedEventChip({
     required this.event,
     required this.color,
     this.onTap,
+    this.overlapIndex,
+    this.overlapTotal,
   });
+
+  String _compactTitle(String title, String? course) {
+    if (course != null && course.isNotEmpty) {
+      return course.length > 14 ? '${course.substring(0, 13)}…' : course;
+    }
+    return title.length > 16 ? '${title.substring(0, 15)}…' : title;
+  }
+
+  Widget _overlapBadge(BuildContext context) {
+    if (overlapIndex == null || overlapTotal == null || overlapTotal! <= 1) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        '$overlapIndex/$overlapTotal',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 9,
+              height: 1,
+            ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3349,83 +3437,130 @@ class _TimedEventChip extends StatelessWidget {
     final (title, course) = _chipTitleParts(event.title);
     final timeLabel =
         '${DateFormat('h:mm a').format(event.startTime)} – ${DateFormat('h:mm a').format(event.endTime)}';
-    return Material(
-      color: color.withValues(alpha: 0.94),
-      borderRadius: BorderRadius.circular(8),
-      elevation: 1,
-      shadowColor: Colors.black.withValues(alpha: 0.12),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final h = constraints.maxHeight;
-            final w = constraints.maxWidth;
-            final compact = h < 36 || w < 56;
-            final showCourse = course != null && h >= 44 && w >= 72;
-            final showDuration = !compact && h >= 52;
-            final showTime = !compact && h >= 36 && !showDuration;
-            return Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: compact ? 4 : 6,
-                vertical: compact ? 2 : 4,
+    final hasOverlap = overlapTotal != null && overlapTotal! > 1;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final h = constraints.maxHeight;
+        final w = constraints.maxWidth;
+        final radius = timedChipBorderRadius(w, h);
+        final overlapTight = hasOverlap && w < 44;
+        final compact = h < 36 || w < 72;
+        final showCourse = course != null && h >= 48 && w >= 96 && !compact;
+        final showDuration = !compact && h >= 56 && w >= 64;
+        final showTime = h >= 24;
+        final showOverlapBadge = hasOverlap && overlapTotal! >= 3 && w < 48;
+
+        Widget labelColumn({required double titleSize, int titleLines = 2}) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (showCourse)
+                Text(
+                  course,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Colors.white.withValues(alpha: 0.9),
+                        fontWeight: FontWeight.w500,
+                        height: 1.05,
+                        fontSize: 9,
+                      ),
+                ),
+              Text(
+                overlapTight ? _compactTitle(title, course) : title,
+                maxLines: titleLines,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      height: 1.1,
+                      fontSize: titleSize,
+                    ),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.start,
-                mainAxisSize: MainAxisSize.max,
+              if (showTime)
+                Text(
+                  overlapTight || compact
+                      ? DateFormat('h:mm').format(event.startTime)
+                      : timeLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Colors.white.withValues(alpha: 0.88),
+                        height: 1.05,
+                        fontSize: overlapTight ? 8 : 9,
+                      ),
+                ),
+              if (showDuration)
+                Text(
+                  durLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: Colors.white.withValues(alpha: 0.92),
+                        fontWeight: FontWeight.w500,
+                        height: 1.05,
+                        fontSize: 9,
+                      ),
+                ),
+            ],
+          );
+        }
+
+        return Material(
+          color: color.withValues(alpha: 0.94),
+          borderRadius: radius,
+          elevation: 0,
+          shadowColor: Colors.transparent,
+          clipBehavior: Clip.antiAlias,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: Colors.white.withValues(alpha: hasOverlap ? 0.4 : 0.22),
+                width: hasOverlap ? 1.25 : 1,
+              ),
+              borderRadius: radius,
+            ),
+            child: InkWell(
+              onTap: onTap,
+              borderRadius: radius,
+              child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  if (showCourse)
-                    Text(
-                      course,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: Colors.white.withValues(alpha: 0.9),
-                            fontWeight: FontWeight.w500,
-                            height: 1.1,
-                          ),
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      overlapTight ? 3 : (compact ? 4 : 6),
+                      overlapTight ? 2 : (compact ? 3 : 4),
+                      overlapTight ? 2 : (compact ? 4 : 6),
+                      overlapTight ? 2 : (compact ? 3 : 4),
                     ),
-                  Text(
-                    title,
-                    maxLines: compact ? 1 : 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                          height: 1.15,
-                          fontSize: compact ? 11 : null,
-                        ),
+                    child: overlapTight
+                        ? FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.topLeft,
+                            child: SizedBox(
+                              width: w - 6,
+                              child: labelColumn(titleSize: 10, titleLines: 3),
+                            ),
+                          )
+                        : labelColumn(
+                            titleSize: compact ? 10 : 12,
+                            titleLines: compact ? 2 : 2,
+                          ),
                   ),
-                  if (showTime)
-                    Text(
-                      timeLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: Colors.white.withValues(alpha: 0.88),
-                            height: 1.1,
-                            fontSize: 10,
-                          ),
-                    ),
-                  if (showDuration)
-                    Text(
-                      durLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: Colors.white.withValues(alpha: 0.92),
-                            fontWeight: FontWeight.w500,
-                            height: 1.1,
-                          ),
+                  if (showOverlapBadge)
+                    Positioned(
+                      top: 2,
+                      right: 2,
+                      child: _overlapBadge(context),
                     ),
                 ],
               ),
-            );
-          },
-        ),
-      ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
