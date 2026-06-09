@@ -12,6 +12,7 @@ class TaskTimelineList extends StatefulWidget {
   final VoidCallback onLoadOlder;
   final Future<void> Function(TaskModel task, bool done) onToggleDone;
   final Future<void> Function(TaskModel task) onDeleteTask;
+  final ScrollPhysics? physics;
 
   const TaskTimelineList({
     super.key,
@@ -21,6 +22,7 @@ class TaskTimelineList extends StatefulWidget {
     required this.onLoadOlder,
     required this.onToggleDone,
     required this.onDeleteTask,
+    this.physics,
   });
 
   @override
@@ -142,6 +144,7 @@ class _TaskTimelineListState extends State<TaskTimelineList> {
 
     return ListView(
       controller: _scrollCtrl,
+      physics: widget.physics,
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
       children: [
         if (widget.loadingOlder)

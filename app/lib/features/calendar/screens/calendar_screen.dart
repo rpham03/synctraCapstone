@@ -19,7 +19,9 @@ import '../../../core/theme/app_theme.dart';
 import '../../../data/models/event_model.dart';
 import '../../../data/models/habit_model.dart';
 import '../../../data/models/schedule_block_model.dart';
+import '../../../data/models/task_model.dart';
 import '../../../data/services/course_import_service.dart';
+import '../../../shared/services/calendar_view_prefs.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/services/llm_service.dart';
 import '../../../shared/services/manual_events_storage.dart';
@@ -35,6 +37,8 @@ import '../../../shared/state/shell_sidebar_controller.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/utils/calendar_display_utils.dart';
+import '../../../shared/utils/local_time_format.dart';
+import '../../../shared/utils/undo_snackbar.dart';
 import '../../../shared/utils/manual_tasks_calendar.dart';
 import '../../../shared/utils/task_schedule_utils.dart';
 import '../../../shared/services/course_color_map.dart';
@@ -46,6 +50,22 @@ import '../widgets/calendar_left_sidebar.dart';
 import '../widgets/calendar_top_bar.dart';
 
 enum _CalendarViewMode { day, week, month }
+
+class _EventDeleteSnapshot {
+  const _EventDeleteSnapshot({
+    required this.event,
+    required this.canUndo,
+    this.canvasTask,
+    this.manualTask,
+    this.icalFeedId,
+  });
+
+  final EventModel event;
+  final bool canUndo;
+  final TaskModel? canvasTask;
+  final TaskModel? manualTask;
+  final String? icalFeedId;
+}
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -118,6 +138,32 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onIcal: _openIcalFeedsSheet,
       onCourseImport: _openCourseImportSheet,
     );
+    _loadCalendarViewPref();
+  }
+
+  Future<void> _loadCalendarViewPref() async {
+    final stored = await CalendarViewPrefs.load();
+    final mode = _viewModeFromString(stored);
+    if (!mounted || mode == null) return;
+    setState(() => _viewMode = mode);
+  }
+
+  _CalendarViewMode? _viewModeFromString(String? value) {
+    switch (value) {
+      case 'day':
+        return _CalendarViewMode.day;
+      case 'week':
+        return _CalendarViewMode.week;
+      case 'month':
+        return _CalendarViewMode.month;
+      default:
+        return null;
+    }
+  }
+
+  void _setViewMode(_CalendarViewMode mode) {
+    setState(() => _viewMode = mode);
+    CalendarViewPrefs.save(mode.name);
   }
 
   void _onScheduleStoreChanged() {
@@ -489,7 +535,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   DateTime _startOfWeek(DateTime d) {
     final day = DateTime(d.year, d.month, d.day);
-    return day.subtract(Duration(days: day.weekday - DateTime.monday));
+    // Sunday = start of week (DateTime.weekday: Mon=1 … Sun=7).
+    return day.subtract(Duration(days: day.weekday % 7));
   }
 
   List<DateTime> _visibleDays() {
@@ -700,6 +747,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
     if (ok != true || !mounted) return;
 
+    final snapshot = await _snapshotBeforeDelete(event);
     await _removeEventFromSynctra(event);
     if (!mounted) return;
 
@@ -713,10 +761,106 @@ class _CalendarScreenState extends State<CalendarScreen> {
     } else if (event.source == 'manual_task') {
       ManualTasksBridge.instance.refresh();
     }
+    if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Removed from Synctra.')),
-    );
+    if (snapshot.canUndo) {
+      showUndoSnackBar(
+        context,
+        message: 'Removed from Synctra.',
+        onUndo: () => _restoreEventSnapshot(snapshot),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Removed from Synctra.')),
+      );
+    }
+  }
+
+  Future<_EventDeleteSnapshot> _snapshotBeforeDelete(EventModel event) async {
+    switch (event.source) {
+      case 'manual':
+        return _EventDeleteSnapshot(event: event, canUndo: true);
+      case 'canvas':
+        final taskId = event.id.startsWith('canvas-')
+            ? event.id.substring('canvas-'.length)
+            : event.id;
+        final tasks = await _canvasTasks.loadCached();
+        TaskModel? task;
+        for (final t in tasks) {
+          if (t.id == taskId) {
+            task = t;
+            break;
+          }
+        }
+        return _EventDeleteSnapshot(
+          event: event,
+          canUndo: task != null,
+          canvasTask: task,
+        );
+      case 'manual_task':
+        final taskId = event.id.replaceFirst('manual-task-', '');
+        final tasks = await ManualTasksCalendar.loadTasks();
+        TaskModel? task;
+        for (final t in tasks) {
+          if (t.id == taskId) {
+            task = t;
+            break;
+          }
+        }
+        return _EventDeleteSnapshot(
+          event: event,
+          canUndo: task != null,
+          manualTask: task,
+        );
+      case 'course':
+        return _EventDeleteSnapshot(event: event, canUndo: false);
+      default:
+        if (event.source.startsWith('ical')) {
+          for (final entry in _feedEvents.entries) {
+            if (entry.value.any((e) => e.id == event.id)) {
+              return _EventDeleteSnapshot(
+                event: event,
+                canUndo: true,
+                icalFeedId: entry.key,
+              );
+            }
+          }
+        }
+        return _EventDeleteSnapshot(event: event, canUndo: false);
+    }
+  }
+
+  Future<void> _restoreEventSnapshot(_EventDeleteSnapshot snapshot) async {
+    final event = snapshot.event;
+    switch (event.source) {
+      case 'manual':
+        setState(() => _fixedEvents.add(event));
+        await _persistManualEvents();
+      case 'canvas':
+        final task = snapshot.canvasTask;
+        if (task != null) {
+          final tasks = await _canvasTasks.loadCached();
+          await _canvasTasks.saveCache([...tasks, task]);
+          await _reloadCanvasEvents();
+        }
+      case 'manual_task':
+        final task = snapshot.manualTask;
+        if (task != null) {
+          final tasks = await ManualTasksCalendar.loadTasks();
+          await ManualTasksCalendar.saveTasks([...tasks, task]);
+          await _loadManualTaskEvents();
+          ManualTasksBridge.instance.refresh();
+        }
+      default:
+        if (event.source.startsWith('ical') && snapshot.icalFeedId != null) {
+          setState(() {
+            _feedEvents.putIfAbsent(snapshot.icalFeedId!, () => []).add(event);
+          });
+        }
+    }
+    if (!mounted) return;
+    setState(() {});
+    _pushExternalBusyToStore();
   }
 
   Future<void> _removeEventFromSynctra(EventModel event) async {
@@ -832,7 +976,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final llm = GetIt.instance<LlmService>();
     final now = DateTime.now();
     final weekStart = DateTime(now.year, now.month, now.day)
-        .subtract(Duration(days: now.weekday - DateTime.monday));
+        .subtract(Duration(days: now.weekday % 7));
     final weekEnd = weekStart.add(const Duration(days: 7));
     final fixed = store.fixedEventsForScheduling();
 
@@ -1110,7 +1254,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       layout: layout,
       weekNavDirection: _weekNavDirection,
       viewMode: _viewMode,
-      onViewModeChanged: (m) => setState(() => _viewMode = m),
+      onViewModeChanged: _setViewMode,
       aiChatOpen: _calendarChatOpen,
       onToggleAiChat: _toggleAiChat,
       showMenuButton: showMenuButton,
@@ -2109,19 +2253,6 @@ class _CalendarMonthView extends StatelessWidget {
     return items;
   }
 
-  static double _tableCalendarHeight(CalendarFormat format) {
-    final rowCount = switch (format) {
-      CalendarFormat.month => 6,
-      CalendarFormat.twoWeeks => 2,
-      CalendarFormat.week => 1,
-    };
-    const headerH = 56.0;
-    const daysOfWeekH = 20.0;
-    const rowH = 46.0;
-    const buffer = 8.0;
-    return headerH + daysOfWeekH + rowCount * rowH + buffer;
-  }
-
   String _selectedDayHeading(DateTime day) {
     final today = DateTime.now();
     final todayOnly = DateTime(today.year, today.month, today.day);
@@ -2160,18 +2291,15 @@ class _CalendarMonthView extends StatelessWidget {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
-                  height: _tableCalendarHeight(calendarFormat),
-                  child: _MonthTableCalendar(
-                    focusedDay: focusedDay,
-                    selectedDay: selectedDay,
-                    format: calendarFormat,
-                    showFormatButton: isDesktop,
-                    onDaySelected: onDaySelected,
-                    onFormatChanged: onFormatChanged,
-                    onPageChanged: onPageChanged,
-                    eventLoader: eventsForDay,
-                  ),
+                child: _MonthTableCalendar(
+                  focusedDay: focusedDay,
+                  selectedDay: selectedDay,
+                  format: calendarFormat,
+                  showFormatButton: isDesktop,
+                  onDaySelected: onDaySelected,
+                  onFormatChanged: onFormatChanged,
+                  onPageChanged: onPageChanged,
+                  eventLoader: eventsForDay,
                 ),
               ),
             ),
@@ -2818,11 +2946,12 @@ class _MonthTableCalendar extends StatelessWidget {
       onDaySelected: onDaySelected,
       onFormatChanged: onFormatChanged,
       onPageChanged: onPageChanged,
-      startingDayOfWeek: StartingDayOfWeek.monday,
+      startingDayOfWeek: StartingDayOfWeek.sunday,
+      sixWeekMonthsEnforced: false,
       rowHeight: 46,
       daysOfWeekHeight: 20,
       calendarStyle: CalendarStyle(
-        outsideDaysVisible: true,
+        outsideDaysVisible: false,
         cellMargin: const EdgeInsets.all(3),
         weekendTextStyle: TextStyle(color: scheme.onSurfaceVariant),
         defaultTextStyle: TextStyle(
@@ -2976,6 +3105,12 @@ const _kMaxOverlapCols = 3;
     return (parts.sublist(1).join(' · ').trim(), parts.first.trim());
   }
   return (raw.trim(), null);
+}
+
+/// Squarer corners on narrow overlap chips (avoids tall "pill/cylinder" look).
+BorderRadius timedChipBorderRadius(double width, double height) {
+  final r = math.min(3.0, math.min(width, height) * 0.08);
+  return BorderRadius.circular(r);
 }
 
 /// One timed segment for column packing (events + study blocks).
@@ -3841,6 +3976,49 @@ class _DayTimeColumn extends StatelessWidget {
     return raw;
   }
 
+  static void _annotateOverlapClusters(List<_SegLay> segs) {
+    for (final s in segs) {
+      final cluster = segs
+          .where((o) => o.startMin < s.endMin && o.endMin > s.startMin)
+          .toList()
+        ..sort((a, b) => a.col.compareTo(b.col));
+      s.overlapTotal = cluster.length;
+      s.overlapIndex = cluster.indexOf(s) + 1;
+      s.clusterMaxCols =
+          cluster.map((c) => c.col).reduce(math.max) + 1;
+    }
+  }
+
+  /// Side-by-side overlap with a readable minimum width; cascades when tight.
+  static ({double left, double width}) _sideBySideRect({
+    required double pad,
+    required double inner,
+    required int col,
+    required int clusterMaxCols,
+  }) {
+    if (clusterMaxCols <= 1) {
+      return (left: pad, width: inner);
+    }
+    final cols = math.min(clusterMaxCols, _kMaxOverlapCols);
+    const gap = 1.0;
+    const minColW = 28.0;
+    final evenSplit = (inner - gap * (cols - 1)) / cols;
+    final colW = math.max(minColW, evenSplit);
+    final colIndex = col.clamp(0, cols - 1);
+    final totalNeeded = colW * cols + gap * (cols - 1);
+    if (totalNeeded > inner && cols > 1) {
+      final step = math.max(10.0, (inner - minColW) / (cols - 1));
+      return (
+        left: pad + colIndex * step,
+        width: math.min(minColW, inner),
+      );
+    }
+    return (
+      left: pad + colIndex * (colW + gap),
+      width: colW,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -4532,6 +4710,35 @@ class _TimedEventChip extends StatelessWidget {
     this.locked = true,
     this.hideContent = false,
   });
+
+  String _compactTitle(String title, String? course) {
+    if (course != null && course.isNotEmpty) {
+      return course.length > 14 ? '${course.substring(0, 13)}…' : course;
+    }
+    return title.length > 16 ? '${title.substring(0, 15)}…' : title;
+  }
+
+  Widget _overlapBadge(BuildContext context) {
+    if (overlapIndex == null || overlapTotal == null || overlapTotal! <= 1) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        '$overlapIndex/$overlapTotal',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 9,
+              height: 1,
+            ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {

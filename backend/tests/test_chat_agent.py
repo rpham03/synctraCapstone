@@ -2416,3 +2416,252 @@ def test_chat_service_openai_mocked(monkeypatch):
     ):
         reply, _ = asyncio.run(service.process_message("Plan my week", "u3"))
         assert reply == "Here is your plan."
+
+
+def test_nlp_router_move_to_calendar_date_resolves_month_day(monkeypatch):
+    """"move gaming to June 12" (router -> ai_agent) lands on that calendar date."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "move gaming to June 12"}}]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a dated move must not hit the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-08")
+        set_calendar_events(
+            [
+                {
+                    "id": "g1",
+                    "title": "gaming",
+                    "start_time": "2026-06-08T20:00:00",
+                    "end_time": "2026-06-08T21:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "can you move gaming to June 12", user_id="date-move-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert "moved" in reply.lower()
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "g1"
+    # Keeps the 8-9 PM time-of-day on the new date.
+    assert proposals[0]["start_time"] == "2026-06-12T20:00:00"
+    assert proposals[0]["end_time"] == "2026-06-12T21:00:00"
+
+
+def test_nlp_router_move_next_weekday_lands_in_following_week(monkeypatch):
+    """"move gaming to next monday" goes to the Monday of the next calendar week."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "move gaming to next monday"}}]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a dated move must not hit the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-08")  # a Monday
+        set_calendar_events(
+            [
+                {
+                    "id": "g1",
+                    "title": "gaming",
+                    "start_time": "2026-06-08T20:00:00",
+                    "end_time": "2026-06-08T21:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "move gaming to next monday", user_id="next-mon-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        _reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert len(proposals) == 1
+    # Today is Monday Jun 8; "next monday" is Jun 15, not today.
+    assert proposals[0]["start_time"] == "2026-06-15T20:00:00"
+
+
+def test_nlp_router_move_bare_hour_assumes_pm(monkeypatch):
+    """"move gaming to 7" retimes to 7 PM instead of silently keeping the time."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "move gaming to 7"}}]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a timed move must not hit the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-08")
+        set_calendar_events(
+            [
+                {
+                    "id": "g1",
+                    "title": "gaming",
+                    "start_time": "2026-06-08T14:00:00",
+                    "end_time": "2026-06-08T15:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "move gaming to 7", user_id="bare-hour-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        _reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "g1"
+    # 7 -> 7 PM, keeping the one-hour length.
+    assert proposals[0]["start_time"] == "2026-06-08T19:00:00"
+    assert proposals[0]["end_time"] == "2026-06-08T20:00:00"
+
+
+def test_nlp_router_set_absolute_duration(monkeypatch):
+    """"set gaming to 2 hours" resizes the block to a 2-hour length."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [{"name": "ai_agent", "arguments": {"message": "set gaming to 2 hours"}}]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a resize must not hit the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-08")
+        set_calendar_events(
+            [
+                {
+                    "id": "g1",
+                    "title": "gaming",
+                    "start_time": "2026-06-08T20:00:00",
+                    "end_time": "2026-06-08T21:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "can you set gaming to 2 hours", user_id="absolute-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        _reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "g1"
+    assert proposals[0]["start_time"] == "2026-06-08T20:00:00"
+    assert proposals[0]["end_time"] == "2026-06-08T22:00:00"  # now 2 hours long
+
+
+def test_nlp_router_start_earlier_shifts_start(monkeypatch):
+    """"make gaming start an hour earlier" moves the start back, keeping the end."""
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+    )
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+
+    async def fake_fetch_plan(*_args, **_kwargs):
+        return [
+            {"name": "ai_agent", "arguments": {"message": "make gaming start an hour earlier"}}
+        ]
+
+    async def fail_ai_agent(*_args, **_kwargs):
+        raise AssertionError("a resize must not hit the chat agent")
+
+    async def run_turn():
+        set_client_today("2026-06-08")
+        set_calendar_events(
+            [
+                {
+                    "id": "g1",
+                    "title": "gaming",
+                    "start_time": "2026-06-08T20:00:00",
+                    "end_time": "2026-06-08T21:00:00",
+                    "source": "study_block",
+                }
+            ]
+        )
+        return await service.run_turn(
+            "make gaming start an hour earlier", user_id="start-shift-user"
+        ), get_schedule_proposals()
+
+    try:
+        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_ai_agent_reply", fail_ai_agent)
+        _reply, proposals = asyncio.run(run_turn())
+    finally:
+        clear_client_context()
+
+    assert len(proposals) == 1
+    assert proposals[0]["replace_block_id"] == "g1"
+    assert proposals[0]["start_time"] == "2026-06-08T19:00:00"  # an hour earlier
+    assert proposals[0]["end_time"] == "2026-06-08T21:00:00"    # end unchanged

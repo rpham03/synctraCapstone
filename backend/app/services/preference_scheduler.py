@@ -20,23 +20,27 @@ from app.services.chat_client_context import (
     effective_now,
     effective_today,
     get_calendar_events,
+    get_study_preferences,
     get_tasks,
     get_user_id,
 )
 
 _MAX_PROPOSALS = 12
 _DEFAULT_TASK_MINUTES = 60
-# Long tasks are split into study sessions of at most this many minutes, spread
-# across different days (e.g. a 4h task -> two 2h sessions; 3h -> 90+90).
+# Default cap when no Settings session length is provided. Long tasks are split
+# into sessions of at most this many minutes, spread across different days
+# (e.g. a 4h task -> two 2h sessions; 3h -> 90+90).
 _MAX_SESSION_MINUTES = 120
+_DEFAULT_BREAK_MINUTES = 15
 
 
-def _split_minutes(total: int) -> list[int]:
-    """Split a task's total minutes into evenly-sized sessions of <= 2 hours."""
+def _split_minutes(total: int, cap: int = _MAX_SESSION_MINUTES) -> list[int]:
+    """Split a task's total minutes into evenly-sized sessions of <= ``cap``."""
     total = max(int(total), 1)
-    if total <= _MAX_SESSION_MINUTES:
+    cap = max(int(cap), 15)
+    if total <= cap:
         return [total]
-    sessions = -(-total // _MAX_SESSION_MINUTES)  # ceil
+    sessions = -(-total // cap)  # ceil
     base, remainder = divmod(total, sessions)
     return [base + (1 if i < remainder else 0) for i in range(sessions)]
 
@@ -53,12 +57,41 @@ def _window_for(day, start_hhmm: str, end_hhmm: str) -> tuple[datetime, datetime
     return start, end
 
 
-def _in_any_window(start_dt: datetime, prefs: list[dict]) -> bool:
-    for pref in prefs:
-        ws, we = _window_for(start_dt.date(), pref["start"], pref["end"])
+def _in_any_window(start_dt: datetime, windows: list[tuple[str, str]]) -> bool:
+    for ws_str, we_str in windows:
+        ws, we = _window_for(start_dt.date(), ws_str, we_str)
         if ws <= start_dt < we:
             return True
     return False
+
+
+def _pretty_clock(hhmm: str) -> str:
+    try:
+        hour, minute = (int(x) for x in str(hhmm).split(":"))
+    except (ValueError, TypeError):
+        return str(hhmm)
+    suffix = "AM" if hour < 12 else "PM"
+    h12 = hour % 12 or 12
+    return f"{h12}:{minute:02d} {suffix}" if minute else f"{h12} {suffix}"
+
+
+def _proposal_signature(proposals: list[dict]) -> tuple:
+    """Stable fingerprint of a proposal set (task/event + start + end times).
+
+    Used by the router to guarantee "try again" yields a genuinely different
+    arrangement and to detect when no alternative exists.
+    """
+
+    return tuple(
+        sorted(
+            (
+                str(p.get("task_title") or p.get("replace_block_id") or ""),
+                str(p.get("start_time") or ""),
+                str(p.get("end_time") or ""),
+            )
+            for p in proposals
+        )
+    )
 
 
 def _task_minutes(task: dict) -> int:
@@ -84,22 +117,43 @@ def suggest_preference_schedule(
     user_id: str | None = None,
     days_ahead: int = 7,
     seed: int | None = None,
-    break_minutes: int = 15,
+    break_minutes: int = _DEFAULT_BREAK_MINUTES,
 ) -> dict:
-    """Return preview proposals placing flexible work near preferred periods.
+    """Return preview proposals placing flexible work inside the study window.
 
-    With ``seed`` set, task order and slot choice are randomized so a "try again"
-    produces a different arrangement. ``break_minutes`` keeps a gap after each
-    placed study session so they aren't scheduled back to back.
+    The window, session length, and break come from the user's Settings
+    (study_start/end, session length, break) when the client sent them this
+    request; otherwise they fall back to the saved productive periods. With
+    ``seed`` set, task order and slot choice are randomized so a "try again"
+    produces a different arrangement. Blocks are never placed outside the
+    window, long tasks are split using the configured session length, and a
+    configured break is left after each placed session.
     """
 
     uid = user_id or get_user_id()
     prefs = productivity_preferences.get_preferences(uid)
-    if not prefs:
+    study = get_study_preferences()
+
+    # Resolve the daily window(s), session cap, and break from whichever source
+    # is configured. Settings (an explicit study window) wins over saved periods.
+    if study and study.get("start") and study.get("end"):
+        windows: list[tuple[str, str]] = [(study["start"], study["end"])]
+        session_cap = int(study.get("session_minutes") or _MAX_SESSION_MINUTES)
+        break_minutes = int(study.get("break_minutes") or break_minutes)
+        window_label = f"{_pretty_clock(study['start'])}–{_pretty_clock(study['end'])}"
+    elif prefs:
+        windows = [(p["start"], p["end"]) for p in prefs]
+        session_cap = _MAX_SESSION_MINUTES
+        window_label = ", ".join(p["period"] for p in prefs)
+    else:
         return {
             "proposals": [],
-            "message": "Tell me when you're most productive first (e.g. \"I'm productive at night\").",
+            "message": "Tell me when you're most productive first (e.g. \"I'm productive at night\"), "
+            "or set your study window in Settings.",
+            "signature": (),
         }
+    session_cap = max(15, min(int(session_cap), 24 * 60))
+    break_minutes = max(0, int(break_minutes))
 
     events = get_calendar_events()
     classified = event_classification.classify_all_calendar_events(events, user_id=uid)["events"]
@@ -138,8 +192,8 @@ def suggest_preference_schedule(
         candidates: list[tuple[datetime, datetime]] = []
         for offset in range(start_offset, days_ahead + 1):
             day = today + timedelta(days=offset)
-            for pref in prefs:
-                ws, we = _window_for(day, pref["start"], pref["end"])
+            for ws_str, we_str in windows:
+                ws, we = _window_for(day, ws_str, we_str)
                 ws = max(ws, now)  # never schedule in the past
                 if we <= ws:
                     continue
@@ -163,7 +217,7 @@ def suggest_preference_schedule(
         except (ValueError, TypeError):
             continue
         duration = end - start
-        if _in_any_window(start, prefs):
+        if _in_any_window(start, windows):
             reserve(start, end)  # already good — keep it as busy
             continue
         slot = find_slot(duration, None)
@@ -195,7 +249,7 @@ def suggest_preference_schedule(
         if task.get("is_completed"):
             continue
         deadline = _task_deadline(task)
-        sessions = _split_minutes(_task_minutes(task))
+        sessions = _split_minutes(_task_minutes(task), session_cap)
         title = str(task.get("title") or "Study block")
         next_offset = 0
         for index, minutes in enumerate(sessions):
@@ -223,12 +277,17 @@ def suggest_preference_schedule(
             )
             next_offset = (slot[0].date() - today).days + 1
 
-    period_label = ", ".join(p["period"] for p in prefs)
     if not proposals:
         message = (
-            f"I couldn't find open time near your {period_label} preference for any "
+            f"I couldn't find open time in your {window_label} study window for any "
             "flexible work right now."
         )
     else:
-        message = f"Here's a suggested schedule near your {period_label} preference:"
-    return {"proposals": proposals, "message": message, "periods": [p["period"] for p in prefs]}
+        message = f"Here's a suggested schedule in your {window_label} study window:"
+    return {
+        "proposals": proposals,
+        "message": message,
+        "periods": [p["period"] for p in prefs],
+        "window_label": window_label,
+        "signature": _proposal_signature(proposals),
+    }

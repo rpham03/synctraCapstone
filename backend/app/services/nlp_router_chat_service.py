@@ -620,12 +620,17 @@ class NlpRouterChatService:
         )
 
     def _message_has_clock_time(self, text: str) -> bool:
-        """True if the message names a specific clock time (10:30, 10pm, at 11)."""
+        """True if the message names a clock time (10:30, 10pm, "at 11", "to 7").
+
+        The bare-hour forms ("move it to 7", "at 8") are accepted so a move can
+        try to retime; the ordinal lookahead keeps "to the 7th"/"by the 12th"
+        (calendar dates) from being mistaken for a time.
+        """
         return bool(
             re.search(
                 r"\b\d{1,2}:\d{2}\b"
                 r"|\b\d{1,2}\s*(?:a\.?m\.?|p\.?m\.?)\b"
-                r"|\bat\s+\d{1,2}\b",
+                r"|\b(?:at|to|by|till|until)\s+\d{1,2}\b(?!\s*(?:st|nd|rd|th))",
                 text,
                 flags=re.IGNORECASE,
             )
@@ -657,6 +662,31 @@ class NlpRouterChatService:
             out.append(time(hour, minute))
         return out
 
+    def _parse_bare_hours_after_prep(self, text: str) -> list[time]:
+        """Bare hours that follow a time preposition ("to 7", "at 8 to 9").
+
+        Used only as a move/retime fallback when no unambiguous clock time was
+        given. A bare hour is read as PM (the usual intent for "move it to 7"),
+        so 1-11 -> afternoon/evening and 12 stays noon. The ordinal lookahead
+        skips calendar dates like "to the 12th".
+        """
+
+        out: list[time] = []
+        for match in re.finditer(
+            r"\b(?:at|to|by|till|until)\s+(\d{1,2})(?::(\d{2}))?\b"
+            r"(?!\s*(?:st|nd|rd|th|a\.?m\.?|p\.?m\.?))",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            hour = int(match.group(1))
+            minute = int(match.group(2) or 0)
+            if hour > 23 or minute > 59:
+                continue
+            if 1 <= hour <= 11:
+                hour += 12  # assume PM
+            out.append(time(hour % 24, minute))
+        return out
+
     def _retime_block(
         self, message: str, block: dict[str, Any]
     ) -> tuple[datetime, datetime] | None:
@@ -669,6 +699,9 @@ class NlpRouterChatService:
         duration = cur_end - cur_start
         day = self._move_target_date(message) or cur_start.date()
         times = self._parse_clock_times(message)
+        if not times:
+            # No unambiguous time — accept a bare hour after "to"/"at" ("to 7").
+            times = self._parse_bare_hours_after_prep(message)
         if not times:
             return None
         # "move X from <src> to <dst>" relocates to the dst time, keeping length.
@@ -943,35 +976,159 @@ class NlpRouterChatService:
             }
         return sanitize_chat_reply(self._format_set_preferences(result, periods))
 
+    _RETRY_TARGETS = (
+        "again", "another", "different", "regenerate", "reshuffle", "shuffle", "retry",
+    )
+
+    @staticmethod
+    def _levenshtein(a: str, b: str) -> int:
+        if a == b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, start=1):
+            cur = [i]
+            for j, cb in enumerate(b, start=1):
+                cur.append(
+                    min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+                )
+            prev = cur
+        return prev[-1]
+
+    @classmethod
+    def _close_enough(cls, candidate: str, target: str) -> bool:
+        threshold = 1 if len(target) <= 4 else 2
+        if abs(len(candidate) - len(target)) > threshold:
+            return False
+        return cls._levenshtein(candidate, target) <= threshold
+
     def _is_retry_reply(self, text: str) -> bool:
+        lowered = text.lower()
+        if re.search(
+            r"\b(?:try again|another|different|regenerate|redo|reshuffle|"
+            r"shuffle|retry|other option|other options|something else|"
+            r"not these|not those|mix it up|new schedule|different schedule|"
+            r"different one|another one|other schedule)\b",
+            lowered,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        # Typo-tolerant for terse replies ("try aain", "try agian", "anther").
+        words = re.findall(r"[a-z]+", lowered)
+        if not words or len(words) > 4:
+            return False
+        compact = "".join(words)
+        if any(
+            self._close_enough(compact, target)
+            for target in ("tryagain", "tryanother", "retry", "reshuffle", "shuffle", "regenerate")
+        ):
+            return True
+        return any(
+            self._close_enough(word, target)
+            for word in words
+            if len(word) >= 4
+            for target in self._RETRY_TARGETS
+        )
+
+    def _is_bare_retry(self, text: str) -> bool:
+        """A terse retry ("try again", "another", "try aain") with no other words.
+
+        Used only to catch a retry when nothing is pending, so it must not fire
+        for longer phrases like "schedule another study block".
+        """
+        words = re.findall(r"[a-z]+", text.lower())
+        if not words or len(words) > 3:
+            return False
+        compact = "".join(words)
+        return any(
+            self._close_enough(compact, target)
+            for target in ("tryagain", "retry", "regenerate", "reshuffle", "shuffle", "again")
+        )
+
+    def _is_apply_reply(self, text: str) -> bool:
+        """A confirmation that should apply the pending schedule proposal."""
+        norm = self._normalized_reply(text)
+        if norm in _AFFIRMATIVE_REPLIES:
+            return True
         return bool(
             re.search(
-                r"\b(?:try again|another|different|regenerate|redo|reshuffle|"
-                r"shuffle|retry|other option|other options|something else|"
-                r"not these|not those|mix it up)\b",
-                text,
+                r"\b(?:apply|use (?:it|these|them|this|that)|go ahead|looks good|"
+                r"sounds good|that works|works for me|perfect|lock (?:it|them) in|"
+                r"accept|add (?:it|them|these|those)|save (?:it|these|those)|"
+                r"keep (?:it|these|those))\b",
+                norm,
                 flags=re.IGNORECASE,
             )
         )
 
     async def _offer_preference_schedule(
-        self, message: str, *, seed: int | None, user_id: str | None
+        self,
+        message: str,
+        *,
+        seed: int | None,
+        user_id: str | None,
+        avoid: list | None = None,
     ) -> str:
-        """Suggest a (optionally randomized) schedule and await apply/try-again."""
+        """Suggest a schedule and await apply/try-again.
+
+        ``seed is None`` is the first suggestion (deterministic earliest). For a
+        "try again" pass an incrementing ``seed`` and the ``avoid`` list of
+        already-shown signatures; this searches seeds for a genuinely different
+        arrangement and, if none exists, says so while keeping the last proposal
+        pending so "yes" still applies it.
+        """
 
         from app.services import preference_scheduler
 
-        result = preference_scheduler.suggest_preference_schedule(
-            user_id=user_id, seed=seed
-        )
+        shown: set[tuple] = {tuple(sig) for sig in (avoid or [])}
+        base = seed or 0
+        result: dict[str, Any] | None = None
+
+        if seed is None:
+            result = preference_scheduler.suggest_preference_schedule(
+                user_id=user_id, seed=None
+            )
+        else:
+            last: dict[str, Any] | None = None
+            for attempt in range(12):
+                candidate = preference_scheduler.suggest_preference_schedule(
+                    user_id=user_id, seed=base + attempt
+                )
+                last = candidate
+                if not candidate.get("proposals"):
+                    result = candidate
+                    base += attempt
+                    break
+                if tuple(candidate.get("signature") or ()) not in shown:
+                    result = candidate
+                    base += attempt
+                    break
+            if result is None:
+                # Every arrangement we found was one already shown.
+                if user_id and shown:
+                    pending = _pending_nlu_context.get(user_id)
+                    if pending:
+                        pending["seed"] = base + 11
+                    return (
+                        "That's the only schedule that fits your study window and "
+                        'deadlines. Say "yes" to apply it, or widen your study window '
+                        "in Settings for more options."
+                    )
+                result = last or {"proposals": [], "message": "Nothing to schedule."}
+
         proposals = result.get("proposals") or []
         if user_id and proposals:
+            shown.add(tuple(result.get("signature") or ()))
             _pending_nlu_context[user_id] = {
                 "message": message,
                 "predicted_tool": "apply_preference_schedule",
                 "awaiting_preference_apply": True,
                 "preference_proposals": proposals,
-                "seed": seed or 0,
+                "seed": base,
+                "shown_signatures": [list(sig) for sig in shown],
             }
         elif user_id:
             _pending_nlu_context.pop(user_id, None)
@@ -989,7 +1146,21 @@ class NlpRouterChatService:
 
         # Follow-up to "apply these suggested times?" — write only on confirm.
         if pending and pending.get("awaiting_preference_apply"):
-            if norm in _AFFIRMATIVE_REPLIES:
+            # "try again" is checked before apply so a retry is never mistaken for
+            # a confirmation, and never routed to the general AI agent.
+            if self._is_retry_reply(lower):
+                # Regenerate a genuinely different arrangement, excluding the ones
+                # already shown this conversation.
+                seed = int(pending.get("seed") or 0) + 1
+                avoid = pending.get("shown_signatures") or []
+                return await self._offer_preference_schedule(
+                    message, seed=seed, user_id=user_id, avoid=avoid
+                )
+            if norm in _CANCEL_REPLIES:
+                if user_id:
+                    _pending_nlu_context.pop(user_id, None)
+                return "Okay, I didn't change your calendar."
+            if self._is_apply_reply(message):
                 proposals = pending.get("preference_proposals") or []
                 if user_id:
                     _pending_nlu_context.pop(user_id, None)
@@ -999,27 +1170,23 @@ class NlpRouterChatService:
                     append_schedule_proposals(proposals)
                     return f"Done — I applied {len(proposals)} block(s) to your calendar."
                 return "There was nothing to apply."
-            if self._is_retry_reply(lower):
-                # Regenerate a different arrangement near the same preferences.
-                seed = int(pending.get("seed") or 0) + 1
-                return await self._offer_preference_schedule(
-                    message, seed=seed, user_id=user_id
-                )
-            if norm in _CANCEL_REPLIES:
-                if user_id:
-                    _pending_nlu_context.pop(user_id, None)
-                return "Okay, I didn't change your calendar."
+            # A pending proposal exists but the reply isn't apply/try-again/cancel.
+            # Keep the proposal and re-prompt instead of losing it to the AI agent.
+            return (
+                'I have a schedule ready. Say "yes" to apply it, "try again" for a '
+                'different option, or "cancel".'
+            )
 
         # Follow-up to "want me to suggest a schedule?" after saving a preference.
         if pending and pending.get("awaiting_preference_suggest"):
-            if norm in _AFFIRMATIVE_REPLIES:
-                return await self._offer_preference_schedule(
-                    message, seed=None, user_id=user_id
-                )
             if norm in _CANCEL_REPLIES:
                 if user_id:
                     _pending_nlu_context.pop(user_id, None)
                 return "Okay — your preference is saved. Just ask whenever you want a schedule."
+            if self._is_apply_reply(message):
+                return await self._offer_preference_schedule(
+                    message, seed=None, user_id=user_id
+                )
 
         # Follow-up to "which period?" — the user names a period (or a time range).
         if pending and pending.get("predicted_tool") == "set_productivity_preferences":
@@ -1028,6 +1195,14 @@ class NlpRouterChatService:
                 return await self._save_preference(
                     message, periods, start_str, end_str, user_id=user_id
                 )
+
+        # A bare "try again"/"another" with no schedule pending — there's nothing
+        # to redo, so ask what to schedule instead of guessing via the AI agent.
+        if self._is_bare_retry(lower):
+            return (
+                "I don't have a schedule to redo yet. Tell me what to schedule — "
+                'for example, "suggest a schedule for my tasks".'
+            )
 
         has_cue = bool(self._PRODUCTIVE_CUE.search(lower)) or "preference" in lower
 
@@ -1352,34 +1527,141 @@ class NlpRouterChatService:
             ).isoformat()
         return "move_calendar_block", moved_args
 
+    # Spoken durations -> "<N> minutes/hours" so one numeric grammar covers all.
+    _DURATION_WORDS = (
+        (r"\ban?\s+hour\s+and\s+a\s+half\b", "90 minutes"),
+        (r"\bhalf\s+an\s+hour\b", "30 minutes"),
+        (r"\bhalf\s+hour\b", "30 minutes"),
+        (r"\ba\s+couple\s+of\s+hours\b", "2 hours"),
+        (r"\ba\s+couple\s+hours\b", "2 hours"),
+        (r"\bquarter\s+of\s+an\s+hour\b", "15 minutes"),
+        (r"\ban?\s+hour\b", "60 minutes"),
+        (r"\ban?\s+minute\b", "1 minute"),
+    )
+
+    def _normalize_durations(self, text: str) -> str:
+        for pattern, replacement in self._DURATION_WORDS:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        return text
+
+    def _unit_minutes(self, amount: str, unit: str) -> int | None:
+        try:
+            value = float(amount)
+        except (TypeError, ValueError):
+            return None
+        minutes = int(round(value * 60 if unit.lower().startswith("h") else value))
+        return minutes or None
+
+    def _clean_title(self, raw: str) -> str:
+        title = re.sub(r"^\s*(?:my|the|this|that|a|an)\s+", " ", raw, flags=re.IGNORECASE)
+        return " ".join(title.strip(" .,:;!?-").split())
+
+    def _parse_resize(self, text: str) -> tuple[str, str, int] | None:
+        """Return (title, mode, minutes) for a resize phrase, or None.
+
+        mode is "end_delta" (extend/shorten/end shift), "start_delta" (start
+        earlier/later) or "absolute" (set the whole duration). ``minutes`` is
+        signed for the delta modes.
+        """
+
+        unit = r"(hours?|hrs?|hr|h|minutes?|mins?|min|m)"
+        num = r"(\d+(?:\.\d+)?)"
+
+        # "make gaming start 30 minutes earlier" / "start gaming an hour later"
+        for pattern, title_group, num_group, unit_group, dir_group in (
+            (rf"\bmake\s+(?:my\s+|the\s+|this\s+)?(.+?)\s+start\s+{num}\s*{unit}\s+(earlier|sooner|later)\b", 1, 2, 3, 4),
+            (rf"\b(?:start|begin)\s+(?:my\s+|the\s+|this\s+)?(.+?)\s+{num}\s*{unit}\s+(earlier|sooner|later)\b", 1, 2, 3, 4),
+        ):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                minutes = self._unit_minutes(match.group(num_group), match.group(unit_group))
+                if minutes is None:
+                    return None
+                if match.group(dir_group).lower() in {"earlier", "sooner"}:
+                    minutes = -minutes
+                return self._clean_title(match.group(title_group)), "start_delta", minutes
+
+        # "end gaming 30 minutes later" / "finish gaming an hour earlier"
+        match = re.search(
+            rf"\b(?:end|finish)\s+(?:my\s+|the\s+|this\s+)?(.+?)\s+{num}\s*{unit}\s+(earlier|sooner|later)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            minutes = self._unit_minutes(match.group(2), match.group(3))
+            if minutes is None:
+                return None
+            if match.group(4).lower() in {"earlier", "sooner"}:
+                minutes = -minutes
+            return self._clean_title(match.group(1)), "end_delta", minutes
+
+        # "make gaming 30 minutes longer/shorter"
+        match = re.search(
+            rf"\bmake\s+(?:my\s+|the\s+|this\s+)?(.+?)\s+{num}\s*{unit}\s+(longer|shorter)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            minutes = self._unit_minutes(match.group(2), match.group(3))
+            if minutes is None:
+                return None
+            if match.group(4).lower() == "shorter":
+                minutes = -minutes
+            return self._clean_title(match.group(1)), "end_delta", minutes
+
+        # "extend/shorten gaming by 30 minutes" (the original grammar)
+        match = re.search(
+            rf"\b(extend|lengthen|stretch|shorten|cut|reduce|trim)\b\s+"
+            rf"(?:my\s+|the\s+|this\s+)?(.+?)\s+(?:by\s+)?{num}\s*{unit}\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            minutes = self._unit_minutes(match.group(3), match.group(4))
+            if minutes is None:
+                return None
+            if match.group(1).lower() in {"shorten", "cut", "reduce", "trim"}:
+                minutes = -minutes
+            return self._clean_title(match.group(2)), "end_delta", minutes
+
+        # Absolute duration: "set gaming to 2 hours" / "make gaming 90 minutes long".
+        # Skip add-style phrasing ("make a study block for 2 hours") which means create.
+        if not re.search(r"\b(?:for|new|create|add|schedule|set up|put)\b", text, flags=re.IGNORECASE):
+            match = re.search(
+                rf"\b(?:set|change|make)\s+(?:my\s+|the\s+|this\s+)?(.+?)\s+"
+                rf"(?:to\s+be|into|to)?\s*{num}\s*{unit}\b(?:\s+long)?\s*$",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                # group(1)=title, group(2)=number, group(3)=unit
+                minutes = self._unit_minutes(match.group(2), match.group(3))
+                if minutes is None or minutes <= 0:
+                    return None
+                return self._clean_title(match.group(1)), "absolute", minutes
+
+        return None
+
     def _coerce_resize_intent(
         self,
         name: str,
         arguments: dict[str, Any],
         message: str,
     ) -> tuple[str, dict[str, Any]]:
-        """Reroute "extend/shorten X by N hours" to a move that resizes the block."""
+        """Reroute resize phrasing to a move that changes the block's times.
+
+        Covers "extend/shorten X by N", "make X N longer/shorter", "start X N
+        earlier/later", and "set X to N hours" (absolute duration).
+        """
 
         if name == "move_calendar_block":
             return name, arguments
-        match = re.search(
-            r"\b(extend|lengthen|stretch|shorten|cut|reduce|trim)\b\s+"
-            r"(?:my\s+|the\s+|this\s+)?(.+?)\s+(?:by\s+)?(\d+)\s*"
-            r"(hours?|hrs?|hr|h|minutes?|mins?|min|m)\b",
-            message,
-            flags=re.IGNORECASE,
-        )
-        if not match:
+        parsed = self._parse_resize(self._normalize_durations(message))
+        if not parsed:
             return name, arguments
-        verb = match.group(1).lower()
-        title = " ".join(match.group(2).strip(" .,:;-").split())
+        title, mode, minutes = parsed
         if not title or title.lower() in self._NON_TITLE_WORDS:
             return name, arguments
-        amount = int(match.group(3))
-        unit = match.group(4).lower()
-        minutes = amount * 60 if unit.startswith("h") else amount
-        if verb in {"shorten", "cut", "reduce", "trim"}:
-            minutes = -minutes
 
         block = chat_agent_tools.resolve_single_block(
             chat_agent_tools.matching_study_blocks(title)
@@ -1390,13 +1672,20 @@ class NlpRouterChatService:
         cur_end = self._parse_naive_datetime(block.get("end_time"))
         if cur_start is None or cur_end is None:
             return name, arguments
-        new_end = cur_end + timedelta(minutes=minutes)
-        if new_end <= cur_start:
+
+        new_start, new_end = cur_start, cur_end
+        if mode == "start_delta":
+            new_start = cur_start + timedelta(minutes=minutes)
+        elif mode == "absolute":
+            new_end = cur_start + timedelta(minutes=minutes)
+        else:  # end_delta
+            new_end = cur_end + timedelta(minutes=minutes)
+        if new_end <= new_start:
             return name, arguments
         return "move_calendar_block", {
             "title_query": title,
-            "target_date": cur_start.date().isoformat(),
-            "start_time": cur_start.isoformat(),
+            "target_date": new_start.date().isoformat(),
+            "start_time": new_start.isoformat(),
             "end_time": new_end.isoformat(),
         }
 
@@ -1421,23 +1710,106 @@ class NlpRouterChatService:
         except ValueError:
             return None
 
+    _MONTHS = {
+        "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+        "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+        "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9,
+        "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+    }
+
     def _move_target_date(self, message: str) -> date | None:
         """Resolve the day the user wants to move an event ONTO.
 
-        For "move X <source> to <target> at <time>" the target is the last
-        day token before the time range, so take the last date token in the
-        message (times like "8pm" are never date tokens).
+        Understands weekdays ("friday", "next monday"), today/tomorrow/tonight,
+        ISO dates, calendar dates ("June 12", "the 12th", "12 June") and relative
+        spans ("in 3 days", "in 2 weeks"). For "move X <source> to <target>" the
+        target is the last date mentioned, so the match nearest the end wins.
         """
 
-        tokens = re.findall(
-            r"\b(today|tomorrow|monday|mon|tuesday|tues|tue|wednesday|wed|"
-            r"thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun|"
-            r"\d{4}-\d{2}-\d{2})\b",
-            message.lower(),
-        )
-        if not tokens:
+        lower = message.lower()
+        today = effective_today()
+        month_alt = "|".join(sorted(self._MONTHS, key=len, reverse=True))
+        weekday_alt = "|".join(sorted(self._WEEKDAY_TOKENS, key=len, reverse=True))
+        candidates: list[tuple[int, date]] = []
+
+        def add(pos: int, day: date | None) -> None:
+            if day is not None:
+                candidates.append((pos, day))
+
+        # ISO date (2026-06-12)
+        for m in re.finditer(r"\b\d{4}-\d{2}-\d{2}\b", lower):
+            add(m.start(), self._resolve_date_token(m.group(0)))
+        # "June 12", "Jun 12th"
+        for m in re.finditer(rf"\b({month_alt})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", lower):
+            add(m.start(), self._month_day(m.group(1), int(m.group(2)), today))
+        # "12 June", "12th of June"
+        for m in re.finditer(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({month_alt})\b", lower):
+            add(m.start(), self._month_day(m.group(2), int(m.group(1)), today))
+        # "in 3 days", "in 2 weeks"
+        for m in re.finditer(r"\bin\s+(\d{1,3})\s+(day|days|week|weeks)\b", lower):
+            span = int(m.group(1)) * (7 if m.group(2).startswith("week") else 1)
+            add(m.start(), today + timedelta(days=span))
+        # "next/this <weekday>"
+        for m in re.finditer(rf"\b(next|this)\s+({weekday_alt})\b", lower):
+            add(m.start(), self._weekday_date(m.group(2), today, m.group(1)))
+        # "next week" (no weekday) -> a week out
+        for m in re.finditer(r"\bnext\s+week\b", lower):
+            add(m.start(), today + timedelta(days=7))
+        # "the 12th", "on the 3rd" — a day-of-month, not preceded by a month name
+        for m in re.finditer(r"\bthe\s+(\d{1,2})(?:st|nd|rd|th)?\b|\b(\d{1,2})(?:st|nd|rd|th)\b", lower):
+            before = lower[max(0, m.start() - 12):m.start()]
+            if re.search(rf"(?:{month_alt})\.?\s*$", before):
+                continue  # part of "June 12th" — already handled above
+            add(m.start(), self._day_of_month(int(m.group(1) or m.group(2)), today))
+        # plain weekday / today / tomorrow / tonight (skip if "next/this" prefixed)
+        for m in re.finditer(rf"\b(today|tomorrow|tonight|{weekday_alt})\b", lower):
+            before = lower[max(0, m.start() - 6):m.start()]
+            if re.search(r"\b(?:next|this)\s+$", before):
+                continue
+            token = "today" if m.group(1) == "tonight" else m.group(1)
+            add(m.start(), self._resolve_date_token(token))
+
+        if not candidates:
             return None
-        return self._resolve_date_token(tokens[-1])
+        candidates.sort(key=lambda item: item[0])
+        return candidates[-1][1]
+
+    def _month_day(self, month_token: str, day: int, today: date) -> date | None:
+        month = self._MONTHS.get(month_token.lower())
+        if not month:
+            return None
+        for year in (today.year, today.year + 1):
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                return None
+            if candidate >= today:
+                return candidate
+        return None
+
+    def _day_of_month(self, day: int, today: date) -> date | None:
+        year, month = today.year, today.month
+        for _ in range(13):
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate >= today:
+                return candidate
+            month += 1
+            if month > 12:
+                month, year = 1, year + 1
+        return None
+
+    def _weekday_date(self, weekday_token: str, today: date, qualifier: str) -> date | None:
+        target = self._WEEKDAY_TOKENS.get(weekday_token.lower())
+        if target is None:
+            return None
+        if qualifier.lower() == "next":
+            # The named weekday in the following calendar week.
+            next_monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
+            return next_monday + timedelta(days=target)
+        return today + timedelta(days=(target - today.weekday()) % 7)
 
     def _resolve_date_token(self, token: str) -> date | None:
         token = token.strip().lower()
@@ -1525,12 +1897,15 @@ class NlpRouterChatService:
                 )
             return self._verify_add_calendar_block(arguments)
         if name == "move_calendar_block":
-            # Resizing (extend/shorten) is a move too — accept those verbs.
+            # Resizing (extend/shorten/start earlier/set duration) is a move too —
+            # accept all of those verbs so coerced resizes aren't second-guessed.
             if not self._has_any(
                 lower,
                 (
                     "move", "reschedule", "shift",
                     "extend", "lengthen", "stretch", "shorten", "cut", "reduce", "trim",
+                    "make", "set", "change", "start", "begin", "end", "finish",
+                    "longer", "shorter", "earlier", "sooner", "later",
                 ),
             ):
                 return "Do you want me to move an existing study block?"

@@ -6,9 +6,11 @@ import 'package:uuid/uuid.dart';
 
 import '../../core/constants/api_constants.dart';
 import '../../data/models/schedule_block_model.dart';
+import '../../data/models/user_settings.dart';
 import '../../data/services/calendar_events_loader.dart';
 import 'manual_events_store.dart';
 import 'suggested_schedule_store.dart';
+import 'user_settings_service.dart';
 
 class SynctraChatResult {
   final String reply;
@@ -26,6 +28,18 @@ class SynctraChatService {
 
   final SuggestedScheduleStore _store;
 
+  /// Inverse operations for the most recently applied change, newest last.
+  /// Lets the user say "undo" / "put it back" to reverse a move, delete, or add
+  /// without a round-trip to the backend. One level deep (the last change only).
+  final List<Future<void> Function()> _undo = [];
+
+  static final RegExp _undoPattern = RegExp(
+    r'^(?:please\s+)?(?:can you\s+|could you\s+)?'
+    r'(?:undo|revert|put (?:it|that|them) back)'
+    r'(?:\s+(?:that|it|the last(?:\s+change)?))?\s*[.!]*$',
+    caseSensitive: false,
+  );
+
   factory SynctraChatService.fromGetIt() =>
       SynctraChatService(store: GetIt.instance<SuggestedScheduleStore>());
 
@@ -34,6 +48,17 @@ class SynctraChatService {
     if (text.isEmpty) {
       return const SynctraChatResult(
         reply: 'Send me a message about your schedule or tasks.',
+      );
+    }
+
+    // "undo" / "put it back" reverses the last change locally — never sent to
+    // the backend, so a delete is always recoverable.
+    if (_isUndoRequest(text)) {
+      final restored = await _undoLast();
+      return SynctraChatResult(
+        reply: restored > 0
+            ? 'Done — I undid the last change.'
+            : "There's nothing for me to undo.",
       );
     }
 
@@ -51,15 +76,25 @@ class SynctraChatService {
           'timezone_name': DateTime.now().timeZoneName,
           'calendar_events': calendarEvents,
           'tasks': tasks,
+          // Always send the latest Settings study window/session/break so chat
+          // scheduling matches the Settings screen without an app restart.
+          ...await _studyPreferencesPayload(),
         },
       );
 
       final reply = response.data?['reply']?.toString() ??
           'Sorry, I did not get a reply from the server.';
       final proposals = _readProposals(response.data?['schedule_proposals']);
+      final hadDelete = proposals.any(
+        (p) => (p['delete_block_id']?.toString() ?? '').isNotEmpty,
+      );
       final added = await _applyScheduleProposals(proposals);
 
-      return SynctraChatResult(reply: reply, blocksAdded: added);
+      // Make recovery discoverable right after a delete actually happened.
+      final finalReply = (hadDelete && added > 0)
+          ? '$reply\n\n(Say "undo" to put it back.)'
+          : reply;
+      return SynctraChatResult(reply: finalReply, blocksAdded: added);
     } on DioException catch (e) {
       final data = e.response?.data;
       if (data is Map && data['detail'] != null) {
@@ -116,8 +151,14 @@ class SynctraChatService {
       List<Map<String, dynamic>> proposals) async {
     if (proposals.isEmpty) return 0;
 
+    final g = GetIt.instance;
+    final manualStore =
+        g.isRegistered<ManualEventsStore>() ? g<ManualEventsStore>() : null;
+
     final taskId = 'chat-${DateTime.now().millisecondsSinceEpoch}';
     final blocks = <ScheduleBlockModel>[];
+    // Inverse of everything we apply this turn, so the next "undo" reverses it.
+    final undoOps = <Future<void> Function()>[];
     var applied = 0;
 
     for (final p in proposals) {
@@ -125,11 +166,19 @@ class SynctraChatService {
       // study block or manual event. It has no start/end, so handle it first.
       final deleteId = p['delete_block_id']?.toString();
       if (deleteId != null && deleteId.isNotEmpty) {
-        if (_store.blocks.any((block) => block.id == deleteId)) {
+        final sb = _findStudyBlock(deleteId);
+        if (sb != null) {
           _store.removeBlock(deleteId);
+          undoOps.add(() async => _store.addStudyBlocks([sb]));
           applied++;
-        } else if (await _deleteManualEvent(deleteId)) {
-          applied++;
+        } else if (manualStore != null) {
+          final removed = await manualStore.removeReturning(deleteId);
+          if (removed != null) {
+            undoOps.add(() async {
+              await manualStore.restore(removed);
+            });
+            applied++;
+          }
         }
         continue;
       }
@@ -145,11 +194,27 @@ class SynctraChatService {
         // item in place. Never fall through to adding a new one, or the move
         // would duplicate the event instead of moving it.
         if (replaceId != null && replaceId.isNotEmpty) {
-          if (_store.blocks.any((block) => block.id == replaceId)) {
+          final sb = _findStudyBlock(replaceId);
+          if (sb != null) {
+            final oldStart = sb.startTime;
+            final oldEnd = sb.endTime;
             _store.updateBlockTimes(id: replaceId, start: start, end: end);
+            undoOps.add(() async => _store.updateBlockTimes(
+                id: replaceId, start: oldStart, end: oldEnd));
             applied++;
-          } else if (await _moveManualEvent(replaceId, start, end)) {
-            applied++;
+          } else if (manualStore != null) {
+            final old = await manualStore.findById(replaceId);
+            if (old != null &&
+                await manualStore.updateTimes(
+                    id: replaceId, start: start, end: end)) {
+              final oldStart = old.startTime;
+              final oldEnd = old.endTime;
+              undoOps.add(() async {
+                await manualStore.updateTimes(
+                    id: replaceId, start: oldStart, end: oldEnd);
+              });
+              applied++;
+            }
           }
           continue;
         }
@@ -169,34 +234,74 @@ class SynctraChatService {
     if (blocks.isNotEmpty) {
       _store.addStudyBlocks(blocks);
       applied += blocks.length;
+      final addedIds = [for (final b in blocks) b.id];
+      undoOps.add(() async {
+        for (final id in addedIds) {
+          _store.removeBlock(id);
+        }
+      });
+    }
+
+    if (undoOps.isNotEmpty) {
+      _undo
+        ..clear()
+        ..addAll(undoOps);
     }
     return applied;
   }
 
-  /// Relocate a "+"-button (manual) calendar event the move targeted, if the
-  /// replace id wasn't one of our study blocks. Returns true when it matched.
-  Future<bool> _moveManualEvent(
-      String replaceId, DateTime start, DateTime end) async {
+  /// The user's latest Settings study window/session/break, read fresh from the
+  /// shared [UserSettingsService] on every send so changing Settings takes
+  /// effect on the next message (no restart). Returns an empty map when settings
+  /// aren't available, letting the backend fall back to its defaults.
+  Future<Map<String, dynamic>> _studyPreferencesPayload() async {
     final g = GetIt.instance;
-    if (!g.isRegistered<ManualEventsStore>()) return false;
+    if (!g.isRegistered<UserSettingsService>()) return const {};
     try {
-      return await g<ManualEventsStore>()
-          .updateTimes(id: replaceId, start: start, end: end);
+      final svc = g<UserSettingsService>();
+      await svc.ensureLoaded();
+      return chatStudyPreferences(svc.settings);
     } catch (_) {
-      return false;
+      return const {};
     }
   }
 
-  /// Remove a "+"-button (manual) calendar event a delete targeted, if the id
-  /// wasn't one of our study blocks. Returns true when it matched.
-  Future<bool> _deleteManualEvent(String deleteId) async {
-    final g = GetIt.instance;
-    if (!g.isRegistered<ManualEventsStore>()) return false;
-    try {
-      return await g<ManualEventsStore>().remove(deleteId);
-    } catch (_) {
-      return false;
+  /// Maps the user's [UserSettings] to the chat request's study-preference
+  /// fields. Pure + static so it can be unit-tested without the network stack.
+  /// Returns an empty map when there are no settings (backend uses defaults).
+  static Map<String, dynamic> chatStudyPreferences(UserSettings? s) {
+    if (s == null) return const {};
+    String hhmm(int hour, int minute) =>
+        '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+    return {
+      'study_start_time': hhmm(s.workStartTime.hour, s.workStartTime.minute),
+      'study_end_time': hhmm(s.workEndTime.hour, s.workEndTime.minute),
+      'session_length_minutes': s.preferredSessionMinutes,
+      'break_minutes': s.breakMinutes,
+    };
+  }
+
+  ScheduleBlockModel? _findStudyBlock(String id) {
+    for (final b in _store.blocks) {
+      if (b.id == id) return b;
     }
+    return null;
+  }
+
+  bool _isUndoRequest(String text) => _undoPattern.hasMatch(text.trim());
+
+  /// Reverse the most recently applied change. Returns the number of inverse
+  /// operations run (0 when there's nothing to undo).
+  Future<int> _undoLast() async {
+    if (_undo.isEmpty) return 0;
+    final ops = List<Future<void> Function()>.from(_undo);
+    _undo.clear();
+    for (final op in ops.reversed) {
+      try {
+        await op();
+      } catch (_) {}
+    }
+    return ops.length;
   }
 }
 

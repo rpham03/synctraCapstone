@@ -13,6 +13,7 @@ from app.services.chat_client_context import (
     get_schedule_proposals,
     set_calendar_events,
     set_client_today,
+    set_study_preferences,
     set_tasks,
     set_timezone_name,
     set_timezone_offset_minutes,
@@ -68,6 +69,7 @@ class ChatService:
         client_today: str | None = None,
         timezone_offset_minutes: int | None = None,
         timezone_name: str | None = None,
+        study_preferences: dict[str, Any] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         text = user_message.strip()
         if not text:
@@ -79,6 +81,7 @@ class ChatService:
         set_timezone_offset_minutes(timezone_offset_minutes)
         set_timezone_name(timezone_name)
         set_user_id(user_id)
+        set_study_preferences(study_preferences)
         try:
             reply, proposals = await self._process_message_inner(text, user_id)
             append_conversation_turn(

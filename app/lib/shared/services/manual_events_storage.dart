@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../data/models/event_model.dart';
+import '../../data/services/remote_event_sync.dart';
 import 'user_scope.dart';
 
 /// Single source of truth for reading/writing the user's "+"-button manual
@@ -56,8 +57,33 @@ Future<List<EventModel>> loadManualEvents() async {
   return const [];
 }
 
-Future<void> saveManualEvents(List<EventModel> events) async {
+/// Writes the manual events to the local per-user cache only (no Supabase).
+Future<void> _writeManualEventsLocal(List<EventModel> events) async {
   final prefs = await SharedPreferences.getInstance();
   final data = [for (final e in events) manualEventToJson(e)];
   await prefs.setString(userScopedKey(_manualEventsBase), jsonEncode(data));
+}
+
+Future<void> saveManualEvents(List<EventModel> events) async {
+  await _writeManualEventsLocal(events);
+  // Mirror to Supabase so the events survive logout/login and reach other
+  // devices. Best effort: a network failure leaves the local cache intact.
+  await RemoteEventSync.replaceManualEvents(events);
+}
+
+/// Reconciles the local manual-event cache with Supabase at login:
+///   • Supabase has rows  -> they win (the account's events on any device).
+///   • Supabase is empty but local has events -> migrate the local ones up.
+/// A no-op (keeps local) when signed out or Supabase is unreachable.
+Future<void> syncManualEventsFromSupabase() async {
+  final remote = await RemoteEventSync.pullManualEvents();
+  if (remote == null) return; // signed out / offline — keep the local cache
+  if (remote.isNotEmpty) {
+    await _writeManualEventsLocal(remote);
+    return;
+  }
+  final local = await loadManualEvents();
+  if (local.isNotEmpty) {
+    await RemoteEventSync.replaceManualEvents(local);
+  }
 }
