@@ -1,39 +1,66 @@
-// Synctra design system — Notion-inspired surfaces, Inter typography, quiet chrome.
+// Synctra design system — Reclaim-inspired surfaces, Inter typography, purple accent.
 // All chroma lives here; screens should use Theme.of(context) or [AppColors] for semantics.
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 // ── Core palette (light) ───────────────────────────────────────────────────
 
-/// Brand + calendar semantics. Neutrals follow Notion-like ink on paper.
+/// Brand + calendar semantics — Reclaim.ai-inspired palette.
 abstract final class AppColors {
-  /// Primary UI / links — readable blue on warm white.
-  static const Color primary = Color(0xFF1B6CB5);
+  /// Primary actions, links, focus rings.
+  static const Color primary = Color(0xFF6366F1);
 
   /// Secondary — Canvas / warm highlights.
   static const Color secondary = Color(0xFFF9AB00);
 
   static const Color surface = Color(0xFFFFFFFF);
-  static const Color background = Color(0xFFF5F4F1);
+  static const Color background = Color(0xFFFFFFFF);
 
   static const Color error = Color(0xFFDC4F45);
   static const Color success = Color(0xFF0D6B5E);
 
-  /// Notion ink.
-  static const Color textPrimary = Color(0xFF2F2E2B);
-  static const Color textSecondary = Color(0xFF6F6E69);
+  static const Color textPrimary = Color(0xFF111827);
+  /// Secondary copy — WCAG-friendly on white (~8:1).
+  static const Color textSecondary = Color(0xFF374151);
+  /// Muted labels (time axis, hints) — still readable at 11–12px (~5.5:1).
+  static const Color textTertiary = Color(0xFF4B5563);
 
-  static const Color border = Color(0xFFDCDAD6);
+  static const Color border = Color(0xFFE5E7EB);
+
+  // ── Course / iCal source palette (mid-saturation, light + dark safe) ─────
+  static const Color courseBlue = Color(0xFF3B7DD8);
+  static const Color courseGreen = Color(0xFF2D9E6E);
+  static const Color coursePurple = Color(0xFF7C5CBF);
+  static const Color courseOrange = Color(0xFFD9792E);
+  static const Color coursePink = Color(0xFFC94C7A);
+  static const Color courseTeal = Color(0xFF1F9EAA);
+  static const Color courseRed = Color(0xFFD64545);
+  static const Color courseAmber = Color(0xFFC9A227);
+
+  static const List<Color> coursePalette = [
+    courseBlue,
+    courseGreen,
+    coursePurple,
+    courseOrange,
+    coursePink,
+    courseTeal,
+    courseRed,
+    courseAmber,
+  ];
 
   // ── Neutrals ───────────────────────────────────────────────────────────────
-  static const Color grey100 = Color(0xFFEEEDEA);
-  static const Color grey300 = Color(0xFFDCDAD6);
-  static const Color grey600 = Color(0xFF6F6E69);
-  static const Color grey800 = Color(0xFF2F2E2B);
+  static const Color grey100 = Color(0xFFF3F4F6);
+  static const Color grey300 = Color(0xFFE5E7EB);
+  static const Color grey600 = Color(0xFF4B5563);
+  static const Color grey800 = Color(0xFF111827);
 
   // ── Calendar / schedule semantics ────────────────────────────────────────
   static const Color calendarGridLine = border;
   static const Color currentTimeLine = Color(0xFFEB5757);
+
+  /// Default timed event fill (Reclaim sky blue blocks).
+  static const Color calendarEventBlue = Color(0xFF7FB7E8);
+  static const Color calendarEventOnColor = Color(0xFFFFFFFF);
 
   static const Color canvasAssignment = secondary;
   static const Color canvasAssignmentContainer = Color(0xFFFFF6E8);
@@ -42,21 +69,34 @@ abstract final class AppColors {
   static const Color manualTask = Color(0xFF16A34A);
   static const Color manualTaskContainer = Color(0xFFE8F5EC);
 
-  static const Color fixedEvent = primary;
+  static const Color fixedEvent = calendarEventBlue;
   static const Color aiStudyBlock = success;
   static const Color confirmedStudyBlock = success;
 
-  static const Color aiSuggestedFill = Color(0x331B6CB5);
+  static const Color aiSuggestedFill = Color(0x336366F1);
   static const Color aiSuggestedBorder = primary;
 
   static const Color icalAccent = Color(0xFF9065B0);
   static const Color flexibleBlock = aiStudyBlock;
+  static const Color habitBlock = Color(0xFFE05D52);
   static const Color collabEvent = secondary;
   static const Color deadline = error;
 
   static const Color surfaceLight = surface;
   static const Color surfaceDimLight = background;
   static const Color outlineVariantLight = border;
+
+  /// Reclaim-style labeled sidebar (always dark in light mode).
+  static const Color navSidebarBackground = Color(0xFF1A1C2C);
+  static const Color navSidebarText = Color(0xFFD1D5DB);
+  static const Color navSidebarTextActive = Color(0xFFFFFFFF);
+
+  @Deprecated('Use navSidebarBackground')
+  static const Color navRailBackground = navSidebarBackground;
+  @Deprecated('Use navSidebarText')
+  static const Color navRailIcon = navSidebarText;
+  @Deprecated('Use navSidebarTextActive')
+  static const Color navRailIconActive = navSidebarTextActive;
 }
 
 /// Dark-mode companions (Notion-dark inspired).
@@ -65,10 +105,19 @@ abstract final class AppColorsDark {
   static const Color background = Color(0xFF191919);
   static const Color textPrimary = Color(0xFFE6E6E4);
   static const Color textSecondary = Color(0xFF9B9B99);
+  static const Color textTertiary = Color(0xFF6F6F6C);
   static const Color border = Color(0xFF3D3D3A);
 
   static const Color canvasAssignmentContainer = Color(0xFF3E2E14);
-  static const Color aiSuggestedFill = Color(0x331B6CB5);
+  static const Color aiSuggestedFill = Color(0x336366F1);
+
+  static const Color navSidebarBackground = Color(0xFF12141F);
+  static const Color navSidebarText = Color(0xFF8E8E93);
+
+  @Deprecated('Use navSidebarBackground')
+  static const Color navRailBackground = navSidebarBackground;
+  @Deprecated('Use navSidebarText')
+  static const Color navRailIcon = navSidebarText;
 }
 
 /// Custom page transition: fade + slight upward slide (Linear-style polish).
@@ -121,11 +170,11 @@ abstract final class AppTheme {
         onSurfaceVariant: AppColors.textSecondary,
         outline: AppColors.textPrimary.withValues(alpha: 0.12),
         outlineVariant: AppColors.border,
-        surfaceContainerLowest: AppColors.background,
-        surfaceContainerLow: const Color(0xFFEEEDEA),
-        surfaceContainer: const Color(0xFFE6E5E1),
-        surfaceContainerHigh: const Color(0xFFDCDAD6),
-        surfaceContainerHighest: const Color(0xFFD3D1CC),
+        surfaceContainerLowest: AppColors.surface,
+        surfaceContainerLow: const Color(0xFFF5F5F5),
+        surfaceContainer: const Color(0xFFEFEFEF),
+        surfaceContainerHigh: const Color(0xFFE8E8E8),
+        surfaceContainerHighest: const Color(0xFFE0E0E0),
         primary: AppColors.primary,
         onPrimary: Colors.white,
         secondary: AppColors.secondary,
@@ -158,6 +207,7 @@ abstract final class AppTheme {
   }
 
   static TextTheme _textTheme(ColorScheme scheme, Brightness brightness) {
+    final isLight = brightness == Brightness.light;
     final seed = ThemeData(brightness: brightness, useMaterial3: true).textTheme;
     final inter = GoogleFonts.interTextTheme(seed).apply(
       bodyColor: scheme.onSurface,
@@ -181,16 +231,31 @@ abstract final class AppTheme {
       titleSmall: GoogleFonts.inter(textStyle: inter.titleSmall, fontSize: 14, fontWeight: FontWeight.w500, letterSpacing: -0.1),
       bodyLarge: GoogleFonts.inter(textStyle: inter.bodyLarge, fontSize: 16, height: 1.5, letterSpacing: -0.1),
       bodyMedium: GoogleFonts.inter(textStyle: inter.bodyMedium, fontSize: 14, height: 1.45, letterSpacing: -0.05),
-      bodySmall: GoogleFonts.inter(textStyle: inter.bodySmall, fontSize: 12, height: 1.35, color: scheme.onSurfaceVariant),
-      labelLarge: GoogleFonts.inter(textStyle: inter.labelLarge, fontWeight: FontWeight.w500, letterSpacing: -0.05),
-      labelMedium: GoogleFonts.inter(textStyle: inter.labelMedium, fontWeight: FontWeight.w500, letterSpacing: 0.02),
+      bodySmall: GoogleFonts.inter(
+        textStyle: inter.bodySmall,
+        fontSize: 13,
+        height: 1.45,
+        color: isLight ? AppColors.textSecondary : scheme.onSurfaceVariant,
+      ),
+      labelLarge: GoogleFonts.inter(
+        textStyle: inter.labelLarge,
+        fontWeight: FontWeight.w500,
+        letterSpacing: -0.05,
+        color: scheme.onSurface,
+      ),
+      labelMedium: GoogleFonts.inter(
+        textStyle: inter.labelMedium,
+        fontWeight: FontWeight.w500,
+        letterSpacing: 0.02,
+        color: isLight ? AppColors.textSecondary : scheme.onSurfaceVariant,
+      ),
       labelSmall: GoogleFonts.inter(
         textStyle: inter.labelSmall,
         fontSize: 12,
         fontWeight: FontWeight.w500,
         letterSpacing: 0.2,
         height: 1.35,
-        color: scheme.onSurfaceVariant,
+        color: isLight ? AppColors.textTertiary : scheme.onSurfaceVariant,
       ),
     );
   }
@@ -201,7 +266,7 @@ abstract final class AppTheme {
     final textTheme = _textTheme(scheme, brightness);
     const transition = SynctraFadeUpTransitionsBuilder();
 
-    final fillInput = isLight ? const Color(0xFFF7F7F4) : AppColorsDark.surface;
+    final fillInput = isLight ? AppColors.surface : AppColorsDark.surface;
 
     return ThemeData(
       useMaterial3: true,
@@ -267,7 +332,7 @@ abstract final class AppTheme {
         surfaceTintColor: Colors.transparent,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(12),
           side: BorderSide(color: scheme.outlineVariant),
         ),
       ),
@@ -275,9 +340,9 @@ abstract final class AppTheme {
       dialogTheme: DialogThemeData(
         backgroundColor: scheme.surface,
         surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         elevation: 16,
-        shadowColor: Colors.black.withValues(alpha: 0.1),
+        shadowColor: Colors.black.withValues(alpha: 0.12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         titleTextStyle: GoogleFonts.inter(
           fontSize: 16,
           fontWeight: FontWeight.w600,
@@ -287,7 +352,7 @@ abstract final class AppTheme {
         contentTextStyle: GoogleFonts.inter(
           fontSize: 14,
           height: 1.45,
-          color: scheme.onSurfaceVariant,
+          color: isLight ? AppColors.textSecondary : scheme.onSurfaceVariant,
         ),
       ),
       bottomSheetTheme: BottomSheetThemeData(
@@ -353,7 +418,7 @@ abstract final class AppTheme {
         foregroundColor: scheme.onPrimary,
         elevation: 1,
         highlightElevation: 2,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
@@ -384,15 +449,23 @@ abstract final class AppTheme {
           borderSide: BorderSide(color: scheme.error, width: 2),
         ),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        hintStyle: TextStyle(color: scheme.onSurfaceVariant.withValues(alpha: 0.8), fontSize: 14, height: 1.4),
-        helperStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12, height: 1.4),
+        hintStyle: TextStyle(
+          color: isLight ? AppColors.textTertiary : scheme.onSurfaceVariant,
+          fontSize: 14,
+          height: 1.4,
+        ),
+        helperStyle: TextStyle(
+          color: isLight ? AppColors.textSecondary : scheme.onSurfaceVariant,
+          fontSize: 12,
+          height: 1.4,
+        ),
         errorStyle: TextStyle(color: scheme.error, fontSize: 12, height: 1.35),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           minimumSize: const Size(64, 44),
           elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
           textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: -0.02, height: 1.2),
         ).copyWith(
           overlayColor: WidgetStateProperty.resolveWith((states) {
@@ -409,8 +482,10 @@ abstract final class AppTheme {
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           minimumSize: const Size(64, 44),
-          side: BorderSide(color: scheme.outlineVariant),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          side: const BorderSide(color: AppColors.border),
+          backgroundColor: AppColors.surface,
+          foregroundColor: AppColors.textPrimary,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
           textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, height: 1.2),
         ),
       ),
@@ -441,4 +516,82 @@ abstract final class AppTheme {
       ),
     );
   }
+}
+
+/// Calendar-specific typography — Reclaim-style hierarchy on Inter.
+abstract final class CalendarTextStyles {
+  static TextStyle hourLabel(Brightness brightness) => GoogleFonts.inter(
+        fontSize: 11,
+        fontWeight: FontWeight.w500,
+        height: 1.1,
+        color: brightness == Brightness.light
+            ? AppColors.textTertiary
+            : AppColorsDark.textTertiary,
+      );
+
+  static TextStyle dayHeader(Brightness brightness) => GoogleFonts.inter(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        height: 1.2,
+        color: brightness == Brightness.light
+            ? AppColors.textSecondary
+            : AppColorsDark.textSecondary,
+      );
+
+  static TextStyle todayDateInCircle(Brightness brightness) => GoogleFonts.inter(
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+        height: 1,
+        color: AppColors.primary,
+      );
+
+  static TextStyle eventTitle(Color onColor) => GoogleFonts.inter(
+        fontSize: 12,
+        fontWeight: FontWeight.w500,
+        height: 1.2,
+        color: onColor,
+      );
+
+  static TextStyle eventTime(Color onColor) => GoogleFonts.inter(
+        fontSize: 11,
+        fontWeight: FontWeight.w500,
+        height: 1.15,
+        color: onColor.withValues(alpha: 0.92),
+      );
+
+  static TextStyle sidebarSectionHeader(Brightness brightness) =>
+      GoogleFonts.inter(
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.88,
+        height: 1.2,
+        color: brightness == Brightness.light
+            ? AppColors.textSecondary
+            : AppColorsDark.textTertiary,
+      );
+
+  static TextStyle upcomingRow(Brightness brightness) => GoogleFonts.inter(
+        fontSize: 13,
+        fontWeight: FontWeight.w400,
+        height: 1.35,
+        color: brightness == Brightness.light
+            ? AppColors.textPrimary
+            : AppColorsDark.textPrimary,
+      );
+
+  static TextStyle topBarDate(Brightness brightness) => GoogleFonts.inter(
+        fontSize: 14,
+        fontWeight: FontWeight.w500,
+        height: 1.25,
+        color: brightness == Brightness.light
+            ? AppColors.textPrimary
+            : AppColorsDark.textPrimary,
+      );
+}
+
+/// Pick readable label color on a course/event fill.
+Color calendarContrastText(Color background) {
+  return background.computeLuminance() > 0.72
+      ? AppColors.textPrimary
+      : AppColors.calendarEventOnColor;
 }

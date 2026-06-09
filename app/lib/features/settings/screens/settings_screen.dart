@@ -10,10 +10,13 @@ import '../../../core/theme/app_theme.dart';
 import '../../../data/models/ical_feed.dart';
 import '../../../data/models/user_settings.dart';
 import '../../../data/services/course_import_service.dart';
+import '../../../features/calendar/widgets/calendar_view_pill_toggle.dart';
 import '../../../shared/services/auth_service.dart';
 import '../../../shared/services/ical_feed_service.dart';
 import '../../../shared/services/theme_mode_notifier.dart';
 import '../../../shared/services/user_settings_service.dart';
+import '../../../shared/widgets/synctra_page_scaffold.dart';
+import '../../../theme.dart';
 import '../widgets/settings_sections.dart';
 import '../widgets/work_hours_range_slider.dart';
 
@@ -184,301 +187,327 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final scheme = Theme.of(context).colorScheme;
     final settings = _settingsSvc.settings;
 
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, size: AppTokens.iconStandard),
-          onPressed: () => context.canPop() ? context.pop() : context.go('/calendar'),
-        ),
-        title: const Text('Settings'),
+    return SynctraPageScaffold(
+      title: 'Settings',
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back, size: AppTokens.iconStandard),
+        color: AppColors.textSecondary,
+        onPressed: () => context.canPop() ? context.pop() : context.go('/calendar'),
       ),
       body: _loading || settings == null
           ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(
-                AppTokens.space16,
-                AppTokens.space8,
-                AppTokens.space16,
-                AppTokens.space32,
-              ),
-              children: [
-                const SettingsSectionHeader(
-                  'Account',
-                  description: 'Your signed-in profile for syncing data.',
-                ),
-                SettingsInsetCard(
-                  child: Row(
-                    children: [
-                      CircleAvatar(
-                        radius: 24,
-                        backgroundColor: AppColors.primary.withValues(alpha: 0.12),
-                        child: const Icon(Icons.person_outline, color: AppColors.primary, size: AppTokens.iconStandard),
+          : SingleChildScrollView(
+              child: SynctraPageContent(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const SettingsSectionHeader(
+                      'Account',
+                      description: 'Your signed-in profile for syncing data.',
+                    ),
+                    SettingsInsetCard(
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 24,
+                            backgroundColor: AppColors.primary.withValues(alpha: 0.12),
+                            child: const Icon(
+                              Icons.person_outline,
+                              color: AppColors.primary,
+                              size: AppTokens.iconStandard,
+                            ),
+                          ),
+                          const SizedBox(width: AppTokens.space16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Signed in as',
+                                  style: CalendarTextStyles.hourLabel(
+                                    Theme.of(context).brightness,
+                                  ),
+                                ),
+                                const SizedBox(height: AppTokens.space4),
+                                Text(
+                                  email,
+                                  style: CalendarTextStyles.upcomingRow(
+                                    Theme.of(context).brightness,
+                                  ).copyWith(fontWeight: FontWeight.w600),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: AppTokens.space16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('Signed in as', style: context.captionStyle),
-                            const SizedBox(height: AppTokens.space4),
-                            Text(email, style: Theme.of(context).textTheme.titleMedium),
-                          ],
+                    ),
+                    const SettingsSectionHeader(
+                      'Appearance',
+                      description: 'Light, dark, or match your device.',
+                    ),
+                    SettingsInsetCard(
+                      child: ListenableBuilder(
+                        listenable: ThemeModeNotifier.instance,
+                        builder: (context, _) {
+                          final mode = ThemeModeNotifier.instance.themeMode;
+                          return CalendarViewPillToggle<ThemeMode>(
+                            segments: const [
+                              ThemeMode.light,
+                              ThemeMode.dark,
+                              ThemeMode.system,
+                            ],
+                            selected: mode,
+                            onChanged: ThemeModeNotifier.instance.setThemeMode,
+                            labelBuilder: (value) => switch (value) {
+                              ThemeMode.light => 'Light',
+                              ThemeMode.dark => 'Dark',
+                              ThemeMode.system => 'System',
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                    const SettingsSectionHeader(
+                      'Study preferences',
+                      description: 'When and how Synctra schedules focus blocks.',
+                    ),
+                    SettingsInsetCard(
+                      child: WorkPreferencesForm(
+                        workStart: settings.workStartTime,
+                        workEnd: settings.workEndTime,
+                        sessionMinutes: settings.preferredSessionMinutes,
+                        breakMinutes: settings.breakMinutes,
+                        onWorkRangeChanged: (range) => _saveSettings(settings.copyWith(
+                          workStartTime: WorkHoursSlots.slotToTime(range.start.round()),
+                          workEndTime: WorkHoursSlots.slotToTime(range.end.round()),
+                        )),
+                        onSessionChanged: (v) =>
+                            _saveSettings(settings.copyWith(preferredSessionMinutes: v)),
+                        onBreakChanged: (v) => _saveSettings(settings.copyWith(breakMinutes: v)),
+                      ),
+                    ),
+                    const SettingsSectionHeader(
+                      'Calendar feeds',
+                      description: 'iCal links from Google Calendar or Canvas export.',
+                    ),
+                    SettingsInsetCard(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          IcalFeedEditor(
+                            controller: _icalCtrl,
+                            loading: _icalBusy,
+                            statusMessage: _icalStatus,
+                            isError: _icalIsError,
+                            hintText: 'https://calendar.google.com/calendar/ical/…',
+                            helperText: 'Paste a secret iCal address — not your normal calendar URL.',
+                            onAdd: _addIcalFeed,
+                          ),
+                          const SizedBox(height: AppTokens.space12),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: SynctraGhostButton(
+                              onPressed: _icalBusy ? null : _refreshAllFeeds,
+                              icon: Icons.refresh,
+                              label: 'Refresh all feeds',
+                            ),
+                          ),
+                          if (_feeds.isEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: AppTokens.space12),
+                              child: Text(
+                                'No feeds connected yet.',
+                                style: CalendarTextStyles.hourLabel(Theme.of(context).brightness),
+                              ),
+                            ),
+                          ..._feeds.map(
+                            (f) => Padding(
+                              padding: const EdgeInsets.only(top: AppTokens.space8),
+                              child: IcalFeedListTile(
+                                feed: f,
+                                onRefresh: () async {
+                                  await _icalSvc.syncFeed(f);
+                                  await _load();
+                                  _toast('Feed refreshed');
+                                },
+                                onDelete: () async {
+                                  await _icalSvc.removeFeed(f);
+                                  await _load();
+                                  _toast('Feed removed');
+                                },
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SettingsSectionHeader(
+                      'Course websites',
+                      description: 'Public UW course pages for lectures and due dates.',
+                    ),
+                    SettingsInsetCard(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _courseCtrl,
+                                  decoration: InputDecoration(
+                                    hintText: 'https://courses.cs.washington.edu/courses/…',
+                                    helperText: _courseError == null
+                                        ? 'We import events from the course schedule page.'
+                                        : null,
+                                    errorText: _courseError,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: AppTokens.space8),
+                              Padding(
+                                padding: const EdgeInsets.only(top: AppTokens.space4),
+                                child: _courseBusy
+                                    ? SizedBox(
+                                        width: 88,
+                                        height: AppTokens.buttonHeight,
+                                        child: Center(
+                                          child: SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: scheme.primary,
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    : SynctraPrimaryButton(
+                                        onPressed: _addCourse,
+                                        label: 'Import',
+                                      ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: AppTokens.space12),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: SynctraGhostButton(
+                              onPressed: _courseBusy || _courses.isEmpty ? null : _reimportAllCourses,
+                              icon: Icons.refresh,
+                              label: 'Re-import all courses',
+                            ),
+                          ),
+                          if (_courses.isEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: AppTokens.space12),
+                              child: Text(
+                                'No courses imported yet.',
+                                style: CalendarTextStyles.hourLabel(Theme.of(context).brightness),
+                              ),
+                            ),
+                          ..._courses.map(
+                            (c) => Padding(
+                              padding: const EdgeInsets.only(top: AppTokens.space8),
+                              child: CourseImportListTile(
+                                name: c.courseName,
+                                url: c.courseUrl,
+                                totalImported: c.eventCount,
+                                onReimport: () async {
+                                  await _courseSvc.syncImport(
+                                    importId: c.id,
+                                    url: c.courseUrl,
+                                    name: c.courseName,
+                                  );
+                                  await _load();
+                                  _toast('Course re-imported');
+                                },
+                                onDelete: () async {
+                                  final removeEvents = await showDialog<bool>(
+                                    context: context,
+                                    builder: (ctx) => AlertDialog(
+                                      title: const Text('Remove course?'),
+                                      content: const Text('Also remove associated calendar events?'),
+                                      actions: [
+                                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep events')),
+                                        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove all')),
+                                      ],
+                                    ),
+                                  );
+                                  await _courseSvc.removeImport(c.id);
+                                  await _settingsSvc.removeCourseUrl(c.courseUrl);
+                                  await _load();
+                                  if (removeEvents == true) _toast('Course and events removed');
+                                },
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SettingsSectionHeader(
+                      'Integrations',
+                      description: 'External services Synctra can connect to.',
+                    ),
+                    SettingsInsetCard(
+                      padding: EdgeInsets.zero,
+                      child: SettingsActionRow(
+                        icon: Icons.school_outlined,
+                        label: 'Canvas LMS',
+                        description: ApiConstants.canvasWebBaseUrl,
+                      ),
+                    ),
+                    if (PreviewFlags.noAuth) ...[
+                      const SettingsSectionHeader('Preview'),
+                      SettingsInsetCard(
+                        padding: EdgeInsets.zero,
+                        child: SettingsActionRow(
+                          icon: Icons.replay_outlined,
+                          label: 'Replay onboarding',
+                          description: 'Reset local setup and open the wizard again',
+                          trailing: const Icon(Icons.chevron_right, size: AppTokens.iconStandard),
+                          onTap: () async {
+                            await _settingsSvc.resetPreviewOnboarding();
+                            if (!context.mounted) return;
+                            context.go('/onboarding');
+                          },
                         ),
                       ),
                     ],
-                  ),
-                ),
-                const SettingsSectionHeader(
-                  'Appearance',
-                  description: 'Light, dark, or match your device.',
-                ),
-                SettingsInsetCard(
-                  child: ListenableBuilder(
-                    listenable: ThemeModeNotifier.instance,
-                    builder: (context, _) {
-                      final mode = ThemeModeNotifier.instance.themeMode;
-                      return SegmentedButton<ThemeMode>(
-                        segments: const [
-                          ButtonSegment(
-                            value: ThemeMode.light,
-                            icon: Icon(Icons.light_mode_outlined, size: 18),
-                            label: Text('Light'),
-                          ),
-                          ButtonSegment(
-                            value: ThemeMode.dark,
-                            icon: Icon(Icons.dark_mode_outlined, size: 18),
-                            label: Text('Dark'),
-                          ),
-                          ButtonSegment(
-                            value: ThemeMode.system,
-                            icon: Icon(Icons.settings_brightness_outlined, size: 18),
-                            label: Text('System'),
-                          ),
-                        ],
-                        selected: {mode},
-                        onSelectionChanged: (selection) {
-                          ThemeModeNotifier.instance.setThemeMode(selection.first);
-                        },
-                      );
-                    },
-                  ),
-                ),
-                const SettingsSectionHeader(
-                  'Study preferences',
-                  description: 'When and how Synctra schedules focus blocks.',
-                ),
-                SettingsInsetCard(
-                  child: WorkPreferencesForm(
-                    workStart: settings.workStartTime,
-                    workEnd: settings.workEndTime,
-                    sessionMinutes: settings.preferredSessionMinutes,
-                    breakMinutes: settings.breakMinutes,
-                    onWorkRangeChanged: (range) => _saveSettings(settings.copyWith(
-                      workStartTime: WorkHoursSlots.slotToTime(range.start.round()),
-                      workEndTime: WorkHoursSlots.slotToTime(range.end.round()),
-                    )),
-                    onSessionChanged: (v) =>
-                        _saveSettings(settings.copyWith(preferredSessionMinutes: v)),
-                    onBreakChanged: (v) => _saveSettings(settings.copyWith(breakMinutes: v)),
-                  ),
-                ),
-                const SettingsSectionHeader(
-                  'Calendar feeds',
-                  description: 'iCal links from Google Calendar or Canvas export.',
-                ),
-                IcalFeedEditor(
-                  controller: _icalCtrl,
-                  loading: _icalBusy,
-                  statusMessage: _icalStatus,
-                  isError: _icalIsError,
-                  hintText: 'https://calendar.google.com/calendar/ical/…',
-                  helperText: 'Paste a secret iCal address — not your normal calendar URL.',
-                  onAdd: _addIcalFeed,
-                ),
-                const SizedBox(height: AppTokens.space8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
-                    onPressed: _icalBusy ? null : _refreshAllFeeds,
-                    icon: const Icon(Icons.refresh, size: AppTokens.iconStandard),
-                    label: const Text('Refresh all feeds'),
-                  ),
-                ),
-                if (_feeds.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: AppTokens.space12),
-                    child: Text(
-                      'No feeds connected yet.',
-                      style: context.captionStyle,
+                    const SettingsSectionHeader(
+                      'Session',
+                      description: 'Sign out of this device.',
                     ),
-                  ),
-                ..._feeds.map(
-                  (f) => Padding(
-                    padding: const EdgeInsets.only(top: AppTokens.space8),
-                    child: IcalFeedListTile(
-                      feed: f,
-                      onRefresh: () async {
-                        await _icalSvc.syncFeed(f);
-                        await _load();
-                        _toast('Feed refreshed');
-                      },
-                      onDelete: () async {
-                        await _icalSvc.removeFeed(f);
-                        await _load();
-                        _toast('Feed removed');
-                      },
-                    ),
-                  ),
-                ),
-                const SettingsSectionHeader(
-                  'Course websites',
-                  description: 'Public UW course pages for lectures and due dates.',
-                ),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _courseCtrl,
-                        decoration: InputDecoration(
-                          hintText: 'https://courses.cs.washington.edu/courses/…',
-                          helperText: _courseError == null
-                              ? 'We import events from the course schedule page.'
-                              : null,
-                          errorText: _courseError,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: AppTokens.space8),
-                    Padding(
-                      padding: const EdgeInsets.only(top: AppTokens.space4),
-                      child: FilledButton(
-                        onPressed: _courseBusy ? null : _addCourse,
-                        child: _courseBusy
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Text('Import'),
+                    SettingsInsetCard(
+                      padding: EdgeInsets.zero,
+                      child: SettingsActionRow(
+                        icon: Icons.logout,
+                        label: 'Sign out',
+                        description: user == null ? 'Not signed in' : 'You will need to sign in again to sync',
+                        foregroundColor: scheme.error,
+                        onTap: user == null
+                            ? null
+                            : () async {
+                                final ok = await showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    title: const Text('Sign out?'),
+                                    content: const Text('You will need to sign in again to sync your data.'),
+                                    actions: [
+                                      TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                                      FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Sign out')),
+                                    ],
+                                  ),
+                                );
+                                if (ok != true || !context.mounted) return;
+                                await AuthService().signOut();
+                                if (context.mounted) context.go('/login');
+                              },
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: AppTokens.space8),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
-                    onPressed: _courseBusy || _courses.isEmpty ? null : _reimportAllCourses,
-                    icon: const Icon(Icons.refresh, size: AppTokens.iconStandard),
-                    label: const Text('Re-import all courses'),
-                  ),
-                ),
-                if (_courses.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: AppTokens.space12),
-                    child: Text(
-                      'No courses imported yet.',
-                      style: context.captionStyle,
-                    ),
-                  ),
-                ..._courses.map(
-                  (c) => Padding(
-                    padding: const EdgeInsets.only(top: AppTokens.space8),
-                    child: CourseImportListTile(
-                      name: c.courseName,
-                      url: c.courseUrl,
-                      totalImported: c.eventCount,
-                      onReimport: () async {
-                        await _courseSvc.syncImport(
-                          importId: c.id,
-                          url: c.courseUrl,
-                          name: c.courseName,
-                        );
-                        await _load();
-                        _toast('Course re-imported');
-                      },
-                      onDelete: () async {
-                        final removeEvents = await showDialog<bool>(
-                          context: context,
-                          builder: (ctx) => AlertDialog(
-                            title: const Text('Remove course?'),
-                            content: const Text('Also remove associated calendar events?'),
-                            actions: [
-                              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Keep events')),
-                              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Remove all')),
-                            ],
-                          ),
-                        );
-                        await _courseSvc.removeImport(c.id);
-                        await _settingsSvc.removeCourseUrl(c.courseUrl);
-                        await _load();
-                        if (removeEvents == true) _toast('Course and events removed');
-                      },
-                    ),
-                  ),
-                ),
-                const SettingsSectionHeader(
-                  'Integrations',
-                  description: 'External services Synctra can connect to.',
-                ),
-                SettingsInsetCard(
-                  padding: EdgeInsets.zero,
-                  child: SettingsActionRow(
-                    icon: Icons.school_outlined,
-                    label: 'Canvas LMS',
-                    description: ApiConstants.canvasWebBaseUrl,
-                  ),
-                ),
-                if (PreviewFlags.noAuth) ...[
-                  const SettingsSectionHeader('Preview'),
-                  SettingsInsetCard(
-                    padding: EdgeInsets.zero,
-                    child: SettingsActionRow(
-                      icon: Icons.replay_outlined,
-                      label: 'Replay onboarding',
-                      description: 'Reset local setup and open the wizard again',
-                      trailing: const Icon(Icons.chevron_right, size: AppTokens.iconStandard),
-                      onTap: () async {
-                        await _settingsSvc.resetPreviewOnboarding();
-                        if (!context.mounted) return;
-                        context.go('/onboarding');
-                      },
-                    ),
-                  ),
-                ],
-                const SettingsSectionHeader(
-                  'Session',
-                  description: 'Sign out of this device.',
-                ),
-                SettingsInsetCard(
-                  padding: EdgeInsets.zero,
-                  child: SettingsActionRow(
-                    icon: Icons.logout,
-                    label: 'Sign out',
-                    description: user == null ? 'Not signed in' : 'You will need to sign in again to sync',
-                    foregroundColor: scheme.error,
-                    onTap: user == null
-                        ? null
-                        : () async {
-                            final ok = await showDialog<bool>(
-                              context: context,
-                              builder: (ctx) => AlertDialog(
-                                title: const Text('Sign out?'),
-                                content: const Text('You will need to sign in again to sync your data.'),
-                                actions: [
-                                  TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-                                  FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Sign out')),
-                                ],
-                              ),
-                            );
-                            if (ok != true || !context.mounted) return;
-                            await AuthService().signOut();
-                            if (context.mounted) context.go('/login');
-                          },
-                  ),
-                ),
-              ],
+              ),
             ),
     );
   }

@@ -13,14 +13,22 @@ import '../../settings/widgets/settings_sections.dart';
 import '../../settings/widgets/work_hours_range_slider.dart';
 import '../../../shared/services/ical_feed_service.dart';
 import '../../../shared/services/user_settings_service.dart';
+import '../../../shared/widgets/synctra_page_scaffold.dart';
+import '../../../theme.dart';
 
-/// Onboarding: work hours → iCal → courses → review (4 steps).
+/// Onboarding: welcome → work hours → iCal → courses → review (5 steps).
 class OnboardingWizard extends StatefulWidget {
   const OnboardingWizard({super.key});
 
-  static const int stepCount = 4;
+  static const int stepCount = 5;
 
   static const _steps = <_OnboardingStepInfo>[
+    _OnboardingStepInfo(
+      shortLabel: 'Welcome',
+      headline: 'Your schedule, tasks, and study time in one place',
+      subtitle: 'Synctra brings your calendar, assignments, and focus blocks together.',
+      purpose: 'This setup takes about 2 minutes.',
+    ),
     _OnboardingStepInfo(
       shortLabel: 'Work hours',
       headline: 'Set your study hours',
@@ -291,8 +299,8 @@ class _OnboardingWizardState extends State<OnboardingWizard> {
   @override
   Widget build(BuildContext context) {
     if (_initError != null) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('Set up Synctra')),
+      return SynctraPageScaffold(
+        title: 'Set up Synctra',
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -309,29 +317,22 @@ class _OnboardingWizardState extends State<OnboardingWizard> {
     final lastStep = _step == OnboardingWizard.stepCount - 1;
     final stepInfo = OnboardingWizard._steps[_step];
 
-    return Scaffold(
-      backgroundColor: scheme.surface,
-      appBar: AppBar(
-        title: const Text('Set up Synctra'),
-        leading: _step > 0
-            ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: _back)
-            : null,
-      ),
+    return SynctraPageScaffold(
+      title: 'Set up Synctra',
+      leading: _step > 0
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back, size: AppTokens.iconStandard),
+              color: AppColors.textSecondary,
+              onPressed: _back,
+            )
+          : null,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          LinearProgressIndicator(value: (_step + 1) / OnboardingWizard.stepCount),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AppTokens.space24,
-              AppTokens.space12,
-              AppTokens.space24,
-              AppTokens.space4,
-            ),
-            child: Text(
-              'Step ${_step + 1} of ${OnboardingWizard.stepCount} · ${stepInfo.shortLabel}',
-              style: context.stepLabelStyle,
-            ),
+          SynctraStepProgress(
+            step: _step,
+            totalSteps: OnboardingWizard.stepCount,
+            label: 'Step ${_step + 1} of ${OnboardingWizard.stepCount} · ${stepInfo.shortLabel}',
           ),
           Expanded(
             child: Builder(
@@ -354,48 +355,41 @@ class _OnboardingWizardState extends State<OnboardingWizard> {
           ),
         ],
       ),
-      bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AppTokens.space16,
-            AppTokens.space8,
-            AppTokens.space16,
-            AppTokens.space16,
-          ),
-          child: SizedBox(
-            width: double.infinity,
-            child: lastStep
-                ? Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.celebration_outlined, color: scheme.primary, size: 32),
-                      const SizedBox(height: AppTokens.space12),
-                      FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size(double.infinity, AppTokens.buttonHeight),
-                        ),
-                        onPressed: _finish,
-                        icon: const Icon(Icons.check, size: AppTokens.iconStandard),
-                        label: const Text('Get started'),
-                      ),
-                    ],
-                  )
-                : Row(
-                    children: [
-                      if (_step >= 1)
-                        TextButton(
-                          onPressed: _next,
-                          child: const Text('Skip for now'),
-                        ),
-                      const Spacer(),
-                      FilledButton(
-                        onPressed: _next,
-                        child: const Text('Continue'),
-                      ),
-                    ],
-                  ),
-          ),
+      bottomBar: Padding(
+        padding: const EdgeInsets.fromLTRB(
+          AppTokens.space24,
+          AppTokens.space12,
+          AppTokens.space24,
+          AppTokens.space16,
         ),
+        child: lastStep
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.celebration_outlined, color: scheme.primary, size: 32),
+                  const SizedBox(height: AppTokens.space12),
+                  SynctraPrimaryButton(
+                    expand: true,
+                    onPressed: _finish,
+                    icon: Icons.check,
+                    label: 'Get started',
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  if (_step == 2 || _step == 3)
+                    SynctraGhostButton(
+                      onPressed: _next,
+                      label: 'Skip for now',
+                    ),
+                  const Spacer(),
+                  SynctraPrimaryButton(
+                    onPressed: _next,
+                    label: 'Continue',
+                  ),
+                ],
+              ),
       ),
     );
   }
@@ -404,42 +398,47 @@ class _OnboardingWizardState extends State<OnboardingWizard> {
     final stepInfo = OnboardingWizard._steps[_step];
     switch (_step) {
       case 0:
+        return _WelcomeStep(stepInfo: stepInfo);
+      case 1:
         return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-          child: Builder(
-            builder: (ctx) {
-              try {
-                return WorkHoursRangeSlider(
-                  range: _workRange,
-                  headline: stepInfo.headline,
-                  subtitle: stepInfo.subtitle,
-                  purposeLine: stepInfo.purpose,
-                  showSessionSliders: true,
-                  sessionMinutes: _sessionMinutes,
-                  breakMinutes: _breakMinutes,
-                  onChanged: (next) {
-                    setState(() => _workRange = next);
-                    _persistDraft();
-                  },
-                  onSessionChanged: (v) {
-                    setState(() => _sessionMinutes = v);
-                    _persistDraft();
-                  },
-                  onBreakChanged: (v) {
-                    setState(() => _breakMinutes = v);
-                    _persistDraft();
-                  },
-                );
-              } catch (e, st) {
-                return Text(
-                  'Slider error: $e\n$st',
-                  style: const TextStyle(color: Colors.red),
-                );
-              }
-            },
+          child: SynctraPageContent(
+            child: SettingsInsetCard(
+              child: Builder(
+                builder: (ctx) {
+                  try {
+                    return WorkHoursRangeSlider(
+                      range: _workRange,
+                      headline: stepInfo.headline,
+                      subtitle: stepInfo.subtitle,
+                      purposeLine: stepInfo.purpose,
+                      showSessionSliders: true,
+                      sessionMinutes: _sessionMinutes,
+                      breakMinutes: _breakMinutes,
+                      onChanged: (next) {
+                        setState(() => _workRange = next);
+                        _persistDraft();
+                      },
+                      onSessionChanged: (v) {
+                        setState(() => _sessionMinutes = v);
+                        _persistDraft();
+                      },
+                      onBreakChanged: (v) {
+                        setState(() => _breakMinutes = v);
+                        _persistDraft();
+                      },
+                    );
+                  } catch (e, st) {
+                    return Text(
+                      'Slider error: $e\n$st',
+                      style: const TextStyle(color: Colors.red),
+                    );
+                  }
+                },
+              ),
+            ),
           ),
         );
-      case 1:
+      case 2:
         return _IcalLinksStep(
           stepInfo: stepInfo,
           feeds: _icalFeeds,
@@ -447,7 +446,7 @@ class _OnboardingWizardState extends State<OnboardingWizard> {
           onAdded: _onIcalAdded,
           onRemoved: _onIcalRemoved,
         );
-      case 2:
+      case 3:
         return _CourseWebsitesStep(
           stepInfo: stepInfo,
           courses: _courses,
@@ -478,29 +477,109 @@ class _OnboardingStepHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           info.headline,
-          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                fontWeight: FontWeight.w600,
-                color: scheme.onSurface,
-              ),
+          style: CalendarTextStyles.topBarDate(brightness).copyWith(
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+          ),
         ),
         const SizedBox(height: AppTokens.space8),
         Text(
           info.subtitle,
-          style: context.synctraText.bodyLarge?.copyWith(
-                color: scheme.onSurfaceVariant,
-                height: 1.5,
-              ),
+          style: CalendarTextStyles.upcomingRow(brightness).copyWith(height: 1.5),
         ),
         const SizedBox(height: AppTokens.space8),
         Text(
           info.purpose,
-          style: context.captionStyle,
+          style: CalendarTextStyles.hourLabel(brightness).copyWith(
+            fontSize: 12,
+            height: 1.45,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _WelcomeStep extends StatelessWidget {
+  final _OnboardingStepInfo stepInfo;
+
+  const _WelcomeStep({required this.stepInfo});
+
+  static const _features = [
+    (
+      Icons.calendar_month_outlined,
+      'One calendar for everything',
+      'Classes, assignments, and personal events in a single week view.',
+    ),
+    (
+      Icons.checklist_outlined,
+      'Tasks from Canvas and course pages',
+      'Pull due dates from Canvas and UW course schedules automatically.',
+    ),
+    (
+      Icons.auto_awesome_outlined,
+      'AI-suggested focus blocks',
+      'Synctra finds open time in your study window and suggests study sessions.',
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
+    return ListView(
+      children: [
+        SynctraPageContent(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _OnboardingStepHeader(info: stepInfo),
+              const SizedBox(height: AppTokens.space24),
+              for (final feature in _features)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: AppTokens.space12),
+                  child: SettingsInsetCard(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          feature.$1,
+                          size: AppTokens.iconStandard,
+                          color: AppColors.primary,
+                        ),
+                        const SizedBox(width: AppTokens.space16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                feature.$2,
+                                style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: AppTokens.space4),
+                              Text(
+                                feature.$3,
+                                style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                                  fontSize: 12,
+                                  height: 1.45,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ],
     );
@@ -520,41 +599,37 @@ class _OnboardingEmptyCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      elevation: 0,
-      color: scheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(
-        borderRadius: AppTokens.borderRadiusLg,
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppTokens.space20),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, color: scheme.primary, size: AppTokens.iconStandard + 4),
-            const SizedBox(width: AppTokens.space16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    message,
-                    style: context.synctraText.bodyMedium?.copyWith(
-                          color: scheme.onSurface,
-                          height: 1.5,
-                        ),
+    final brightness = Theme.of(context).brightness;
+    return SettingsInsetCard(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: AppColors.primary, size: AppTokens.iconStandard + 4),
+          const SizedBox(width: AppTokens.space16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message,
+                  style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                    height: 1.5,
                   ),
-                  if (detail != null) ...[
-                    const SizedBox(height: AppTokens.space8),
-                    Text(detail!, style: context.captionStyle),
-                  ],
+                ),
+                if (detail != null) ...[
+                  const SizedBox(height: AppTokens.space8),
+                  Text(
+                    detail!,
+                    style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                      fontSize: 12,
+                      height: 1.45,
+                    ),
+                  ),
                 ],
-              ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -638,45 +713,61 @@ class _IcalLinksStepState extends State<_IcalLinksStep> {
   @override
   Widget build(BuildContext context) {
     final isEmpty = widget.feeds.isEmpty;
+    final brightness = Theme.of(context).brightness;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
       children: [
-        _OnboardingStepHeader(info: widget.stepInfo),
-        const SizedBox(height: 20),
-        if (isEmpty) ...[
-          const _OnboardingEmptyCard(
-            icon: Icons.calendar_month_outlined,
-            message: 'No calendars connected yet — paste a link below to get started.',
-            detail: 'Tip: In Google Calendar, go to Settings → your calendar → '
-                'Integrate calendar → copy the secret iCal address.',
+        SynctraPageContent(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _OnboardingStepHeader(info: widget.stepInfo),
+              const SizedBox(height: AppTokens.space20),
+              if (isEmpty) ...[
+                const _OnboardingEmptyCard(
+                  icon: Icons.calendar_month_outlined,
+                  message: 'No calendars connected yet — paste a link below to get started.',
+                  detail: 'Tip: In Google Calendar, go to Settings → your calendar → '
+                      'Integrate calendar → copy the secret iCal address.',
+                ),
+                const SizedBox(height: AppTokens.space16),
+              ],
+              SettingsInsetCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    IcalFeedEditor(
+                      controller: _ctrl,
+                      loading: _loading,
+                      statusMessage: _status,
+                      isError: _isError,
+                      onAdd: _add,
+                      hintText: 'https://calendar.google.com/calendar/ical/…',
+                      helperText: isEmpty
+                          ? 'Canvas calendar export and Google Calendar iCal links work here.'
+                          : 'Add another feed — you can connect as many as you need.',
+                    ),
+                    ...widget.feeds.map(
+                      (f) => Padding(
+                        padding: const EdgeInsets.only(top: AppTokens.space8),
+                        child: IcalFeedListTile(
+                          feed: f,
+                          onDelete: () => widget.onRemoved(f),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: AppTokens.space12),
+              Text(
+                'Optional — skip and add calendars later in Settings.',
+                style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                  fontSize: 12,
+                  height: 1.45,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 16),
-        ],
-        IcalFeedEditor(
-          controller: _ctrl,
-          loading: _loading,
-          statusMessage: _status,
-          isError: _isError,
-          onAdd: _add,
-          hintText: 'https://calendar.google.com/calendar/ical/…',
-          helperText: isEmpty
-              ? 'Canvas calendar export and Google Calendar iCal links work here.'
-              : 'Add another feed — you can connect as many as you need.',
-        ),
-        const SizedBox(height: 16),
-        ...widget.feeds.map(
-          (f) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: IcalFeedListTile(
-              feed: f,
-              onDelete: () => widget.onRemoved(f),
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Optional — skip and add calendars later in Settings.',
-          style: context.captionStyle,
         ),
       ],
     );
@@ -756,74 +847,103 @@ class _CourseWebsitesStepState extends State<_CourseWebsitesStep> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
     final isEmpty = widget.courses.isEmpty;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
       children: [
-        _OnboardingStepHeader(info: widget.stepInfo),
-        const SizedBox(height: 20),
-        if (isEmpty)
-          const _OnboardingEmptyCard(
-            icon: Icons.school_outlined,
-            message: 'No courses yet — that\'s okay, you can add them later.',
-            detail: 'Paste a public UW course page URL below, or skip and import '
-                'from Settings whenever you\'re ready.',
-          ),
-        if (isEmpty) const SizedBox(height: 16),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _ctrl,
-                decoration: InputDecoration(
-                  hintText: 'https://courses.cs.washington.edu/courses/cse331/…',
-                  helperText: _errorText == null && _status == null
-                      ? (isEmpty
-                          ? 'We pull lecture times and due dates from the page.'
-                          : 'Add another course URL')
-                      : null,
-                  errorText: _errorText,
+        SynctraPageContent(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _OnboardingStepHeader(info: widget.stepInfo),
+              const SizedBox(height: AppTokens.space20),
+              if (isEmpty) ...[
+                const _OnboardingEmptyCard(
+                  icon: Icons.school_outlined,
+                  message: 'No courses yet — that\'s okay, you can add them later.',
+                  detail: 'Paste a public UW course page URL below, or skip and import '
+                      'from Settings whenever you\'re ready.',
+                ),
+                const SizedBox(height: AppTokens.space16),
+              ],
+              SettingsInsetCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _ctrl,
+                            decoration: InputDecoration(
+                              hintText: 'https://courses.cs.washington.edu/courses/cse331/…',
+                              helperText: _errorText == null && _status == null
+                                  ? (isEmpty
+                                      ? 'We pull lecture times and due dates from the page.'
+                                      : 'Add another course URL')
+                                  : null,
+                              errorText: _errorText,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: AppTokens.space8),
+                        Padding(
+                          padding: const EdgeInsets.only(top: AppTokens.space4),
+                          child: _loading
+                              ? SizedBox(
+                                  width: 88,
+                                  height: AppTokens.buttonHeight,
+                                  child: Center(
+                                    child: SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: scheme.primary,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              : SynctraPrimaryButton(
+                                  onPressed: _import,
+                                  label: 'Import',
+                                ),
+                        ),
+                      ],
+                    ),
+                    if (_status != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: AppTokens.space8),
+                        child: Text(
+                          _status!,
+                          style: TextStyle(color: scheme.primary, fontSize: 14),
+                        ),
+                      ),
+                    ...widget.courses.map(
+                      (c) => Padding(
+                        padding: const EdgeInsets.only(top: AppTokens.space8),
+                        child: CourseImportListTile(
+                          name: c.name,
+                          url: c.url,
+                          totalImported: c.eventCount,
+                          onDelete: () => widget.onRemoved(c),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: FilledButton(
-                onPressed: _loading ? null : _import,
-                child: _loading
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Import'),
+              const SizedBox(height: AppTokens.space12),
+              Text(
+                'Optional — skip and add courses later in Settings.',
+                style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                  fontSize: 12,
+                  height: 1.45,
+                ),
               ),
-            ),
-          ],
-        ),
-        if (_status != null)
-          Padding(
-            padding: const EdgeInsets.only(top: AppTokens.space8),
-            child: Text(_status!, style: TextStyle(color: scheme.primary, fontSize: 14)),
+            ],
           ),
-        const SizedBox(height: 16),
-        ...widget.courses.map(
-          (c) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: CourseImportListTile(
-              name: c.name,
-              url: c.url,
-              totalImported: c.eventCount,
-              onDelete: () => widget.onRemoved(c),
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Optional — skip and add courses later in Settings.',
-          style: context.captionStyle,
         ),
       ],
     );
@@ -861,38 +981,44 @@ class _ReviewStep extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
       children: [
-        _OnboardingStepHeader(info: stepInfo),
-        if (_skippedOptionalSteps) ...[
-          const SizedBox(height: 20),
-          const _OnboardingEmptyCard(
-            icon: Icons.check_circle_outline,
-            message: 'You\'re all set to get started — add calendars and courses '
-                'anytime in Settings.',
-            detail: 'Synctra will use your study window to suggest focus blocks. '
-                'Connect more sources when you\'re ready for smarter scheduling.',
+        SynctraPageContent(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _OnboardingStepHeader(info: stepInfo),
+              if (_skippedOptionalSteps) ...[
+                const SizedBox(height: AppTokens.space20),
+                const _OnboardingEmptyCard(
+                  icon: Icons.check_circle_outline,
+                  message: 'You\'re all set to get started — add calendars and courses '
+                      'anytime in Settings.',
+                  detail: 'Synctra will use your study window to suggest focus blocks. '
+                      'Connect more sources when you\'re ready for smarter scheduling.',
+                ),
+              ],
+              const SizedBox(height: AppTokens.space20),
+              _ReviewRow(
+                label: 'Study window',
+                value: '${_fmt(workStart)} – ${_fmt(workEnd)} · $sessionMinutes min blocks',
+                onEdit: () => onEditStep(1),
+              ),
+              _ReviewRow(
+                label: 'Calendars',
+                value: feedCount == 0
+                    ? 'None added — you can connect feeds in Settings'
+                    : '$feedCount feed${feedCount == 1 ? '' : 's'} connected',
+                onEdit: () => onEditStep(2),
+              ),
+              _ReviewRow(
+                label: 'Courses',
+                value: courseCount == 0
+                    ? 'None added — import course pages in Settings'
+                    : '$courseCount course${courseCount == 1 ? '' : 's'} · $eventTotal events',
+                onEdit: () => onEditStep(3),
+              ),
+            ],
           ),
-        ],
-        const SizedBox(height: 20),
-        _ReviewRow(
-          label: 'Study window',
-          value: '${_fmt(workStart)} – ${_fmt(workEnd)} · $sessionMinutes min blocks',
-          onEdit: () => onEditStep(0),
-        ),
-        _ReviewRow(
-          label: 'Calendars',
-          value: feedCount == 0
-              ? 'None added — you can connect feeds in Settings'
-              : '$feedCount feed${feedCount == 1 ? '' : 's'} connected',
-          onEdit: () => onEditStep(1),
-        ),
-        _ReviewRow(
-          label: 'Courses',
-          value: courseCount == 0
-              ? 'None added — import course pages in Settings'
-              : '$courseCount course${courseCount == 1 ? '' : 's'} · $eventTotal events',
-          onEdit: () => onEditStep(2),
         ),
       ],
     );
@@ -912,13 +1038,25 @@ class _ReviewRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: AppTokens.space8),
-      child: ListTile(
-        minVerticalPadding: 12,
-        title: Text(label, style: Theme.of(context).textTheme.titleMedium),
-        subtitle: Text(value, style: context.captionStyle),
-        trailing: TextButton(onPressed: onEdit, child: const Text('Edit')),
+    final brightness = Theme.of(context).brightness;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppTokens.space8),
+      child: SettingsInsetCard(
+        padding: EdgeInsets.zero,
+        child: ListTile(
+          minVerticalPadding: 12,
+          title: Text(
+            label,
+            style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          subtitle: Text(
+            value,
+            style: CalendarTextStyles.hourLabel(brightness).copyWith(height: 1.45),
+          ),
+          trailing: SynctraGhostButton(onPressed: onEdit, label: 'Edit'),
+        ),
       ),
     );
   }

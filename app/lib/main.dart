@@ -10,6 +10,8 @@ import 'shared/services/canvas_tasks_service.dart';
 import 'shared/services/manual_events_store.dart';
 import 'shared/services/synctra_chat_service.dart';
 import 'shared/services/synctra_chat_store.dart';
+import 'shared/services/schedule_chat_coordinator.dart';
+import 'shared/services/habit_session_store.dart';
 import 'shared/services/suggested_schedule_store.dart';
 import 'shared/services/theme_mode_notifier.dart';
 import 'shared/services/user_settings_service.dart';
@@ -19,11 +21,14 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   registerSuggestedScheduleStore();
+  registerHabitSessionStore();
   registerManualEventsStore();
   registerCanvasTasksService();
   registerSynctraChatStore();
   registerSynctraChatService();
   registerUserSettingsService();
+  registerLlmService();
+  registerScheduleChatCoordinator();
   await ThemeModeNotifier.load();
 
   await Supabase.initialize(
@@ -45,13 +50,16 @@ Future<void> main() async {
 /// and never leak between accounts on a shared device.
 void _loadUserScopedData() {
   final store = GetIt.instance<SuggestedScheduleStore>();
+  final habitStore = GetIt.instance<HabitSessionStore>();
   unawaited(store.loadPersisted());
+  unawaited(habitStore.loadPersisted());
   Supabase.instance.client.auth.onAuthStateChange.listen((data) {
     switch (data.event) {
       case AuthChangeEvent.initialSession:
       case AuthChangeEvent.signedIn:
       case AuthChangeEvent.signedOut:
         unawaited(store.loadPersisted());
+        unawaited(habitStore.loadPersisted());
         GetIt.instance<ManualEventsStore>().refresh();
       default:
         break;

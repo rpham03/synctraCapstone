@@ -1,18 +1,19 @@
-// Main app shell — combined sidebar (nav + calendar planner) / bottom nav on phone.
+// Main app shell — Reclaim-style labeled sidebar on desktop, drawer on phone.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/theme/app_tokens.dart';
+import '../../theme.dart';
 import '../services/auth_service.dart';
 import '../state/calendar_shell_bridge.dart';
 import '../state/shell_sidebar_controller.dart';
-import 'synctra_combined_sidebar.dart';
+import 'synctra_app_sidebar.dart';
 
 class MainShell extends StatelessWidget {
   final StatefulNavigationShell navigationShell;
   const MainShell({super.key, required this.navigationShell});
 
-  static const sidebarWidth = 300.0;
   static const desktopBreakpoint = ShellSidebarController.desktopBreakpoint;
 
   @override
@@ -35,8 +36,7 @@ class MainShell extends StatelessWidget {
   }
 }
 
-/// Wide screens: optional fixed nav column; main content expands when hidden.
-class _SidebarLayoutShell extends StatefulWidget {
+class _SidebarLayoutShell extends StatelessWidget {
   final StatefulNavigationShell navigationShell;
   final int selectedIndex;
 
@@ -46,71 +46,32 @@ class _SidebarLayoutShell extends StatefulWidget {
   });
 
   @override
-  State<_SidebarLayoutShell> createState() => _SidebarLayoutShellState();
-}
-
-class _SidebarLayoutShellState extends State<_SidebarLayoutShell> {
-  final _sidebar = ShellSidebarController.instance;
-
-  @override
-  void initState() {
-    super.initState();
-    _sidebar.addListener(_onSidebarChanged);
-    CalendarShellBridge.instance.registerOpenDrawer(_toggleSidebar);
-  }
-
-  @override
-  void dispose() {
-    _sidebar.removeListener(_onSidebarChanged);
-    CalendarShellBridge.instance.registerOpenDrawer(null);
-    super.dispose();
-  }
-
-  void _onSidebarChanged() {
-    if (mounted) setState(() {});
-  }
-
-  void _toggleSidebar() => _sidebar.toggle();
-
-  @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final sidebarOpen = _sidebar.visible;
+    final divider = AppTokens.calendarDivider(context);
+    final surface = AppTokens.calendarGridSurface(context);
 
     return Scaffold(
-      backgroundColor: scheme.surfaceContainerLowest,
+      backgroundColor: surface,
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AnimatedSize(
-            duration: const Duration(milliseconds: 220),
-            curve: Curves.easeInOut,
-            alignment: Alignment.centerLeft,
-            clipBehavior: Clip.hardEdge,
-            child: sidebarOpen
-                ? SizedBox(
-                    width: MainShell.sidebarWidth,
-                    child: SynctraCombinedSidebar(
-                      navigationShell: widget.navigationShell,
-                      selectedIndex: widget.selectedIndex,
-                      onSignOut: () => _signOut(context),
-                    ),
-                  )
-                : const SizedBox.shrink(),
+          SynctraAppSidebar(
+            selectedIndex: selectedIndex,
+            onDestinationSelected: navigationShell.goBranch,
+            onSignOut: () => _signOut(context),
           ),
           Expanded(
             child: DecoratedBox(
               decoration: BoxDecoration(
-                color: scheme.surface,
-                border: sidebarOpen
-                    ? Border(
-                        left: BorderSide(
-                          color: scheme.outlineVariant.withValues(alpha: 0.75),
-                        ),
-                      )
-                    : null,
+                color: surface,
+                border: Border(
+                  left: BorderSide(
+                    color: divider,
+                    width: AppTokens.calendarDividerThickness,
+                  ),
+                ),
               ),
-              child: ClipRect(child: widget.navigationShell),
+              child: ClipRect(child: navigationShell),
             ),
           ),
         ],
@@ -119,7 +80,6 @@ class _SidebarLayoutShellState extends State<_SidebarLayoutShell> {
   }
 }
 
-/// Narrow screens: same combined column in a drawer; bottom nav for quick switching.
 class _DrawerLayoutShell extends StatefulWidget {
   final StatefulNavigationShell navigationShell;
   final int selectedIndex;
@@ -152,45 +112,68 @@ class _DrawerLayoutShellState extends State<_DrawerLayoutShell> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final divider = AppTokens.calendarDivider(context);
+    final surface = AppTokens.calendarGridSurface(context);
 
     return Scaffold(
       key: _scaffoldKey,
-      backgroundColor: scheme.surface,
+      backgroundColor: surface,
       drawer: Drawer(
-        width: MainShell.sidebarWidth,
-        child: SynctraCombinedSidebar(
-          navigationShell: widget.navigationShell,
+        width: SynctraAppSidebar.width,
+        backgroundColor: AppColors.navSidebarBackground,
+        child: SynctraAppSidebar(
           selectedIndex: widget.selectedIndex,
+          onDestinationSelected: widget.navigationShell.goBranch,
           onSignOut: () => _signOut(context),
+          onNavigate: () => Navigator.maybePop(context),
         ),
       ),
       body: widget.navigationShell,
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: widget.selectedIndex,
-        onDestinationSelected: widget.navigationShell.goBranch,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.calendar_month_outlined),
-            selectedIcon: Icon(Icons.calendar_month),
-            label: 'Calendar',
+      bottomNavigationBar: DecoratedBox(
+        decoration: BoxDecoration(
+          color: surface,
+          border: Border(
+            top: BorderSide(
+              color: divider,
+              width: AppTokens.calendarDividerThickness,
+            ),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.checklist_outlined),
-            selectedIcon: Icon(Icons.checklist),
-            label: 'Tasks',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.chat_bubble_outline),
-            selectedIcon: Icon(Icons.chat_bubble),
-            label: 'Chat',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.group_outlined),
-            selectedIcon: Icon(Icons.group),
-            label: 'Collab',
-          ),
-        ],
+        ),
+        child: NavigationBar(
+          elevation: 0,
+          backgroundColor: surface,
+          surfaceTintColor: Colors.transparent,
+          indicatorColor: AppColors.primary.withValues(alpha: 0.14),
+          selectedIndex: widget.selectedIndex,
+          onDestinationSelected: widget.navigationShell.goBranch,
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.calendar_month_outlined),
+              selectedIcon: Icon(Icons.calendar_month),
+              label: 'Planner',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.repeat),
+              selectedIcon: Icon(Icons.repeat_on),
+              label: 'Habits',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.checklist_outlined),
+              selectedIcon: Icon(Icons.checklist),
+              label: 'Tasks',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.chat_bubble_outline),
+              selectedIcon: Icon(Icons.chat_bubble),
+              label: 'Chat',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.group_outlined),
+              selectedIcon: Icon(Icons.group),
+              label: 'Collab',
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
 
 import '../../data/models/event_model.dart';
+import '../../data/models/habit_model.dart';
 import '../../data/models/schedule_block_model.dart';
 import 'task_schedule_utils.dart';
 
@@ -84,6 +85,7 @@ class CalendarDisplayUtils {
   static List<dynamic> entriesForDay({
     required Iterable<EventModel> allEvents,
     required Iterable<ScheduleBlockModel> blocks,
+    Iterable<HabitSessionModel> habitSessions = const [],
     required DateTime day,
   }) {
     final timed = timedEventsOnDay(allEvents, day);
@@ -93,12 +95,21 @@ class CalendarDisplayUtils {
     final courseAllDay = courseAllDayOnDay(allEvents, day);
     final manualTasks = manualTasksOnDay(allEvents, day);
     final dayBlocks = blocks.where((b) => isSameDay(b.startTime, day)).toList();
+    final dayHabits = habitSessions
+        .where(
+          (h) =>
+              h.startTime.year == day.year &&
+              h.startTime.month == day.month &&
+              h.startTime.day == day.day,
+        )
+        .toList();
     return [
       ...timed,
       ...canvasChipsOnly,
       ...courseAllDay,
       ...manualTasks,
       ...dayBlocks,
+      ...dayHabits,
     ];
   }
 

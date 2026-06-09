@@ -1,7 +1,9 @@
-// Consistent tab page chrome: title, optional subtitle, trailing actions.
+// Consistent tab page chrome — Reclaim-style top bar matching calendar.
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/theme/app_tokens.dart';
+import '../../theme.dart';
 import '../state/calendar_shell_bridge.dart';
 import '../state/shell_sidebar_controller.dart';
 
@@ -22,73 +24,84 @@ class SynctraPageHeader extends StatelessWidget implements PreferredSizeWidget {
   });
 
   @override
-  Size get preferredSize => Size.fromHeight(subtitle != null ? 72 : 56);
+  Size get preferredSize => Size.fromHeight(subtitle != null ? 64 : AppTokens.pageTopBarHeight);
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final brightness = Theme.of(context).brightness;
+    final divider = AppTokens.calendarDivider(context);
+    final surface = AppTokens.calendarGridSurface(context);
     final isDesktop =
         MediaQuery.sizeOf(context).width >= ShellSidebarController.desktopBreakpoint;
+
     final trailing = <Widget>[
       ...?actions,
       if (showSettings)
         IconButton(
           tooltip: 'Settings',
-          icon: Icon(Icons.settings_outlined, color: scheme.onSurfaceVariant, size: 22),
+          icon: Icon(
+            Icons.settings_outlined,
+            color: AppColors.textSecondary,
+            size: AppTokens.iconStandard,
+          ),
           onPressed: () => context.push('/settings'),
         ),
     ];
 
-    return AppBar(
+    return Material(
+      color: surface,
       elevation: 0,
-      scrolledUnderElevation: 0,
-      backgroundColor: scheme.surface,
-      surfaceTintColor: Colors.transparent,
-      automaticallyImplyLeading: false,
-      leading: showSidebarToggle && isDesktop
-          ? ListenableBuilder(
-              listenable: ShellSidebarController.instance,
-              builder: (context, _) {
-                final open = ShellSidebarController.instance.visible;
-                return IconButton(
-                  tooltip: open ? 'Hide navigation' : 'Show navigation',
-                  icon: Icon(Icons.menu,
-                      color: scheme.onSurfaceVariant, size: 22),
-                  onPressed: () =>
-                      CalendarShellBridge.instance.openDrawer?.call(),
-                );
-              },
-            )
-          : null,
-      titleSpacing: showSidebarToggle && isDesktop ? 0 : 20,
-      toolbarHeight: preferredSize.height,
-      title: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            title,
-            style: theme.textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.w600,
-              letterSpacing: -0.3,
-            ),
-          ),
-          if (subtitle != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              subtitle!,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
+      child: SafeArea(
+        bottom: false,
+        child: Container(
+          height: preferredSize.height,
+          padding: const EdgeInsets.symmetric(horizontal: AppTokens.space12),
+          decoration: BoxDecoration(
+            color: surface,
+            border: Border(
+              bottom: BorderSide(
+                color: divider,
+                width: AppTokens.calendarDividerThickness,
               ),
             ),
-          ],
-        ],
-      ),
-      actions: trailing,
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(1),
-        child: Divider(height: 1, color: scheme.outlineVariant.withValues(alpha: 0.65)),
+          ),
+          child: Row(
+            children: [
+              if (showSidebarToggle && !isDesktop)
+                IconButton(
+                  tooltip: 'Navigation menu',
+                  icon: Icon(Icons.menu, color: AppColors.textSecondary, size: AppTokens.iconStandard),
+                  onPressed: () => CalendarShellBridge.instance.openDrawer?.call(),
+                ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      title,
+                      style: CalendarTextStyles.topBarDate(brightness).copyWith(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle!,
+                        style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                          fontSize: 12,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              ...trailing,
+            ],
+          ),
+        ),
       ),
     );
   }

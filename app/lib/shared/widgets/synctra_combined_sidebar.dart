@@ -2,8 +2,11 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/theme/app_tokens.dart';
+import '../../theme.dart';
 import '../state/calendar_shell_bridge.dart';
 import 'notion_sidebar_row.dart';
+import 'synctra_page_scaffold.dart';
 
 class SynctraCombinedSidebar extends StatelessWidget {
   final StatefulNavigationShell navigationShell;
@@ -34,12 +37,13 @@ class SynctraCombinedSidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
+    final surface = AppTokens.calendarGridSurface(context);
     final onCalendar = selectedIndex == 0;
     final bridge = CalendarShellBridge.instance;
 
     return ColoredBox(
-      color: scheme.surfaceContainerLowest,
+      color: surface,
       child: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -51,48 +55,20 @@ class SynctraCombinedSidebar extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 22,
-                            height: 22,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: scheme.surfaceContainerHigh,
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(
-                                color: scheme.outlineVariant.withValues(alpha: 0.8),
-                              ),
-                            ),
-                            child: Icon(Icons.grid_view_rounded,
-                                size: 13, color: scheme.onSurfaceVariant),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'Synctra',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w500,
-                                    letterSpacing: -0.2,
-                                  ),
-                            ),
-                          ),
-                        ],
+                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 8),
+                      child: Text(
+                        'Synctra',
+                        style: CalendarTextStyles.topBarDate(brightness).copyWith(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 10, 18, 6),
+                      padding: const EdgeInsets.fromLTRB(18, 8, 18, 6),
                       child: Text(
-                        'PRIVATE',
-                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                              letterSpacing: 0.85,
-                              fontWeight: FontWeight.w600,
-                              color: scheme.onSurfaceVariant,
-                              fontSize: 11,
-                            ),
+                        'WORKSPACE',
+                        style: CalendarTextStyles.sidebarSectionHeader(brightness),
                       ),
                     ),
                     for (int i = 0; i < _tabs.length; i++)
@@ -113,24 +89,24 @@ class SynctraCombinedSidebar extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            FilledButton.icon(
+                            SynctraPrimaryButton(
                               onPressed: bridge.onOpenCourseImport == null
                                   ? null
                                   : () => _runAndCloseDrawer(
                                         context,
                                         bridge.onOpenCourseImport,
                                       ),
-                              icon: const Icon(Icons.school_outlined, size: 18),
-                              label: const Text('Course import'),
+                              icon: Icons.school_outlined,
+                              label: 'Course import',
+                              expand: true,
                             ),
                             const SizedBox(height: 8),
-                            OutlinedButton.icon(
+                            SynctraGhostButton(
                               onPressed: bridge.onOpenIcal == null
                                   ? null
-                                  : () =>
-                                      _runAndCloseDrawer(context, bridge.onOpenIcal),
-                              icon: const Icon(Icons.link, size: 18),
-                              label: const Text('iCal feeds'),
+                                  : () => _runAndCloseDrawer(context, bridge.onOpenIcal),
+                              icon: Icons.link,
+                              label: 'iCal feeds',
                             ),
                           ],
                         ),
@@ -144,12 +120,7 @@ class SynctraCombinedSidebar extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(18, 8, 18, 6),
               child: Text(
                 'ACCOUNT',
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      letterSpacing: 0.85,
-                      fontWeight: FontWeight.w600,
-                      color: scheme.onSurfaceVariant,
-                      fontSize: 11,
-                    ),
+                style: CalendarTextStyles.sidebarSectionHeader(brightness),
               ),
             ),
             NotionSidebarRow(
