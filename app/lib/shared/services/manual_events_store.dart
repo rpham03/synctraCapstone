@@ -19,6 +19,14 @@ class ManualEventsStore extends ChangeNotifier {
   /// Tell listeners (the calendar grid) to reload — e.g. after the user changes.
   void refresh() => notifyListeners();
 
+  /// Pull the signed-in user's manual events from Supabase into the local cache
+  /// (migrating local-only events up the first time), then refresh the grid.
+  /// Called on login so "+" events saved on any device reappear here.
+  Future<void> syncFromRemote() async {
+    await syncManualEventsFromSupabase();
+    notifyListeners();
+  }
+
   /// Relocate a manual event in place. Returns true if a matching event existed.
   Future<bool> updateTimes({
     required String id,

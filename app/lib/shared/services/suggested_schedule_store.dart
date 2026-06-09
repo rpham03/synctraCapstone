@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../data/models/event_model.dart';
 import '../../data/models/schedule_block_model.dart';
+import '../../data/services/remote_event_sync.dart';
 import 'scheduling_service.dart';
 import 'user_scope.dart';
 
@@ -154,29 +155,47 @@ class SuggestedScheduleStore extends ChangeNotifier {
   ///
   /// Call after Supabase is ready and on every sign-in/sign-out so each account
   /// sees only its own blocks (and signing out clears the previous user's).
-  /// Preview busy times are not persisted — they're recomputed each session.
+  /// Loads the local cache first (fast), then reconciles with Supabase so chat
+  /// blocks created on any device reappear — and local-only blocks migrate up
+  /// the first time. Preview busy times are not persisted.
   Future<void> loadPersisted() async {
-    List<ScheduleBlockModel> loaded;
+    final local = await _loadLocal();
+    _blocks
+      ..clear()
+      ..addAll(local);
+    notifyListeners();
+
+    // Reconcile with Supabase: server rows win; otherwise migrate local up.
+    final remote = await RemoteEventSync.pullStudyBlocks();
+    if (remote == null) return; // signed out / offline — keep local
+    if (remote.isNotEmpty) {
+      _blocks
+        ..clear()
+        ..addAll(remote);
+      await _persistLocal();
+      notifyListeners();
+    } else if (local.isNotEmpty) {
+      await RemoteEventSync.replaceStudyBlocks(local);
+    }
+  }
+
+  Future<List<ScheduleBlockModel>> _loadLocal() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_persistKey);
       final decoded = (raw == null || raw.isEmpty) ? const [] : jsonDecode(raw);
-      if (decoded is! List) return;
-      loaded = decoded
+      if (decoded is! List) return const [];
+      return decoded
           .whereType<Map>()
           .map((m) => ScheduleBlockModel.fromJson(Map<String, dynamic>.from(m)))
           .toList();
     } catch (_) {
-      // Corrupt read — leave whatever is in memory rather than wiping it.
-      return;
+      // Corrupt read — treat as empty rather than crashing.
+      return const [];
     }
-    _blocks
-      ..clear()
-      ..addAll(loaded);
-    notifyListeners();
   }
 
-  Future<void> _persist() async {
+  Future<void> _persistLocal() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
@@ -186,6 +205,13 @@ class SuggestedScheduleStore extends ChangeNotifier {
     } catch (_) {
       // Persistence is best-effort; never crash the UI on a write failure.
     }
+  }
+
+  Future<void> _persist() async {
+    await _persistLocal();
+    // Mirror to Supabase so chat-created blocks survive logout/login and reach
+    // other devices. Best effort: a failure leaves the local cache intact.
+    await RemoteEventSync.replaceStudyBlocks(_blocks.toList());
   }
 }
 

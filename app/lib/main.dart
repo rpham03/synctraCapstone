@@ -45,14 +45,18 @@ Future<void> main() async {
 /// and never leak between accounts on a shared device.
 void _loadUserScopedData() {
   final store = GetIt.instance<SuggestedScheduleStore>();
+  final manual = GetIt.instance<ManualEventsStore>();
+  // loadPersisted/syncFromRemote reconcile the local cache with Supabase, so
+  // chat blocks and "+" events saved on any device reappear after login.
   unawaited(store.loadPersisted());
+  unawaited(manual.syncFromRemote());
   Supabase.instance.client.auth.onAuthStateChange.listen((data) {
     switch (data.event) {
       case AuthChangeEvent.initialSession:
       case AuthChangeEvent.signedIn:
       case AuthChangeEvent.signedOut:
         unawaited(store.loadPersisted());
-        GetIt.instance<ManualEventsStore>().refresh();
+        unawaited(manual.syncFromRemote());
       default:
         break;
     }
