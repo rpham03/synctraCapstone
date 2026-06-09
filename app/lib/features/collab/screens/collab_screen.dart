@@ -229,35 +229,7 @@ class _CollabScreenState extends State<CollabScreen> {
   }
 
   void _syncConfirmedEvents(List<CollaborationPoll> polls) {
-    final store = GetIt.instance<SuggestedScheduleStore>();
-    final additions = <ScheduleBlockModel>[];
-    for (final poll in polls) {
-      if (poll.status != 'confirmed' || poll.confirmedOptionId == null) {
-        continue;
-      }
-      CollaborationOption? option;
-      for (final candidate in poll.options) {
-        if (candidate.id == poll.confirmedOptionId) {
-          option = candidate;
-          break;
-        }
-      }
-      if (option == null) continue;
-      final blockId = 'collab-${poll.id}-${_service.participantIdFor(poll)}';
-      if (store.blocks.any((block) => block.id == blockId)) continue;
-      additions.add(
-        ScheduleBlockModel(
-          id: blockId,
-          taskId: 'collab-${poll.id}',
-          taskTitle: poll.title,
-          startTime: option.startTime,
-          endTime: option.endTime,
-          isAiGenerated: false,
-          description: 'Confirmed collaborative event',
-        ),
-      );
-    }
-    store.addStudyBlocks(additions);
+    _service.addConfirmedPollsToCalendar(polls);
   }
 
   void _showMessage(String message) {

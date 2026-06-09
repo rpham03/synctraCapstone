@@ -1,8 +1,11 @@
 import 'package:dio/dio.dart';
+import 'package:get_it/get_it.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/constants/api_constants.dart';
+import '../../shared/services/suggested_schedule_store.dart';
 import '../models/collaboration_models.dart';
+import '../models/schedule_block_model.dart';
 import 'calendar_events_loader.dart';
 
 class CollaborationService {
@@ -38,6 +41,54 @@ class CollaborationService {
       if (participant.id == participantId) return participant.preferredPeriods;
     }
     return const [];
+  }
+
+  /// Add the confirmed meeting from each confirmed poll in [polls] to the
+  /// current user's own calendar (study blocks), skipping any already present.
+  /// This is how a *participant* (not just the organizer) gets the meeting on
+  /// their calendar — every member's app adds it for their own account.
+  /// Returns the number of blocks added.
+  int addConfirmedPollsToCalendar(List<CollaborationPoll> polls) {
+    final store = GetIt.instance<SuggestedScheduleStore>();
+    final existing = store.blocks.map((b) => b.id).toSet();
+    final additions = <ScheduleBlockModel>[];
+    for (final poll in polls) {
+      if (poll.status != 'confirmed' || poll.confirmedOptionId == null) continue;
+      CollaborationOption? option;
+      for (final candidate in poll.options) {
+        if (candidate.id == poll.confirmedOptionId) {
+          option = candidate;
+          break;
+        }
+      }
+      if (option == null) continue;
+      final blockId = 'collab-${poll.id}-${participantIdFor(poll)}';
+      if (existing.contains(blockId)) continue;
+      additions.add(
+        ScheduleBlockModel(
+          id: blockId,
+          taskId: 'collab-${poll.id}',
+          taskTitle: poll.title,
+          startTime: option.startTime,
+          endTime: option.endTime,
+          isAiGenerated: false,
+          description: 'Confirmed collaborative event',
+        ),
+      );
+    }
+    store.addStudyBlocks(additions);
+    return additions.length;
+  }
+
+  /// Fetch the current user's polls and add any confirmed meetings to their
+  /// calendar. Safe no-op when signed out or the backend is unreachable, so it
+  /// can be called on app launch / calendar open without risk.
+  Future<int> syncConfirmedEventsToCalendar() async {
+    try {
+      return addConfirmedPollsToCalendar(await listPolls());
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<List<CollaborationPoll>> listPolls() async {

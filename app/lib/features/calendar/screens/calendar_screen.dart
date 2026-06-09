@@ -20,6 +20,7 @@ import '../../../data/models/event_model.dart';
 import '../../../data/models/habit_model.dart';
 import '../../../data/models/schedule_block_model.dart';
 import '../../../data/models/task_model.dart';
+import '../../../data/services/collaboration_service.dart';
 import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/calendar_view_prefs.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
@@ -131,6 +132,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _loadManualTaskEvents();
     _loadCourseImports();
     _reloadCanvasEvents();
+    // Pull any confirmed group meetings onto this user's calendar (the
+    // participant side of collaboration — not just the organizer).
+    unawaited(CollaborationService().syncConfirmedEventsToCalendar());
     _nowTicker = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted) setState(() {});
     });
