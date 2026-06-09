@@ -35,6 +35,9 @@ class _CollabScreenState extends State<CollabScreen> {
   String? _error;
   Timer? _pollTimer;
   bool _polling = false;
+  // When the user last voted / set preferences / confirmed locally. Used so a
+  // background poll that was already in flight never reverts a fresh change.
+  DateTime? _lastLocalChangeAt;
 
   @override
   void initState() {
@@ -56,9 +59,14 @@ class _CollabScreenState extends State<CollabScreen> {
   Future<void> _pollUpdates() async {
     if (_polling || !mounted) return;
     _polling = true;
+    final startedAt = DateTime.now();
     try {
       final polls = await _service.listPolls();
       _syncConfirmedEvents(polls);
+      // Don't let a poll that started before a local vote/preference change
+      // overwrite that change with slightly older server state.
+      final localChange = _lastLocalChangeAt;
+      if (localChange != null && localChange.isAfter(startedAt)) return;
       if (mounted) setState(() => _polls = polls);
     } catch (_) {
       // Transient network error — keep showing the last good state.
@@ -253,6 +261,9 @@ class _CollabScreenState extends State<CollabScreen> {
   }
 
   void _replacePoll(CollaborationPoll updated) {
+    // A local vote/preference/confirm just landed — mark it so the next poll
+    // tick won't revert the freshly-updated counts.
+    _lastLocalChangeAt = DateTime.now();
     final index = _polls.indexWhere((poll) => poll.id == updated.id);
     if (index < 0) {
       _polls = [updated, ..._polls];
