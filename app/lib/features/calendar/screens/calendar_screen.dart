@@ -106,7 +106,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Timer? _nowTicker;
   // Live-ish: poll for a confirmed group meeting so a participant's calendar
   // updates within seconds of the organizer confirming. Tunable down to ~1s.
-  static const _collabPollInterval = Duration(seconds: 5);
+  static const _collabPollInterval = Duration(seconds: 3);
   Timer? _collabPollTimer;
   bool _collabSyncing = false;
 

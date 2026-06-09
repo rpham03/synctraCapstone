@@ -27,7 +27,7 @@ class CollabScreen extends StatefulWidget {
 class _CollabScreenState extends State<CollabScreen> {
   // How often to re-check the backend for confirmations/votes while this screen
   // is open. Lower = more "live" but more network calls. Tunable down to ~1s.
-  static const _pollInterval = Duration(seconds: 5);
+  static const _pollInterval = Duration(seconds: 3);
 
   final _service = CollaborationService();
   var _polls = <CollaborationPoll>[];
