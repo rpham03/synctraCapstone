@@ -104,7 +104,7 @@ class _SynctraChatPanelState extends State<SynctraChatPanel> {
     final maxBubbleW = widget.compact ? 0.92 : 0.82;
 
     return ColoredBox(
-      color: widget.compact ? scheme.surfaceContainerLowest : scheme.surface,
+      color: scheme.surface,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

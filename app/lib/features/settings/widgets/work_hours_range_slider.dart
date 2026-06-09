@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../../core/theme/app_tokens.dart';
+import '../../../theme.dart';
 
 /// 30-minute slots from midnight: 0 = 12:00 AM, 48 = 12:00 AM (next day).
 class WorkHoursSlots {
@@ -72,13 +73,13 @@ class WorkHoursRangeSlider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
     final scheme = Theme.of(context).colorScheme;
     final onSurface = scheme.onSurface;
     final startSlot = range.start.round();
     final endSlot = range.end.round();
     final startLabel = WorkHoursSlots.formatSlot(startSlot);
     final endLabel = WorkHoursSlots.formatSlot(endSlot);
-    final bodySmall = Theme.of(context).textTheme.bodySmall;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -86,47 +87,46 @@ class WorkHoursRangeSlider extends StatelessWidget {
         if (showHeader) ...[
           Text(
             headline ?? 'When do you do your best work?',
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w600,
-                  color: onSurface,
-                ),
+            style: CalendarTextStyles.topBarDate(brightness).copyWith(
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppTokens.space8),
           Text(
             subtitle ?? 'Drag to set your typical study window.',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  height: 1.45,
-                ),
+            style: CalendarTextStyles.upcomingRow(brightness).copyWith(height: 1.5),
           ),
           if (purposeLine != null) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: AppTokens.space8),
             Text(
               purposeLine!,
-              style: bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant.withValues(alpha: 0.9),
-                height: 1.4,
+              style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                fontSize: 12,
+                height: 1.45,
               ),
             ),
           ],
           const SizedBox(height: AppTokens.space24),
         ],
         Text(
-          'Study window',
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface),
+          'STUDY WINDOW',
+          style: CalendarTextStyles.sidebarSectionHeader(brightness),
         ),
         const SizedBox(height: AppTokens.space12),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            _TimeChip(label: 'Start', time: startLabel, color: scheme.primary),
-            _TimeChip(label: 'End', time: endLabel, color: scheme.primary),
+            _TimeChip(label: 'Start', time: startLabel),
+            _TimeChip(label: 'End', time: endLabel),
           ],
         ),
         const SizedBox(height: AppTokens.space8),
         SliderTheme(
           data: SliderTheme.of(context).copyWith(
             trackHeight: 4,
+            activeTrackColor: AppColors.primary,
+            inactiveTrackColor: AppTokens.calendarDivider(context).withValues(alpha: 0.5),
             rangeThumbShape: const RoundRangeSliderThumbShape(enabledThumbRadius: 10),
             overlayShape: const RoundSliderOverlayShape(overlayRadius: 18),
           ),
@@ -145,35 +145,48 @@ class WorkHoursRangeSlider extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('12 AM', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
-            Text('6 AM', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
-            Text('12 PM', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
-            Text('6 PM', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
-            Text('12 AM', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
+            for (final label in ['12 AM', '6 AM', '12 PM', '6 PM', '12 AM'])
+              Text(
+                label,
+                style: CalendarTextStyles.hourLabel(brightness),
+              ),
           ],
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: AppTokens.space20),
         Text(
           "You'll get study blocks from $startLabel to $endLabel",
-          style: TextStyle(color: onSurface.withValues(alpha: 0.85), height: 1.4),
+          style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+            color: onSurface.withValues(alpha: 0.85),
+          ),
         ),
         if (showSessionSliders) ...[
           const SizedBox(height: AppTokens.space32),
           Text(
-            'Study session length',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface),
+            'SESSION LENGTH',
+            style: CalendarTextStyles.sidebarSectionHeader(brightness),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: AppTokens.space4),
           Text(
             'How long each focus block should last before you take a break.',
-            style: bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.4),
+            style: CalendarTextStyles.hourLabel(brightness).copyWith(
+              fontSize: 12,
+              height: 1.4,
+            ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppTokens.space8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('$sessionMinutes min', style: TextStyle(fontWeight: FontWeight.w600, color: onSurface)),
-              Text('15–120 min', style: bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+              Text(
+                '$sessionMinutes min',
+                style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                '15–120 min',
+                style: CalendarTextStyles.hourLabel(brightness),
+              ),
             ],
           ),
           Slider(
@@ -181,25 +194,37 @@ class WorkHoursRangeSlider extends StatelessWidget {
             min: 15,
             max: 120,
             divisions: 7,
+            activeColor: AppColors.primary,
             label: '$sessionMinutes min',
             onChanged: onSessionChanged == null ? null : (v) => onSessionChanged!(v.round()),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: AppTokens.space20),
           Text(
-            'Break between blocks',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(color: onSurface),
+            'BREAK BETWEEN BLOCKS',
+            style: CalendarTextStyles.sidebarSectionHeader(brightness),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: AppTokens.space4),
           Text(
             'A short pause Synctra leaves between study sessions.',
-            style: bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.4),
+            style: CalendarTextStyles.hourLabel(brightness).copyWith(
+              fontSize: 12,
+              height: 1.4,
+            ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppTokens.space8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('$breakMinutes min', style: TextStyle(fontWeight: FontWeight.w600, color: onSurface)),
-              Text('5–30 min', style: bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+              Text(
+                '$breakMinutes min',
+                style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                '5–30 min',
+                style: CalendarTextStyles.hourLabel(brightness),
+              ),
             ],
           ),
           Slider(
@@ -207,6 +232,7 @@ class WorkHoursRangeSlider extends StatelessWidget {
             min: 5,
             max: 30,
             divisions: 5,
+            activeColor: AppColors.primary,
             label: '$breakMinutes min',
             onChanged: onBreakChanged == null ? null : (v) => onBreakChanged!(v.round()),
           ),
@@ -219,29 +245,37 @@ class WorkHoursRangeSlider extends StatelessWidget {
 class _TimeChip extends StatelessWidget {
   final String label;
   final String time;
-  final Color color;
 
   const _TimeChip({
     required this.label,
     required this.time,
-    required this.color,
   });
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
+    final divider = AppTokens.calendarDivider(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: scheme.outlineVariant),
+        color: AppTokens.calendarGridSurface(context),
+        borderRadius: BorderRadius.circular(AppTokens.radiusMd),
+        border: Border.all(
+          color: divider,
+          width: AppTokens.calendarDividerThickness,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
-          Text(time, style: TextStyle(fontWeight: FontWeight.w600, color: color)),
+          Text(label, style: CalendarTextStyles.hourLabel(brightness)),
+          Text(
+            time,
+            style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+              fontWeight: FontWeight.w600,
+              color: AppColors.primary,
+            ),
+          ),
         ],
       ),
     );

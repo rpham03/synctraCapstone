@@ -14,6 +14,8 @@ import '../../features/auth/screens/signup_screen.dart';
 
 import '../../features/calendar/screens/calendar_screen.dart';
 
+import '../../features/habits/screens/habits_screen.dart';
+
 import '../../features/chat/screens/chat_screen.dart';
 
 import '../../features/collab/screens/collab_screen.dart';
@@ -154,6 +156,22 @@ class AppRouter {
                     path: '/calendar',
 
                     builder: (_, __) => const CalendarScreen(),
+
+                  ),
+
+                ],
+
+              ),
+
+              StatefulShellBranch(
+
+                routes: [
+
+                  GoRoute(
+
+                    path: '/habits',
+
+                    builder: (_, __) => const HabitsScreen(),
 
                   ),
 

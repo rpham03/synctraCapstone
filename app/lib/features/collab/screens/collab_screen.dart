@@ -7,9 +7,11 @@ import '../../../core/theme/app_theme.dart';
 import '../../../data/models/collaboration_models.dart';
 import '../../../data/models/schedule_block_model.dart';
 import '../../../data/services/collaboration_service.dart';
+import '../../../features/settings/widgets/settings_sections.dart';
 import '../../../shared/services/suggested_schedule_store.dart';
 import '../../../shared/widgets/synctra_empty_state.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
+import '../../../shared/widgets/synctra_page_scaffold.dart';
 
 const _productivityPeriods = ['morning', 'afternoon', 'evening', 'night'];
 
@@ -282,7 +284,7 @@ class _CollabScreenState extends State<CollabScreen> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: scheme.surface,
+      backgroundColor: AppTokens.calendarGridSurface(context),
       appBar: SynctraPageHeader(
         title: 'Collab',
         subtitle: 'Schedule without exposing calendar details',
@@ -290,7 +292,7 @@ class _CollabScreenState extends State<CollabScreen> {
           IconButton(
             tooltip: 'Refresh polls',
             onPressed: _loading ? null : _loadPolls,
-            icon: const Icon(Icons.refresh),
+            icon: Icon(Icons.refresh, color: AppColors.textSecondary),
           ),
         ],
       ),
@@ -305,10 +307,10 @@ class _CollabScreenState extends State<CollabScreen> {
               children: [
                 Expanded(
                   child: Text(
-                    'Scheduling polls',
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
+                    'SCHEDULING POLLS',
+                    style: CalendarTextStyles.sidebarSectionHeader(
+                      Theme.of(context).brightness,
+                    ),
                   ),
                 ),
                 if (_loading)
@@ -352,6 +354,8 @@ class _CollabScreenState extends State<CollabScreen> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _loading ? null : _createPoll,
+        backgroundColor: AppColors.primary,
+        elevation: 0,
         icon: const Icon(Icons.add),
         label: const Text('New poll'),
       ),
@@ -366,61 +370,56 @@ class _PrivacyBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        border: Border.all(color: scheme.outlineVariant),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                CircleAvatar(
-                  backgroundColor: AppColors.collabEvent.withAlpha(30),
-                  child: const Icon(
-                    Icons.lock_outline,
-                    color: AppColors.collabEvent,
-                  ),
+    final brightness = Theme.of(context).brightness;
+    return SettingsInsetCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                backgroundColor: AppColors.collabEvent.withAlpha(30),
+                child: const Icon(
+                  Icons.lock_outline,
+                  color: AppColors.collabEvent,
                 ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Busy-only availability',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Synctra compares unavailable time ranges without sharing event names. '
-                        'Invitees vote before the organizer confirms.',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton.icon(
-                onPressed: onCreate,
-                icon: const Icon(Icons.schedule, size: 18),
-                label: const Text('Find time'),
               ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Busy-only availability',
+                      style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Synctra compares unavailable time ranges without sharing event names. '
+                      'Invitees vote before the organizer confirms.',
+                      style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                        fontSize: 12,
+                        height: 1.45,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: SynctraPrimaryButton(
+              onPressed: onCreate,
+              icon: Icons.schedule,
+              label: 'Find time',
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -445,97 +444,97 @@ class _PollCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
     final organizer = poll.organizerId == currentUserId;
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        poll.title,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
+    return SettingsInsetCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      poll.title,
+                      style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                        fontWeight: FontWeight.w600,
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${poll.durationMinutes} min · ${poll.participants.length} participants',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                      ),
-                    ],
-                  ),
-                ),
-                _StatusLabel(status: poll.status),
-                if (poll.status == 'open')
-                  IconButton(
-                    tooltip: 'Set preferred meeting times',
-                    onPressed: onSetPreferences,
-                    icon: const Icon(Icons.tune),
-                  ),
-                if (organizer && poll.status == 'open')
-                  IconButton(
-                    tooltip: 'Cancel poll',
-                    onPressed: onCancel,
-                    icon: const Icon(Icons.close),
-                  ),
-              ],
-            ),
-            if (poll.description.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(poll.description),
-            ],
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final participant in poll.participants)
-                  Chip(
-                    avatar: Icon(
-                      participant.responseStatus == 'responded'
-                          ? Icons.check_circle_outline
-                          : Icons.person_outline,
-                      size: 16,
                     ),
-                    label: Text(participant.displayName),
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-            const Divider(height: 24),
-            if (poll.options.isEmpty)
-              Text(
-                'No shared time was found in this window.',
-                style: TextStyle(color: scheme.onSurfaceVariant),
-              )
-            else
-              for (var index = 0; index < poll.options.length; index++) ...[
-                _OptionRow(
-                  option: poll.options[index],
-                  rank: index + 1,
-                  participantCount: poll.participants.length,
-                  confirmed: poll.confirmedOptionId == poll.options[index].id,
-                  open: poll.status == 'open',
-                  organizer: organizer,
-                  onVote: (response) => onVote(poll.options[index], response),
-                  onConfirm: () => onConfirm(poll.options[index]),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${poll.durationMinutes} min · ${poll.participants.length} participants',
+                      style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
                 ),
-                if (index != poll.options.length - 1) const Divider(height: 20),
-              ],
+              ),
+              _StatusLabel(status: poll.status),
+              if (poll.status == 'open')
+                IconButton(
+                  tooltip: 'Set preferred meeting times',
+                  onPressed: onSetPreferences,
+                  icon: const Icon(Icons.tune),
+                ),
+              if (organizer && poll.status == 'open')
+                IconButton(
+                  tooltip: 'Cancel poll',
+                  onPressed: onCancel,
+                  icon: const Icon(Icons.close),
+                ),
+            ],
+          ),
+          if (poll.description.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              poll.description,
+              style: CalendarTextStyles.upcomingRow(brightness),
+            ),
           ],
-        ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final participant in poll.participants)
+                Chip(
+                  avatar: Icon(
+                    participant.responseStatus == 'responded'
+                        ? Icons.check_circle_outline
+                        : Icons.person_outline,
+                    size: 16,
+                  ),
+                  label: Text(participant.displayName),
+                  visualDensity: VisualDensity.compact,
+                ),
+            ],
+          ),
+          const Divider(height: 24),
+          if (poll.options.isEmpty)
+            Text(
+              'No shared time was found in this window.',
+              style: CalendarTextStyles.hourLabel(brightness).copyWith(fontSize: 12),
+            )
+          else
+            for (var index = 0; index < poll.options.length; index++) ...[
+              _OptionRow(
+                option: poll.options[index],
+                rank: index + 1,
+                participantCount: poll.participants.length,
+                confirmed: poll.confirmedOptionId == poll.options[index].id,
+                open: poll.status == 'open',
+                organizer: organizer,
+                onVote: (response) => onVote(poll.options[index], response),
+                onConfirm: () => onConfirm(poll.options[index]),
+              ),
+              if (index != poll.options.length - 1) const Divider(height: 20),
+            ],
+        ],
       ),
     );
   }

@@ -3,6 +3,8 @@ import 'package:intl/intl.dart';
 
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/ical_feed.dart';
+import '../../../shared/widgets/synctra_page_scaffold.dart';
+import '../../../theme.dart';
 import 'work_hours_range_slider.dart';
 
 /// Muted section label — smaller/lighter than row titles (settings hierarchy).
@@ -14,6 +16,7 @@ class SettingsSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final brightness = Theme.of(context).brightness;
     return Padding(
       padding: const EdgeInsets.only(
         top: AppTokens.space24,
@@ -22,10 +25,19 @@ class SettingsSectionHeader extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title.toUpperCase(), style: context.sectionHeaderStyle),
+          Text(
+            title.toUpperCase(),
+            style: CalendarTextStyles.sidebarSectionHeader(brightness),
+          ),
           if (description != null) ...[
             const SizedBox(height: AppTokens.space4),
-            Text(description!, style: context.captionStyle),
+            Text(
+              description!,
+              style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                fontSize: 12,
+                height: 1.45,
+              ),
+            ),
           ],
         ],
       ),
@@ -55,6 +67,7 @@ class SettingsActionRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
     final color = foregroundColor ?? scheme.onSurface;
 
     return Material(
@@ -82,11 +95,19 @@ class SettingsActionRow extends StatelessWidget {
                     children: [
                       Text(
                         label,
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(color: color),
+                        style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                        ),
                       ),
                       if (description != null) ...[
                         const SizedBox(height: AppTokens.space4),
-                        Text(description!, style: context.captionStyle),
+                        Text(
+                          description!,
+                          style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                            height: 1.45,
+                          ),
+                        ),
                       ],
                     ],
                   ),
@@ -109,7 +130,19 @@ class SettingsInsetCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
+    final divider = AppTokens.calendarDivider(context);
+    final surface = AppTokens.calendarGridSurface(context);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: surface,
+        borderRadius: AppTokens.borderRadiusLg,
+        border: Border.all(
+          color: divider,
+          width: AppTokens.calendarDividerThickness,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: padding ?? const EdgeInsets.all(AppTokens.space16),
         child: child,
@@ -196,16 +229,22 @@ class IcalFeedEditor extends StatelessWidget {
             const SizedBox(width: AppTokens.space8),
             Padding(
               padding: const EdgeInsets.only(top: AppTokens.space4),
-              child: FilledButton(
-                onPressed: loading ? null : onAdd,
-                child: loading
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('Add'),
-              ),
+              child: loading
+                  ? SizedBox(
+                      width: 72,
+                      height: AppTokens.buttonHeight,
+                      child: Center(
+                        child: SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: scheme.primary,
+                          ),
+                        ),
+                      ),
+                    )
+                  : SynctraPrimaryButton(onPressed: onAdd, label: 'Add'),
             ),
           ],
         ),
@@ -237,15 +276,29 @@ class IcalFeedListTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
     final synced = feed.lastSyncedAt != null
         ? 'Synced ${DateFormat.MMMd().add_jm().format(feed.lastSyncedAt!.toLocal())}'
         : 'Not synced yet';
-    return Card(
+    return SettingsInsetCard(
+      padding: EdgeInsets.zero,
       child: ListTile(
         minVerticalPadding: 12,
         leading: Icon(Icons.check_circle_outline, color: AppColors.success, size: AppTokens.iconStandard),
-        title: Text(feed.displayLabel, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('$synced\n${feed.url}', maxLines: 2, overflow: TextOverflow.ellipsis),
+        title: Text(
+          feed.displayLabel,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        subtitle: Text(
+          '$synced\n${feed.url}',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: CalendarTextStyles.hourLabel(brightness).copyWith(height: 1.4),
+        ),
         isThreeLine: true,
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
@@ -288,12 +341,24 @@ class CourseImportListTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Card(
+    final brightness = Theme.of(context).brightness;
+    return SettingsInsetCard(
+      padding: EdgeInsets.zero,
       child: ListTile(
         minVerticalPadding: 12,
         leading: const Icon(Icons.school_outlined, size: AppTokens.iconStandard),
-        title: Text(name),
-        subtitle: Text('$totalImported events · $url', maxLines: 2, overflow: TextOverflow.ellipsis),
+        title: Text(
+          name,
+          style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        subtitle: Text(
+          '$totalImported events · $url',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: CalendarTextStyles.hourLabel(brightness).copyWith(height: 1.4),
+        ),
         isThreeLine: true,
         trailing: Row(
           mainAxisSize: MainAxisSize.min,

@@ -1,6 +1,9 @@
 // Notion-style sidebar row: muted icons, gray selection (no loud primary fill).
 import 'package:flutter/material.dart';
 
+import '../../core/theme/app_tokens.dart';
+import '../../theme.dart';
+
 class NotionSidebarRow extends StatefulWidget {
   final IconData icon;
   final IconData selectedIcon;
@@ -26,15 +29,15 @@ class _NotionSidebarRowState extends State<NotionSidebarRow> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final ink = scheme.onSurface;
-    final muted = scheme.onSurfaceVariant;
+    final brightness = Theme.of(context).brightness;
+    final ink = AppColors.textPrimary;
+    final muted = AppColors.textSecondary;
 
     Color bg;
     if (widget.selected) {
-      bg = scheme.surfaceContainerHighest.withValues(alpha: 0.85);
+      bg = AppColors.primary.withValues(alpha: 0.1);
     } else if (_hover) {
-      bg = scheme.surfaceContainerLow;
+      bg = AppColors.grey100.withValues(alpha: 0.85);
     } else {
       bg = Colors.transparent;
     }
@@ -46,11 +49,9 @@ class _NotionSidebarRowState extends State<NotionSidebarRow> {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
         child: Material(
           color: bg,
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(AppTokens.radiusSm),
           child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            splashColor: scheme.onSurface.withValues(alpha: 0.06),
-            hoverColor: widget.selected ? Colors.transparent : scheme.onSurface.withValues(alpha: 0.04),
+            borderRadius: BorderRadius.circular(AppTokens.radiusSm),
             onTap: widget.onTap,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -58,8 +59,8 @@ class _NotionSidebarRowState extends State<NotionSidebarRow> {
                 children: [
                   Icon(
                     widget.selected ? widget.selectedIcon : widget.icon,
-                    size: 18,
-                    color: widget.selected ? ink : muted,
+                    size: AppTokens.iconStandard,
+                    color: widget.selected ? AppColors.primary : muted,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -67,13 +68,10 @@ class _NotionSidebarRowState extends State<NotionSidebarRow> {
                       widget.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontWeight: widget.selected ? FontWeight.w500 : FontWeight.w400,
-                            fontSize: 14,
-                            height: 1.2,
-                            color: ink,
-                            letterSpacing: -0.1,
-                          ),
+                      style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                        fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w400,
+                        color: widget.selected ? ink : ink.withValues(alpha: 0.88),
+                      ),
                     ),
                   ),
                 ],

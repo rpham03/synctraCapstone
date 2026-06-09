@@ -17,7 +17,7 @@ import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/utils/duration_format.dart';
 import '../../../shared/utils/sync_time_format.dart';
 import '../../../shared/utils/task_timeline_utils.dart';
-import '../../../shared/utils/undo_snackbar.dart';
+import '../../../features/calendar/widgets/calendar_view_pill_toggle.dart';
 import '../../../shared/widgets/synctra_empty_state.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
 import '../widgets/task_timeline_list.dart';
@@ -546,10 +546,12 @@ class _TasksScreenState extends State<TasksScreen> {
         : '${DateFormat('MMM d, yyyy').format(_weekMonday)} – ${DateFormat('MMM d, yyyy').format(weekEnd)}';
 
     return Scaffold(
-      backgroundColor: scheme.surface,
+      backgroundColor: AppTokens.calendarGridSurface(context),
       appBar: SynctraPageHeader(
         title: 'Tasks',
-        subtitle: _tasksSubtitle(),
+        subtitle: _weekView
+            ? 'Week review · use List view for today onward'
+            : 'Today and upcoming · scroll up for older work',
         showSettings: true,
         actions: [
           IconButton(
@@ -558,20 +560,21 @@ class _TasksScreenState extends State<TasksScreen> {
                     width: 22,
                     height: 22,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: scheme.primary),
+                      strokeWidth: 2,
+                      color: scheme.primary,
+                    ),
                   )
-                : Icon(Icons.sync, color: scheme.onSurfaceVariant, size: 22),
+                : Icon(Icons.sync, color: AppColors.textSecondary, size: AppTokens.iconStandard),
             tooltip: 'Sync tasks',
             onPressed: _syncing ? null : _refreshTasks,
           ),
           IconButton(
-            icon: Icon(Icons.filter_list,
-                color: scheme.onSurfaceVariant, size: 22),
+            icon: Icon(Icons.filter_list, color: AppColors.textSecondary, size: AppTokens.iconStandard),
             tooltip: 'Filter',
             onPressed: _showFilterSheet,
           ),
           IconButton(
-            icon: Icon(Icons.more_vert, color: scheme.onSurfaceVariant, size: 22),
+            icon: Icon(Icons.more_vert, color: AppColors.textSecondary, size: AppTokens.iconStandard),
             tooltip: 'Task options',
             onPressed: _showTasksMenu,
           ),
@@ -581,26 +584,12 @@ class _TasksScreenState extends State<TasksScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(
-                    value: true,
-                    label: Text('Week'),
-                    icon: Icon(Icons.view_week_outlined, size: 18)),
-                ButtonSegment(
-                    value: false,
-                    label: Text('List'),
-                    icon: Icon(Icons.view_list_outlined, size: 18)),
-              ],
-              selected: {_weekView},
-              onSelectionChanged: (s) => setState(() => _weekView = s.first),
-              showSelectedIcon: false,
-              style: ButtonStyle(
-                visualDensity: VisualDensity.compact,
-                padding: WidgetStateProperty.all(
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
-              ),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: CalendarViewPillToggle<bool>(
+              segments: const [true, false],
+              selected: _weekView,
+              onChanged: (v) => setState(() => _weekView = v),
+              labelBuilder: (v) => v ? 'Week' : 'List',
             ),
           ),
           if (_weekView) ...[
@@ -619,10 +608,9 @@ class _TasksScreenState extends State<TasksScreen> {
                     child: Text(
                       rangeLabel,
                       textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: -0.2,
-                          ),
+                      style: CalendarTextStyles.upcomingRow(
+                        Theme.of(context).brightness,
+                      ).copyWith(fontWeight: FontWeight.w600),
                     ),
                   ),
                   IconButton(
@@ -680,6 +668,8 @@ class _TasksScreenState extends State<TasksScreen> {
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _showAddTask,
+        backgroundColor: AppColors.primary,
+        elevation: 0,
         child: const Icon(Icons.add),
       ),
     );

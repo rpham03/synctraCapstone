@@ -5,7 +5,7 @@ class ShellSidebarController extends ChangeNotifier {
   ShellSidebarController._();
   static final ShellSidebarController instance = ShellSidebarController._();
 
-  static const double desktopBreakpoint = 1000;
+  static const double desktopBreakpoint = 768;
 
   bool _visible = true;
 
