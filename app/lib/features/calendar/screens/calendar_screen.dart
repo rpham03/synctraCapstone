@@ -104,6 +104,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   final ScrollController _timeScrollController = ScrollController();
   Timer? _nowTicker;
+  // Live-ish: poll for a confirmed group meeting so a participant's calendar
+  // updates within seconds of the organizer confirming. Tunable down to ~1s.
+  static const _collabPollInterval = Duration(seconds: 5);
+  Timer? _collabPollTimer;
+  bool _collabSyncing = false;
 
   /// Full 24-hour day column: midnight (0) through 11 PM (23).
   static const int _firstHour = 0;
@@ -133,8 +138,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _loadCourseImports();
     _reloadCanvasEvents();
     // Pull any confirmed group meetings onto this user's calendar (the
-    // participant side of collaboration — not just the organizer).
-    unawaited(CollaborationService().syncConfirmedEventsToCalendar());
+    // participant side of collaboration — not just the organizer), now and then
+    // on a short interval so it appears live without a manual refresh.
+    unawaited(_syncConfirmedCollabEvents());
+    _collabPollTimer =
+        Timer.periodic(_collabPollInterval, (_) => _syncConfirmedCollabEvents());
     _nowTicker = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted) setState(() {});
     });
@@ -222,8 +230,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _habitStore.removeListener(_onHabitStoreChanged);
     _manualEventsStore.removeListener(_loadManualEvents);
     _nowTicker?.cancel();
+    _collabPollTimer?.cancel();
     _timeScrollController.dispose();
     super.dispose();
+  }
+
+  /// Add any confirmed group meeting to this user's calendar, guarded so polls
+  /// never overlap. Safe no-op when signed out / offline.
+  Future<void> _syncConfirmedCollabEvents() async {
+    if (_collabSyncing || !mounted) return;
+    _collabSyncing = true;
+    try {
+      await CollaborationService().syncConfirmedEventsToCalendar();
+    } finally {
+      _collabSyncing = false;
+    }
   }
 
   Iterable<EventModel> _allEvents() sync* {

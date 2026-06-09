@@ -1,4 +1,6 @@
 // Collaborative scheduling polls: privacy-safe availability, voting, and confirmation.
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:get_it/get_it.dart';
@@ -23,15 +25,46 @@ class CollabScreen extends StatefulWidget {
 }
 
 class _CollabScreenState extends State<CollabScreen> {
+  // How often to re-check the backend for confirmations/votes while this screen
+  // is open. Lower = more "live" but more network calls. Tunable down to ~1s.
+  static const _pollInterval = Duration(seconds: 5);
+
   final _service = CollaborationService();
   var _polls = <CollaborationPoll>[];
   var _loading = true;
   String? _error;
+  Timer? _pollTimer;
+  bool _polling = false;
 
   @override
   void initState() {
     super.initState();
     _loadPolls();
+    // Live-ish updates: pick up other members' votes and the organizer's
+    // confirmation without a manual refresh.
+    _pollTimer = Timer.periodic(_pollInterval, (_) => _pollUpdates());
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Lightweight background refresh (no spinner, no re-vote): just re-list the
+  /// polls so a confirmation shows live and lands on this user's calendar.
+  Future<void> _pollUpdates() async {
+    if (_polling || !mounted) return;
+    _polling = true;
+    try {
+      final polls = await _service.listPolls();
+      _syncConfirmedEvents(polls);
+      if (mounted) setState(() => _polls = polls);
+    } catch (_) {
+      // Transient network error — keep showing the last good state.
+    } finally {
+      _polling = false;
+    }
   }
 
   Future<void> _loadPolls() async {
