@@ -4,11 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 
 class ApiConstants {
-  static const String _apiBaseUrlOverride =
-      String.fromEnvironment(
-    'API_BASE_URL',
-    defaultValue: 'https://eden-script-rings-commented.trycloudflare.com',
-  );
+  static const String _apiBaseUrlOverride = String.fromEnvironment('API_BASE_URL');
 
   /// Backend API — override with `--dart-define=API_BASE_URL=...`.
   static String get baseUrl {

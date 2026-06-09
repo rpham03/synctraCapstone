@@ -15,7 +15,9 @@ import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/utils/duration_format.dart';
+import '../../../shared/utils/sync_time_format.dart';
 import '../../../shared/utils/task_timeline_utils.dart';
+import '../../../shared/utils/undo_snackbar.dart';
 import '../../../shared/widgets/synctra_empty_state.dart';
 import '../../../shared/widgets/synctra_page_header.dart';
 import '../widgets/task_timeline_list.dart';
@@ -70,6 +72,15 @@ class _TasksScreenState extends State<TasksScreen> {
       ..sort(compareTasksTimeline);
   }
 
+  String _tasksSubtitle() {
+    final base = _weekView
+        ? 'Week review · use List view for today onward'
+        : 'Today and upcoming · scroll up for older work';
+    final lastSync = _canvasService.lastSyncedAt;
+    if (lastSync == null) return base;
+    return '$base · Canvas synced ${formatRelativeSyncTime(lastSync)}';
+  }
+
   /// List timeline pool: today+ always; completed past kept for scroll-up history.
   List<TaskModel> get _timelinePool {
     final today = taskDateOnly(DateTime.now());
@@ -113,6 +124,9 @@ class _TasksScreenState extends State<TasksScreen> {
     _loadManualTasks();
     _loadCourseTasks();
     _loadCachedCanvas();
+    _canvasService.loadLastSyncTime().then((_) {
+      if (mounted) setState(() {});
+    });
     _syncCanvas(silent: true);
   }
 
@@ -134,6 +148,7 @@ class _TasksScreenState extends State<TasksScreen> {
 
   void _handleCanvasTasksRefresh() {
     _loadCachedCanvas();
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadCachedCanvas() async {
@@ -324,23 +339,49 @@ class _TasksScreenState extends State<TasksScreen> {
     );
     if (!ok) return;
 
-    setState(() => _tasks.removeWhere((t) => t.id == task.id));
+    final index = _tasks.indexWhere((t) => t.id == task.id);
+    if (index < 0) return;
+    final removed = _tasks[index];
+
+    setState(() => _tasks.removeAt(index));
+    if (removed.source == 'manual') {
+      await _persistManualTasks();
+      ManualTasksBridge.instance.refresh();
+    } else if (removed.source == 'canvas') {
+      await _persistCanvasFromState();
+    } else if (removed.source == 'course') {
+      await _courseImportService.removeTaskForCalendar(removed.id);
+      CourseImportTasksBridge.instance.refresh();
+    }
+    if (!mounted) return;
+    if (removed.source == 'canvas') {
+      await _canvasService.reloadFromCache();
+    }
+    if (!mounted) return;
+
+    showUndoSnackBar(
+      context,
+      message: 'Task removed.',
+      onUndo: () => _undoDeleteTask(removed, index),
+    );
+  }
+
+  Future<void> _undoDeleteTask(TaskModel task, int index) async {
+    if (!mounted) return;
+    setState(() {
+      final insertAt = index.clamp(0, _tasks.length);
+      _tasks.insert(insertAt, task);
+    });
     if (task.source == 'manual') {
       await _persistManualTasks();
       ManualTasksBridge.instance.refresh();
     } else if (task.source == 'canvas') {
       await _persistCanvasFromState();
+      await _canvasService.reloadFromCache();
     } else if (task.source == 'course') {
-      await _courseImportService.removeTaskForCalendar(task.id);
+      await _courseImportService.updateCachedTask(task);
       CourseImportTasksBridge.instance.refresh();
     }
-    if (!mounted) return;
-    if (task.source == 'canvas') {
-      await _canvasService.reloadFromCache();
-    }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Task removed.')),
-    );
   }
 
   Future<void> _clearTasks({required String? source}) async {
@@ -508,9 +549,7 @@ class _TasksScreenState extends State<TasksScreen> {
       backgroundColor: scheme.surface,
       appBar: SynctraPageHeader(
         title: 'Tasks',
-            subtitle: _weekView
-            ? 'Week review · use List view for today onward'
-            : 'Today and upcoming · scroll up for older work',
+        subtitle: _tasksSubtitle(),
         showSettings: true,
         actions: [
           IconButton(
@@ -611,16 +650,31 @@ class _TasksScreenState extends State<TasksScreen> {
                     onAddTask: _showAddTask,
                     isEmpty: _filtered.isEmpty,
                   )
-                : _timelineVisible.tasks.isEmpty
-                    ? _EmptyTasks(onAdd: _showAddTask)
-                    : TaskTimelineList(
-                        tasks: _timelineVisible.tasks,
-                        loadingOlder: _loadingOlder,
-                        hasOlderOutsideWindow: _timelineVisible.hasMorePast,
-                        onLoadOlder: _loadOlderTasks,
-                        onToggleDone: _setTaskDone,
-                        onDeleteTask: _deleteTask,
-                      ),
+                : RefreshIndicator(
+                    onRefresh: _refreshTasks,
+                    child: _timelineVisible.tasks.isEmpty
+                        ? CustomScrollView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            slivers: [
+                              SliverFillRemaining(
+                                hasScrollBody: false,
+                                child: Center(
+                                  child: _EmptyTasks(onAdd: _showAddTask),
+                                ),
+                              ),
+                            ],
+                          )
+                        : TaskTimelineList(
+                            tasks: _timelineVisible.tasks,
+                            loadingOlder: _loadingOlder,
+                            hasOlderOutsideWindow:
+                                _timelineVisible.hasMorePast,
+                            onLoadOlder: _loadOlderTasks,
+                            onToggleDone: _setTaskDone,
+                            onDeleteTask: _deleteTask,
+                            physics: const AlwaysScrollableScrollPhysics(),
+                          ),
+                  ),
           ),
         ],
       ),

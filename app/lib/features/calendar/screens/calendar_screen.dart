@@ -18,7 +18,9 @@ import '../../../core/constants/api_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/event_model.dart';
 import '../../../data/models/schedule_block_model.dart';
+import '../../../data/models/task_model.dart';
 import '../../../data/services/course_import_service.dart';
+import '../../../shared/services/calendar_view_prefs.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/services/llm_service.dart';
 import '../../../shared/services/synctra_chat_constants.dart';
@@ -30,12 +32,29 @@ import '../../../shared/state/shell_sidebar_controller.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/utils/calendar_display_utils.dart';
+import '../../../shared/utils/undo_snackbar.dart';
 import '../../../shared/utils/manual_tasks_calendar.dart';
 import '../../../shared/utils/task_schedule_utils.dart';
 import '../../../shared/widgets/synctra_chat_panel.dart';
 import '../../../shared/widgets/sync_it_chrome.dart';
 
 enum _CalendarViewMode { day, week, month }
+
+class _EventDeleteSnapshot {
+  const _EventDeleteSnapshot({
+    required this.event,
+    required this.canUndo,
+    this.canvasTask,
+    this.manualTask,
+    this.icalFeedId,
+  });
+
+  final EventModel event;
+  final bool canUndo;
+  final TaskModel? canvasTask;
+  final TaskModel? manualTask;
+  final String? icalFeedId;
+}
 
 class CalendarScreen extends StatefulWidget {
   const CalendarScreen({super.key});
@@ -92,6 +111,32 @@ class _CalendarScreenState extends State<CalendarScreen> {
       onIcal: _openIcalFeedsSheet,
       onCourseImport: _openCourseImportSheet,
     );
+    _loadCalendarViewPref();
+  }
+
+  Future<void> _loadCalendarViewPref() async {
+    final stored = await CalendarViewPrefs.load();
+    final mode = _viewModeFromString(stored);
+    if (!mounted || mode == null) return;
+    setState(() => _viewMode = mode);
+  }
+
+  _CalendarViewMode? _viewModeFromString(String? value) {
+    switch (value) {
+      case 'day':
+        return _CalendarViewMode.day;
+      case 'week':
+        return _CalendarViewMode.week;
+      case 'month':
+        return _CalendarViewMode.month;
+      default:
+        return null;
+    }
+  }
+
+  void _setViewMode(_CalendarViewMode mode) {
+    setState(() => _viewMode = mode);
+    CalendarViewPrefs.save(mode.name);
   }
 
   void _onScheduleStoreChanged() {
@@ -511,6 +556,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     );
     if (ok != true || !mounted) return;
 
+    final snapshot = await _snapshotBeforeDelete(event);
     await _removeEventFromSynctra(event);
     if (!mounted) return;
 
@@ -524,10 +570,106 @@ class _CalendarScreenState extends State<CalendarScreen> {
     } else if (event.source == 'manual_task') {
       ManualTasksBridge.instance.refresh();
     }
+    if (!mounted) return;
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Removed from Synctra.')),
-    );
+    if (snapshot.canUndo) {
+      showUndoSnackBar(
+        context,
+        message: 'Removed from Synctra.',
+        onUndo: () => _restoreEventSnapshot(snapshot),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Removed from Synctra.')),
+      );
+    }
+  }
+
+  Future<_EventDeleteSnapshot> _snapshotBeforeDelete(EventModel event) async {
+    switch (event.source) {
+      case 'manual':
+        return _EventDeleteSnapshot(event: event, canUndo: true);
+      case 'canvas':
+        final taskId = event.id.startsWith('canvas-')
+            ? event.id.substring('canvas-'.length)
+            : event.id;
+        final tasks = await _canvasTasks.loadCached();
+        TaskModel? task;
+        for (final t in tasks) {
+          if (t.id == taskId) {
+            task = t;
+            break;
+          }
+        }
+        return _EventDeleteSnapshot(
+          event: event,
+          canUndo: task != null,
+          canvasTask: task,
+        );
+      case 'manual_task':
+        final taskId = event.id.replaceFirst('manual-task-', '');
+        final tasks = await ManualTasksCalendar.loadTasks();
+        TaskModel? task;
+        for (final t in tasks) {
+          if (t.id == taskId) {
+            task = t;
+            break;
+          }
+        }
+        return _EventDeleteSnapshot(
+          event: event,
+          canUndo: task != null,
+          manualTask: task,
+        );
+      case 'course':
+        return _EventDeleteSnapshot(event: event, canUndo: false);
+      default:
+        if (event.source.startsWith('ical')) {
+          for (final entry in _feedEvents.entries) {
+            if (entry.value.any((e) => e.id == event.id)) {
+              return _EventDeleteSnapshot(
+                event: event,
+                canUndo: true,
+                icalFeedId: entry.key,
+              );
+            }
+          }
+        }
+        return _EventDeleteSnapshot(event: event, canUndo: false);
+    }
+  }
+
+  Future<void> _restoreEventSnapshot(_EventDeleteSnapshot snapshot) async {
+    final event = snapshot.event;
+    switch (event.source) {
+      case 'manual':
+        setState(() => _fixedEvents.add(event));
+        await _persistManualEvents();
+      case 'canvas':
+        final task = snapshot.canvasTask;
+        if (task != null) {
+          final tasks = await _canvasTasks.loadCached();
+          await _canvasTasks.saveCache([...tasks, task]);
+          await _reloadCanvasEvents();
+        }
+      case 'manual_task':
+        final task = snapshot.manualTask;
+        if (task != null) {
+          final tasks = await ManualTasksCalendar.loadTasks();
+          await ManualTasksCalendar.saveTasks([...tasks, task]);
+          await _loadManualTaskEvents();
+          ManualTasksBridge.instance.refresh();
+        }
+      default:
+        if (event.source.startsWith('ical') && snapshot.icalFeedId != null) {
+          setState(() {
+            _feedEvents.putIfAbsent(snapshot.icalFeedId!, () => []).add(event);
+          });
+        }
+    }
+    if (!mounted) return;
+    setState(() {});
+    _pushExternalBusyToStore();
   }
 
   Future<void> _removeEventFromSynctra(EventModel event) async {
@@ -815,7 +957,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     return _CalendarMainPanel(
       toolbarTitle: _toolbarTitle(),
       viewMode: _viewMode,
-      onViewModeChanged: (m) => setState(() => _viewMode = m),
+      onViewModeChanged: _setViewMode,
       aiChatOpen: _calendarChatOpen,
       onToggleAiChat: _toggleAiChat,
       showMenuButton: showMenuButton,
