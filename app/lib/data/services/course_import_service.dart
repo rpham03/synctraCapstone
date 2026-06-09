@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/constants/api_constants.dart';
+import '../../core/constants/preview_flags.dart';
 import '../models/event_model.dart';
 import '../models/task_model.dart';
 
@@ -45,7 +46,12 @@ class CourseImportService {
 
   static const _courseTasksKey = 'synctra_course_import_tasks_v1';
 
-  String get _userId => _db.auth.currentUser!.id;
+  String get _userId {
+    final uid = _db.auth.currentUser?.id;
+    if (uid != null) return uid;
+    if (PreviewFlags.noAuth) return 'preview';
+    throw StateError('Sign in required');
+  }
 
   List<Map<String, dynamic>> _rowsFrom(dynamic value) {
     if (value is List) {
@@ -267,8 +273,12 @@ class CourseImportService {
   // ── Mutations ─────────────────────────────────────────────────────────────
 
   /// Scrape [url], save everything to Supabase, return the new record.
-  Future<CourseImportRecord> addImport(String url, String name) =>
-      _scrapeAndSave(url: url, name: name, existingImportId: null);
+  Future<CourseImportRecord> addImport(String url, String name) async {
+    if (_db.auth.currentUser == null && PreviewFlags.noAuth) {
+      return _scrapePreviewOnly(url: url, name: name);
+    }
+    return _scrapeAndSave(url: url, name: name, existingImportId: null);
+  }
 
   /// Re-scrape [url], replace events in Supabase, return updated record.
   Future<CourseImportRecord> syncImport({
@@ -280,8 +290,49 @@ class CourseImportService {
 
   /// Delete a course import and all its events (cascade via FK).
   Future<void> removeImport(String importId) async {
+    if (importId.startsWith('local-')) {
+      await _removeCachedTasksForImport(importId);
+      return;
+    }
     await _db.from('course_imports').delete().eq('id', importId);
     await _removeCachedTasksForImport(importId);
+  }
+
+  Future<CourseImportRecord> _scrapePreviewOnly({
+    required String url,
+    required String name,
+  }) async {
+    final resp = await Dio().post(
+      '${ApiConstants.baseUrl}/course-import/',
+      queryParameters: {'course_url': url},
+      options: Options(
+        sendTimeout: const Duration(seconds: 180),
+        receiveTimeout: const Duration(seconds: 180),
+      ),
+    );
+    final data = resp.data as Map<String, dynamic>;
+    final courseName = name.isNotEmpty
+        ? name
+        : (data['course_name'] as String? ?? _nameFromUrl(url));
+    final totalImported = data['total_imported'] as int? ?? 0;
+    final assignments = data['assignments'] as List<dynamic>? ?? [];
+    final importId = 'local-${url.hashCode}';
+
+    final taskRows = await _courseTasksFromAssignments(
+      importId: importId,
+      courseName: courseName,
+      assignments: assignments,
+    );
+    await _replaceCachedTasksForImport(importId, taskRows);
+
+    return CourseImportRecord(
+      id: importId,
+      courseUrl: url,
+      courseName: courseName,
+      bestSource: 'ai_parsed',
+      eventCount: totalImported,
+      lastSyncedAt: DateTime.now().toUtc(),
+    );
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

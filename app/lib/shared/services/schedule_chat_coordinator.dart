@@ -4,9 +4,11 @@
 import 'package:get_it/get_it.dart';
 
 import '../../data/models/schedule_block_model.dart';
+import '../../data/models/user_settings.dart';
 import 'llm_service.dart';
 import 'scheduling_service.dart';
 import 'suggested_schedule_store.dart';
+import 'user_settings_service.dart';
 
 /// Monday 00:00 local of the ISO week containing [d].
 DateTime _startOfIsoWeek(DateTime d) {
@@ -34,6 +36,13 @@ class ScheduleChatCoordinator {
       scheduling: const SchedulingService(),
       store: g<SuggestedScheduleStore>(),
     );
+  }
+
+  UserWorkPreferences get _workPreferences {
+    if (GetIt.instance.isRegistered<UserSettingsService>()) {
+      return GetIt.instance<UserSettingsService>().workPreferences;
+    }
+    return UserSettings.defaults('').workPreferences;
   }
 
   /// End-to-end chat turn: deterministic scheduling + stub LLM reply.
@@ -143,6 +152,7 @@ class ScheduleChatCoordinator {
       task: task,
       config: config,
       userConstraints: constraints,
+      workPreferences: _workPreferences,
       constraintClock: now,
     );
 
@@ -281,6 +291,7 @@ class ScheduleChatCoordinator {
       task: task,
       config: config,
       userConstraints: constraints,
+      workPreferences: _workPreferences,
       constraintClock: now,
     );
 

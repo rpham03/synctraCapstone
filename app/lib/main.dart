@@ -12,6 +12,7 @@ import 'shared/services/synctra_chat_service.dart';
 import 'shared/services/synctra_chat_store.dart';
 import 'shared/services/suggested_schedule_store.dart';
 import 'shared/services/theme_mode_notifier.dart';
+import 'shared/services/user_settings_service.dart';
 import 'theme.dart';
 
 Future<void> main() async {
@@ -22,10 +23,9 @@ Future<void> main() async {
   registerCanvasTasksService();
   registerSynctraChatStore();
   registerSynctraChatService();
+  registerUserSettingsService();
   await ThemeModeNotifier.load();
 
-  // Initialize Supabase — replace the placeholders with your project values
-  // from https://supabase.com/dashboard → Settings → API
   await Supabase.initialize(
     url: 'https://wewuafrajfsqhaajofju.supabase.co',
     anonKey: 'sb_publishable_nLRlBikbHmLFz3uM762vXg_FNvH6GPa',
@@ -33,7 +33,11 @@ Future<void> main() async {
 
   _loadUserScopedData();
 
-  runApp(const SynctraApp());
+  final settings = GetIt.instance<UserSettingsService>();
+  attachUserSettingsAuthListener(settings);
+  await settings.load();
+
+  runApp(SynctraApp(settingsService: settings));
 }
 
 /// Load the signed-in user's saved study blocks now, and reload whenever the
@@ -55,8 +59,16 @@ void _loadUserScopedData() {
   });
 }
 
-class SynctraApp extends StatelessWidget {
-  const SynctraApp({super.key});
+class SynctraApp extends StatefulWidget {
+  final UserSettingsService settingsService;
+  const SynctraApp({super.key, required this.settingsService});
+
+  @override
+  State<SynctraApp> createState() => _SynctraAppState();
+}
+
+class _SynctraAppState extends State<SynctraApp> {
+  late final _router = AppRouter.createRouter(widget.settingsService);
 
   @override
   Widget build(BuildContext context) {
@@ -68,7 +80,7 @@ class SynctraApp extends StatelessWidget {
           theme: AppTheme.light,
           darkTheme: AppTheme.dark,
           themeMode: ThemeModeNotifier.instance.themeMode,
-          routerConfig: AppRouter.router,
+          routerConfig: _router,
           debugShowCheckedModeBanner: false,
         );
       },

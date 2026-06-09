@@ -26,6 +26,7 @@ import '../../../shared/services/manual_events_store.dart';
 import '../../../shared/services/synctra_chat_constants.dart';
 import '../../../shared/services/synctra_chat_service.dart';
 import '../../../shared/services/scheduling_service.dart';
+import '../../../shared/services/user_settings_service.dart';
 import '../../../shared/services/suggested_schedule_store.dart';
 import '../../../shared/state/calendar_shell_bridge.dart';
 import '../../../shared/state/shell_sidebar_controller.dart';
@@ -68,7 +69,8 @@ class _CalendarScreenState extends State<CalendarScreen> {
   final ScrollController _timeScrollController = ScrollController();
   Timer? _nowTicker;
 
-  static const int _firstHour = 6;
+  /// Full 24-hour day column: midnight (0) through 11 PM (23).
+  static const int _firstHour = 0;
   static const int _lastHour = 23;
   static const double _hourHeight = 52;
 
@@ -639,6 +641,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     }
 
     const scheduling = SchedulingService();
+    final workPrefs = GetIt.instance<UserSettingsService>().workPreferences;
     final blocks = scheduling.scheduleWeek(
       weekStart: weekStart,
       weekEnd: weekEnd,
@@ -648,6 +651,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
         bufferAroundFixedEvents: Duration(minutes: 15),
         minimumBlockSize: Duration(minutes: 30),
       ),
+      workPreferences: workPrefs,
     );
 
     final titles = <String, String>{for (final f in flex) f.id: f.title};
@@ -850,6 +854,19 @@ class _CalendarScreenState extends State<CalendarScreen> {
   /// Side panel on wide screens; bottom sheet on phones so the week grid stays readable.
   static const double _chatSideBySideMinWidth = 900;
 
+  /// Width reserved on the right when Sync It is docked (panel + divider).
+  static double _sideChatPanelWidth(double viewportWidth) {
+    if (viewportWidth < _chatSideBySideMinWidth) return 0;
+    const minCalendarWidth = 520.0;
+    var panelW = viewportWidth >= 1100
+        ? 360.0
+        : (viewportWidth * 0.36).clamp(280.0, 400.0);
+    if (viewportWidth - panelW < minCalendarWidth) {
+      panelW = (viewportWidth - minCalendarWidth).clamp(260.0, panelW);
+    }
+    return panelW + 1;
+  }
+
   Widget _wrapCalendarWithChat(BuildContext context, Widget calendarBody) {
     if (!_calendarChatOpen) return calendarBody;
 
@@ -908,12 +925,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       color: scheme.outlineVariant.withValues(alpha: 0.75),
     );
 
-    // Wide: docked column; cap panel width so the grid keeps at least ~520px.
-    const minCalendarWidth = 520.0;
-    var panelW = w >= 1100 ? 360.0 : (w * 0.36).clamp(280.0, 400.0);
-    if (w - panelW < minCalendarWidth) {
-      panelW = (w - minCalendarWidth).clamp(260.0, panelW);
-    }
+    final panelW = _sideChatPanelWidth(w) - 1;
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -936,6 +948,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final width = MediaQuery.sizeOf(context).width;
     final useDrawerLayout = width < 1000;
     final useDesktopSidebarToggle = width >= 1000;
+    final chatOpenNarrow =
+        _calendarChatOpen && width < _chatSideBySideMinWidth;
+    final chatPanelInset = _calendarChatOpen ? _sideChatPanelWidth(width) : 0.0;
 
     final showTodayChip = !_isViewingToday();
     final showAddFab = !(_calendarChatOpen &&
@@ -968,6 +983,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
           ],
         ),
       ),
+      floatingActionButtonLocation: chatPanelInset > 0
+          ? _ChatAwareFabLocation(rightInset: chatPanelInset)
+          : FloatingActionButtonLocation.endFloat,
       floatingActionButton: showAddFab
           ? FloatingActionButton(
               heroTag: 'synctra_add_event',
@@ -4155,6 +4173,20 @@ class _IcalFeedsSheetState extends State<_IcalFeedsSheet> {
         ],
       ),
     );
+  }
+}
+
+/// Keeps the add (+) FAB aligned with the calendar column when Sync It is docked.
+class _ChatAwareFabLocation extends FloatingActionButtonLocation {
+  const _ChatAwareFabLocation({required this.rightInset});
+
+  final double rightInset;
+
+  @override
+  Offset getOffset(ScaffoldPrelayoutGeometry scaffoldGeometry) {
+    final base =
+        FloatingActionButtonLocation.endFloat.getOffset(scaffoldGeometry);
+    return Offset(math.max(0, base.dx - rightInset), base.dy);
   }
 }
 
