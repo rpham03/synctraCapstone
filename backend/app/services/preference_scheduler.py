@@ -158,7 +158,9 @@ def suggest_preference_schedule(
             f"{_pretty_clock(_DEFAULT_WINDOW_START)}–{_pretty_clock(_DEFAULT_WINDOW_END)}"
         )
     session_cap = max(15, min(int(session_cap), 24 * 60))
-    break_minutes = max(0, int(break_minutes))
+    # Always leave a real break between same-day sessions — at least 15 min and
+    # at most 30 min, regardless of the (smaller) Settings default.
+    break_minutes = max(15, min(int(break_minutes), 30))
 
     events = get_calendar_events()
     classified = event_classification.classify_all_calendar_events(events, user_id=uid)["events"]

@@ -2676,3 +2676,36 @@ def test_nlp_router_start_earlier_shifts_start(monkeypatch):
     assert proposals[0]["replace_block_id"] == "g1"
     assert proposals[0]["start_time"] == "2026-06-08T19:00:00"  # an hour earlier
     assert proposals[0]["end_time"] == "2026-06-08T21:00:00"    # end unchanged
+
+
+def test_duration_add_coercion_uses_duration_and_clean_title():
+    """"add 2h study tomorrow" uses the 2h as the length (no end-time prompt) and
+    titles the block just "study" — never "2h study"."""
+    from app.services.chat_client_context import clear_client_context, set_client_today
+    from app.services.nlp_router_chat_service import NlpRouterChatService
+
+    service = NlpRouterChatService()
+    try:
+        set_client_today("2026-06-09")
+
+        # No start time -> auto-place via propose, titled just the event name.
+        name, args = service._coerce_duration_add_intent("add_calendar_block", {}, "add 2h study tomorrow")
+        assert name == "propose_schedule_change"
+        assert args["task_name"] == "study"
+        assert args["estimated_minutes"] == 120
+        assert args["deadline"].startswith("2026-06-10")
+
+        # With a start time -> concrete block, end = start + duration, clean title.
+        name2, args2 = service._coerce_duration_add_intent(
+            "add_calendar_block", {}, "add 2h study cse 369 tomorrow at 9pm"
+        )
+        assert name2 == "add_calendar_block"
+        assert args2["title"] == "study cse 369"
+        assert args2["start_time"] == "2026-06-10T21:00:00"
+        assert args2["end_time"] == "2026-06-10T23:00:00"  # 9pm + 2h, not asked
+
+        # No duration -> not a duration-add, leave the plan untouched.
+        name3, args3 = service._coerce_duration_add_intent("add_calendar_block", {"x": 1}, "add gaming tomorrow at 8pm")
+        assert name3 == "add_calendar_block" and args3 == {"x": 1}
+    finally:
+        clear_client_context()

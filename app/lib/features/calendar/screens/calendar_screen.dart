@@ -4260,9 +4260,14 @@ class _DayTimeColumn extends StatelessWidget {
     }
     if (s.block != null) {
       final b = s.block!;
-      final bg = b.isAiGenerated
-          ? AppColors.aiStudyBlock
-          : AppColors.confirmedStudyBlock;
+      // A confirmed group meeting gets its own color, distinct from study blocks.
+      final isCollab = b.taskId.startsWith('collab-') ||
+          b.description == 'Confirmed collaborative event';
+      final bg = isCollab
+          ? AppColors.collabEvent
+          : (b.isAiGenerated
+              ? AppColors.aiStudyBlock
+              : AppColors.confirmedStudyBlock);
       final ht = chipHeight(24);
       if (ht <= 0) return const SizedBox.shrink();
       final isDragging = activeDragId == s.id;
@@ -4273,7 +4278,7 @@ class _DayTimeColumn extends StatelessWidget {
         block: b,
         color: bg,
         onTap: () => onTapBlock(b),
-        flexible: b.isAiGenerated,
+        flexible: !isCollab && b.isAiGenerated,
         hideContent: false,
       );
       return Positioned(
@@ -4296,7 +4301,7 @@ class _DayTimeColumn extends StatelessWidget {
               widthPx: width,
               leftPx: left,
               accentColor: bg,
-              flexible: b.isAiGenerated,
+              flexible: !isCollab && b.isAiGenerated,
               block: b,
             ),
             pos,
@@ -4808,7 +4813,9 @@ class _StudyBlockChip extends StatelessWidget {
     final timeLabel =
         '${DateFormat('h:mm a').format(block.startTime)} – ${DateFormat('h:mm a').format(block.endTime)}';
 
-    final fill = flexible ? color.withValues(alpha: 0.25) : color;
+    // Solid fill so applied blocks read clearly on the grid (not a faint/blurred
+    // preview). The dashed border + sparkle icon still mark an AI suggestion.
+    final fill = color;
     final borderColor =
         flexible ? color.withValues(alpha: 0.7) : Colors.transparent;
 

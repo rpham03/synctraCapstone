@@ -70,7 +70,7 @@ class UserSettings {
     this.workStartTime = const TimeOfDay(hour: 9, minute: 0),
     this.workEndTime = const TimeOfDay(hour: 22, minute: 0),
     this.preferredSessionMinutes = 60,
-    this.breakMinutes = 10,
+    this.breakMinutes = 15,
     this.icalLinks = const [],
     this.courseUrls = const [],
     this.onboardingComplete = false,
@@ -87,7 +87,7 @@ class UserSettings {
       workEndTime: _parseTime(row['work_end_time']),
       preferredSessionMinutes:
           (row['preferred_session_minutes'] as num?)?.toInt() ?? 60,
-      breakMinutes: (row['break_minutes'] as num?)?.toInt() ?? 10,
+      breakMinutes: (row['break_minutes'] as num?)?.toInt() ?? 15,
       icalLinks: _stringList(row['ical_links']),
       courseUrls: _stringList(row['course_urls']),
       onboardingComplete: row['onboarding_complete'] as bool? ?? false,
@@ -188,7 +188,7 @@ class UserWorkPreferences {
     required this.workStartMinutes,
     required this.workEndMinutes,
     this.preferredSessionMinutes = 60,
-    this.breakMinutes = 10,
+    this.breakMinutes = 15,
   });
 
   bool get crossesMidnight => workEndMinutes <= workStartMinutes;

@@ -198,6 +198,9 @@ class NlpRouterChatService:
                 name, arguments = self._coerce_delete_intent(
                     name, arguments, planning_message
                 )
+                name, arguments = self._coerce_duration_add_intent(
+                    name, arguments, planning_message
+                )
 
                 if name == CLARIFICATION_ACTION:
                     question = str(arguments.get("question") or "").strip()
@@ -1470,6 +1473,71 @@ class NlpRouterChatService:
         if date_range:
             delete_args["start_date"], delete_args["end_date"] = date_range
         return "delete_calendar_block", delete_args
+
+    def _strip_when_and_time(self, text: str) -> str:
+        """The event name from "study cse 369 tomorrow at 9pm" -> "study cse 369"."""
+        cut = re.split(
+            r"\b(?:today|tomorrow|tonight|this week|next week|this weekend|next weekend|"
+            r"weekend|monday|mon|tuesday|tue|tues|wednesday|wed|thursday|thu|thur|thurs|"
+            r"friday|fri|saturday|sat|sunday|sun|at|on|from|by|before|after|in|until|till|"
+            r"\d{1,2}\s*(?:a\.?m\.?|p\.?m\.?)|\d{1,2}:\d{2})\b",
+            text,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        cut = re.sub(r"^\s*(?:of|for|a|an|the|some|my)\s+", " ", cut, flags=re.IGNORECASE)
+        return " ".join(cut.strip(" .,:;-").split())
+
+    def _coerce_duration_add_intent(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+    ) -> tuple[str, dict[str, Any]]:
+        """Handle "add 2h study tomorrow [at 9pm]" — a duration-based add.
+
+        The duration (2h) sets the length, so only a start time is ever needed,
+        never an end time. With a start time it adds a concrete block; without
+        one it auto-places the block before the named day. The title is just the
+        event name — the "2h" duration is never prefixed to it.
+        """
+
+        match = re.search(
+            r"\b(?:add|block\s*out|block\s*off|set\s*aside|reserve|pencil\s*in)\b\s+"
+            r"(?:a\s+|an\s+|some\s+)?"
+            r"(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes)\b\s+"
+            r"(.+)$",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return name, arguments
+        amount = float(match.group(1))
+        unit = match.group(2).lower()
+        minutes = int(round(amount * 60)) if unit.startswith("h") else int(round(amount))
+        if minutes <= 0:
+            return name, arguments
+        title = self._strip_when_and_time(match.group(3)) or "Study block"
+
+        day = self._move_target_date(message)
+        times = self._parse_clock_times(message) or self._parse_bare_hours_after_prep(message)
+        if times:
+            start = datetime.combine(day or effective_today(), times[0])
+            end = start + timedelta(minutes=minutes)
+            return "add_calendar_block", {
+                "title": title,
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+            }
+        # No start time given — auto-place a block of this length before the
+        # named day's end (or tomorrow if no day was named).
+        deadline_day = day or (effective_today() + timedelta(days=1))
+        return "propose_schedule_change", {
+            "task_name": title,
+            "hours": minutes / 60.0,
+            "deadline": datetime.combine(deadline_day, time(23, 59)).isoformat(),
+            "estimated_minutes": minutes,
+        }
 
     def _coerce_move_intent(
         self,
