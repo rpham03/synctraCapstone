@@ -13,7 +13,26 @@ import '../utils/task_timeline_utils.dart';
 
 class CanvasTasksService extends ChangeNotifier {
   static const _cacheKey = 'synctra_canvas_tasks_v1';
+  static const _lastSyncKey = 'synctra_canvas_last_sync_ms';
   static const _maxPastRetentionDays = 120;
+
+  DateTime? _lastSyncedAt;
+
+  DateTime? get lastSyncedAt => _lastSyncedAt;
+
+  Future<void> loadLastSyncTime() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt(_lastSyncKey);
+    if (ms == null) return;
+    _lastSyncedAt = DateTime.fromMillisecondsSinceEpoch(ms);
+  }
+
+  Future<void> _recordSyncTime() async {
+    _lastSyncedAt = DateTime.now();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_lastSyncKey, _lastSyncedAt!.millisecondsSinceEpoch);
+    notifyListeners();
+  }
 
   Future<List<TaskModel>> loadCached() async {
     final prefs = await SharedPreferences.getInstance();
@@ -88,6 +107,7 @@ class CanvasTasksService extends ChangeNotifier {
         .toList();
     final merged = _mergeWithCache(existing, incoming);
     await saveCache(merged);
+    await _recordSyncTime();
     notifyListeners();
     return merged;
   }
