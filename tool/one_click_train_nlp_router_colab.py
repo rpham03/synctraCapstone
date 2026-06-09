@@ -754,20 +754,22 @@ def write_manual_eval_files(eval_path: Path, script_path: Path, model_dir: Path)
 
 
 def running_in_colab() -> bool:
-    return Path("/content").exists() and "google.colab" in sys.modules
+    # The trainer normally runs as a child process, where google.colab is not
+    # imported even though the process is still inside a Colab runtime.
+    return Path("/content").exists()
 
 
 def install_dependencies() -> None:
     packages = [
-        "accelerate>=0.33.0",
-        "datasets>=2.19.0",
-        "numpy>=1.26.0",
-        "pandas>=2.2.0",
-        "pyarrow>=15.0.0",
-        "scikit-learn>=1.4.0",
-        "sentencepiece>=0.2.0",
-        "torch>=2.2.0",
-        "transformers>=4.44.0",
+        "accelerate>=0.33.0,<2",
+        "datasets>=2.19.0,<4",
+        "numpy>=1.26.0,<3",
+        "pandas>=2.2.0,<3",
+        "pyarrow>=15.0.0,<24",
+        "scikit-learn>=1.4.0,<2",
+        "sentencepiece>=0.2.0,<1",
+        "torch>=2.2.0,<3",
+        "transformers>=4.44.0,<5",
     ]
     print("[setup] installing training dependencies")
     subprocess.check_call(
