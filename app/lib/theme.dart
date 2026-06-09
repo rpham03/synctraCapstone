@@ -186,9 +186,10 @@ abstract final class AppTheme {
       labelMedium: GoogleFonts.inter(textStyle: inter.labelMedium, fontWeight: FontWeight.w500, letterSpacing: 0.02),
       labelSmall: GoogleFonts.inter(
         textStyle: inter.labelSmall,
-        fontSize: 11,
+        fontSize: 12,
         fontWeight: FontWeight.w500,
-        letterSpacing: 0.55,
+        letterSpacing: 0.2,
+        height: 1.35,
         color: scheme.onSurfaceVariant,
       ),
     );
@@ -245,16 +246,17 @@ abstract final class AppTheme {
         labelTextStyle: WidgetStateProperty.resolveWith((states) {
           final selected = states.contains(WidgetState.selected);
           return GoogleFonts.inter(
-            fontSize: 11,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-            letterSpacing: -0.05,
+            fontSize: 12,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+            letterSpacing: 0,
+            height: 1.3,
             color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
           );
         }),
         iconTheme: WidgetStateProperty.resolveWith((states) {
           final selected = states.contains(WidgetState.selected);
           return IconThemeData(
-            size: 22,
+            size: 24,
             color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
           );
         }),
@@ -263,7 +265,11 @@ abstract final class AppTheme {
         elevation: 0,
         color: scheme.surface,
         surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: scheme.outlineVariant),
+        ),
       ),
       dividerTheme: DividerThemeData(color: scheme.outlineVariant, thickness: 1),
       dialogTheme: DialogThemeData(
@@ -360,41 +366,59 @@ abstract final class AppTheme {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: fillInput,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide(color: scheme.outlineVariant),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(4),
-          borderSide: BorderSide(color: scheme.primary, width: 1.5),
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: scheme.primary, width: 2),
         ),
         errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide(color: scheme.error),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        hintStyle: TextStyle(color: scheme.onSurfaceVariant.withValues(alpha: 0.75), fontSize: 14),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide(color: scheme.error, width: 2),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        hintStyle: TextStyle(color: scheme.onSurfaceVariant.withValues(alpha: 0.8), fontSize: 14, height: 1.4),
+        helperStyle: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12, height: 1.4),
+        errorStyle: TextStyle(color: scheme.error, fontSize: 12, height: 1.35),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          minimumSize: const Size.fromHeight(44),
+          minimumSize: const Size(64, 44),
           elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-          textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, letterSpacing: -0.05),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: -0.02, height: 1.2),
+        ).copyWith(
+          overlayColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.pressed)) {
+              return scheme.onPrimary.withValues(alpha: 0.12);
+            }
+            if (states.contains(WidgetState.hovered)) {
+              return scheme.onPrimary.withValues(alpha: 0.08);
+            }
+            return null;
+          }),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
-          minimumSize: const Size.fromHeight(40),
+          minimumSize: const Size(64, 44),
           side: BorderSide(color: scheme.outlineVariant),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-          textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, height: 1.2),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500),
+          minimumSize: const Size(48, 44),
+          textStyle: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, height: 1.2),
+          foregroundColor: scheme.primary,
         ),
       ),
       chipTheme: ChipThemeData(
@@ -406,7 +430,10 @@ abstract final class AppTheme {
       listTileTheme: ListTileThemeData(
         titleTextStyle: textTheme.titleMedium,
         subtitleTextStyle: textTheme.bodySmall,
+        iconColor: scheme.onSurfaceVariant,
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        minVerticalPadding: 12,
+        minLeadingWidth: 24,
       ),
       progressIndicatorTheme: ProgressIndicatorThemeData(
         color: scheme.primary,

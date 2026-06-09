@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../../data/models/scheduling_models.dart';
+import '../../data/models/user_settings.dart';
 
 // -----------------------------------------------------------------------------
 // Synctra scheduling — deterministic gap-packing (not machine learning).
@@ -121,6 +122,7 @@ class SchedulingService {
     required List<FlexibleTask> flexibleTasks,
     SchedulingConfig config = const SchedulingConfig(),
     List<UserConstraint> userConstraints = const [],
+    UserWorkPreferences? workPreferences,
     DateTime? constraintClock,
   }) {
     if (!weekStart.isBefore(weekEnd)) return [];
@@ -133,6 +135,9 @@ class SchedulingService {
     free = free
         .where((w) => !w.duration.isNegative && w.duration >= config.minimumBlockSize)
         .toList();
+    if (workPreferences != null) {
+      free = _filterFreeToWorkHours(free, workPreferences, config.minimumBlockSize);
+    }
 
     final tasks = List<FlexibleTask>.from(expanded)..sort((a, b) => a.compareToOthers(b));
 
@@ -145,45 +150,60 @@ class SchedulingService {
       var remaining = task.estimatedDuration;
 
       while (remaining >= config.minimumBlockSize) {
-        _sortWindowsForTask(free, task);
+        _sortWindowsForTask(free, task, workPreferences?.scheduleType);
         var placed = false;
 
         for (var i = 0; i < free.length; i++) {
           final slot = free[i];
           if (!slot.start.isBefore(slot.end)) continue;
 
+          var blockStart = slot.start;
+          if (workPreferences != null) {
+            if (!_isAllowedStart(blockStart, workPreferences)) continue;
+            final floor = _workStartFloor(blockStart, workPreferences);
+            if (floor.isAfter(blockStart)) blockStart = floor;
+            if (!blockStart.isBefore(slot.end)) continue;
+          }
+
           final cappedEnd = _cappedSlotEnd(
-            slot: slot,
+            slot: _Window(blockStart, slot.end),
             task: task,
             userConstraints: userConstraints,
+            workPreferences: workPreferences,
             clock: clock,
           );
-          if (!cappedEnd.isAfter(slot.start)) continue;
+          if (!cappedEnd.isAfter(blockStart)) continue;
 
-          var usable = cappedEnd.difference(slot.start);
+          var usable = cappedEnd.difference(blockStart);
           if (usable < config.minimumBlockSize) continue;
 
-          var takeMicro = math.min(remaining.inMicroseconds, usable.inMicroseconds).toInt();
-          var takeDur = Duration(microseconds: takeMicro);
+          var takeDur = _targetTakeDuration(
+            remaining: remaining,
+            usable: usable,
+            preferredMinutes: workPreferences?.preferredSessionMinutes,
+            minimum: config.minimumBlockSize,
+          );
           if (takeDur < config.minimumBlockSize) continue;
 
-          var blockEnd = slot.start.add(takeDur);
-          final dayEnd = _startOfNextLocalDay(slot.start);
+          var blockEnd = blockStart.add(takeDur);
+          final dayEnd = _startOfNextLocalDay(blockStart);
           if (blockEnd.isAfter(dayEnd)) {
-            takeDur = dayEnd.difference(slot.start);
+            takeDur = dayEnd.difference(blockStart);
             if (takeDur < config.minimumBlockSize) continue;
-            takeMicro = takeDur.inMicroseconds;
-            blockEnd = slot.start.add(takeDur);
+            blockEnd = blockStart.add(takeDur);
           }
 
           blocks.add(ScheduledBlock(
             taskId: task.id,
-            startTime: slot.start,
+            startTime: blockStart,
             endTime: blockEnd,
           ));
 
           remaining -= takeDur;
-          _consumeWindow(free, i, takeDur, config.minimumBlockSize);
+          final consumed = workPreferences != null && workPreferences.breakMinutes > 0
+              ? takeDur + Duration(minutes: workPreferences.breakMinutes)
+              : takeDur;
+          _consumeWindow(free, i, consumed, config.minimumBlockSize);
           placed = true;
           break;
         }
@@ -206,6 +226,7 @@ class SchedulingService {
     required FlexibleTask task,
     SchedulingConfig config = const SchedulingConfig(),
     List<UserConstraint> userConstraints = const [],
+    UserWorkPreferences? workPreferences,
     DateTime? constraintClock,
   }) {
     final clock = constraintClock ?? DateTime.now();
@@ -216,6 +237,7 @@ class SchedulingService {
       flexibleTasks: flexibleTasks,
       config: config,
       userConstraints: userConstraints,
+      workPreferences: workPreferences,
       constraintClock: clock,
     );
 
@@ -282,26 +304,33 @@ class SchedulingService {
     free = free
         .where((w) => !w.duration.isNegative && w.duration >= config.minimumBlockSize)
         .toList();
-    _sortWindowsForTask(free, resolvedUnit);
+    _sortWindowsForTask(free, resolvedUnit, workPreferences?.scheduleType);
 
     ScheduledBlock? alt;
     for (final slot in free) {
+      var blockStart = slot.start;
+      if (workPreferences != null) {
+        if (!_isAllowedStart(blockStart, workPreferences)) continue;
+        final floor = _workStartFloor(blockStart, workPreferences);
+        if (floor.isAfter(blockStart)) blockStart = floor;
+      }
       final cappedEnd = _cappedSlotEnd(
-        slot: slot,
+        slot: _Window(blockStart, slot.end),
         task: resolvedUnit,
         userConstraints: userConstraints,
+        workPreferences: workPreferences,
         clock: clock,
       );
-      if (!cappedEnd.isAfter(slot.start)) continue;
-      var usable = cappedEnd.difference(slot.start);
-      final dayEnd = _startOfNextLocalDay(slot.start);
-      final dayCap = dayEnd.difference(slot.start);
+      if (!cappedEnd.isAfter(blockStart)) continue;
+      var usable = cappedEnd.difference(blockStart);
+      final dayEnd = _startOfNextLocalDay(blockStart);
+      final dayCap = dayEnd.difference(blockStart);
       if (usable > dayCap) usable = dayCap;
       if (usable < remaining) continue;
-      var end = slot.start.add(remaining);
+      var end = blockStart.add(remaining);
       if (end.isAfter(dayEnd)) end = dayEnd;
-      if (end.difference(slot.start) < config.minimumBlockSize) continue;
-      alt = ScheduledBlock(taskId: resolvedUnit.id, startTime: slot.start, endTime: end);
+      if (end.difference(blockStart) < config.minimumBlockSize) continue;
+      alt = ScheduledBlock(taskId: resolvedUnit.id, startTime: blockStart, endTime: end);
       break;
     }
 
@@ -323,6 +352,7 @@ class SchedulingService {
     required _Window slot,
     required FlexibleTask task,
     required List<UserConstraint> userConstraints,
+    UserWorkPreferences? workPreferences,
     required DateTime clock,
   }) {
     var end = _minDateTime(slot.end, task.dueDate);
@@ -332,7 +362,79 @@ class SchedulingService {
       clock,
     );
     if (cap != null && cap.isBefore(end)) end = cap;
+    if (workPreferences != null) {
+      final workCap = _workEndLimit(slot.start, workPreferences);
+      if (workCap.isBefore(end)) end = workCap;
+    }
     return end;
+  }
+
+  static Duration _targetTakeDuration({
+    required Duration remaining,
+    required Duration usable,
+    int? preferredMinutes,
+    required Duration minimum,
+  }) {
+    var cap = math.min(remaining.inMicroseconds, usable.inMicroseconds);
+    if (preferredMinutes != null && preferredMinutes > 0) {
+      final prefMicro = Duration(minutes: preferredMinutes).inMicroseconds;
+      if (remaining.inMicroseconds > prefMicro && usable.inMicroseconds >= prefMicro) {
+        cap = math.min(cap, prefMicro);
+      }
+    }
+    return Duration(microseconds: cap);
+  }
+
+  static bool _isAllowedStart(DateTime t, UserWorkPreferences prefs) =>
+      prefs.isMinuteWithinWorkWindow(prefs.minuteOfDay(t));
+
+  static DateTime _workStartFloor(DateTime t, UserWorkPreferences prefs) {
+    final day = DateTime(t.year, t.month, t.day);
+    final floor = day.add(Duration(minutes: prefs.workStartMinutes));
+    if (t.isBefore(floor) && prefs.isMinuteWithinWorkWindow(prefs.minuteOfDay(t))) {
+      return t;
+    }
+    if (t.isBefore(floor)) return floor;
+    return t;
+  }
+
+  static DateTime _workEndLimit(DateTime start, UserWorkPreferences prefs) {
+    final day = DateTime(start.year, start.month, start.day);
+    if (!prefs.crossesMidnight) {
+      return day.add(Duration(minutes: prefs.workEndMinutes));
+    }
+    final m = prefs.minuteOfDay(start);
+    if (m >= prefs.workStartMinutes) {
+      return _startOfNextLocalDay(start);
+    }
+    return day.add(Duration(minutes: prefs.workEndMinutes));
+  }
+
+  static List<_Window> _filterFreeToWorkHours(
+    List<_Window> free,
+    UserWorkPreferences prefs,
+    Duration minimum,
+  ) {
+    if (prefs.crossesMidnight) return free;
+    final out = <_Window>[];
+    for (final w in free) {
+      out.addAll(_splitWindowToWorkHours(w, prefs, minimum));
+    }
+    return out;
+  }
+
+  static List<_Window> _splitWindowToWorkHours(
+    _Window w,
+    UserWorkPreferences prefs,
+    Duration minimum,
+  ) {
+    final dayStart = DateTime(w.start.year, w.start.month, w.start.day);
+    final allowedStart = dayStart.add(Duration(minutes: prefs.workStartMinutes));
+    final allowedEnd = dayStart.add(Duration(minutes: prefs.workEndMinutes));
+    final s = w.start.isBefore(allowedStart) ? allowedStart : w.start;
+    final e = w.end.isAfter(allowedEnd) ? allowedEnd : w.end;
+    if (e.difference(s) >= minimum) return [_Window(s, e)];
+    return const [];
   }
 
   /// Latest instant work may end on [slotDate] due to avoid_after (inclusive cap as DateTime).
@@ -429,25 +531,37 @@ class SchedulingService {
     return free;
   }
 
-  static void _sortWindowsForTask(List<_Window> windows, FlexibleTask task) {
-    if (!task.preferMorning) {
+  static void _sortWindowsForTask(
+    List<_Window> windows,
+    FlexibleTask task, [
+    ScheduleType? scheduleType,
+  ]) {
+    final preferMorning =
+        task.preferMorning || scheduleType == ScheduleType.earlyBird;
+    final preferEvening = scheduleType == ScheduleType.nightOwl;
+
+    if (!preferMorning && !preferEvening) {
       windows.sort((a, b) => a.start.compareTo(b.start));
       return;
     }
-    final morning = <_Window>[];
+
+    final preferred = <_Window>[];
     final rest = <_Window>[];
     for (final w in windows) {
-      if (w.start.hour < 12) {
-        morning.add(w);
+      final h = w.start.hour;
+      final isMorning = h < 13;
+      final isEvening = h >= 18 || h < 3;
+      if ((preferMorning && isMorning) || (preferEvening && isEvening)) {
+        preferred.add(w);
       } else {
         rest.add(w);
       }
     }
-    morning.sort((a, b) => a.start.compareTo(b.start));
+    preferred.sort((a, b) => a.start.compareTo(b.start));
     rest.sort((a, b) => a.start.compareTo(b.start));
     windows
       ..clear()
-      ..addAll(morning)
+      ..addAll(preferred)
       ..addAll(rest);
   }
 

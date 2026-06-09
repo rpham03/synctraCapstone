@@ -15,7 +15,8 @@ Or paste the contents of `supabase/migrations/20260422000000_initial_schema.sql`
 
 ## Main Tables
 
-- `profiles`: one row per `auth.users` account. The trigger `on_auth_user_created` fills this from signup metadata such as `full_name`.
+- `user_settings`: per-user work style, hours, iCal/course URL lists, onboarding flag
+- `ical_feeds`: subscribed iCal URLs with optional label and last sync time
 - `integrations`: Canvas and Google Calendar account connections.
 - `courses`: Canvas/class records used to group tasks and events.
 - `tasks`: flexible work such as assignments, studying, and manually added tasks. Matches `TaskModel` fields: `id`, `title`, `due_date`, `estimated_minutes`, `course_id`, `source`, `is_completed`.
