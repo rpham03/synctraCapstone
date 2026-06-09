@@ -27,12 +27,12 @@ class Settings(BaseSettings):
     course_import_ai_augment: bool = False
     # Optional remote Colab course-import agent.
     colab_course_import_host: str = ""
-    colab_course_import_model: str = "Qwen/Qwen2.5-3B-Instruct"
+    colab_course_import_model: str = "Qwen/Qwen2.5-7B-Instruct"
     colab_course_import_timeout: float = 120.0
     # Optional Colab NLP tool-router and ai_agent endpoints for the app chat box.
     colab_nlp_router_host: str = ""
     colab_ai_agent_host: str = ""
-    colab_ai_agent_model: str = "Qwen/Qwen2.5-3B-Instruct"
+    colab_ai_agent_model: str = "Qwen/Qwen2.5-7B-Instruct"
     # Durable JSONL transcript of user/assistant chat turns.
     chat_conversation_log_enabled: bool = True
     chat_conversation_log_path: str = "data/chat_conversations.jsonl"

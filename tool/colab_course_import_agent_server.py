@@ -34,7 +34,8 @@ Then restart the Synctra backend. ``course_import.py`` posts to
 
 Optional Colab env vars::
 
-    COLAB_COURSE_MODEL=Qwen/Qwen2.5-3B-Instruct
+    COLAB_COURSE_MODEL=Qwen/Qwen2.5-7B-Instruct   # 3B is faster/lighter
+    COLAB_LOAD_4BIT=auto                            # auto|1|0 (4-bit for 7B+)
     COLAB_COURSE_MAX_NEW_TOKENS=4096
     COLAB_AGENT_BACKEND=transformers   # or mock for tunnel testing
     COLAB_TUNNEL=cloudflared           # or ngrok
@@ -66,7 +67,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+# 7B reads course pages more carefully and invents far fewer assignments than
+# 3B. Loaded in 4-bit (see _load) so it fits a free Colab T4. To revert, set
+# COLAB_COURSE_MODEL=Qwen/Qwen2.5-3B-Instruct in the Colab env.
+DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_MAX_NEW_TOKENS = 4096
 COURSE_SYSTEM_PROMPT = (
     "You are a strict JSON extraction service for a course calendar app. "
@@ -206,12 +210,35 @@ class TransformersAgent:
             self.model_name,
             trust_remote_code=True,
         )
-        self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype="auto",
-            device_map="auto",
-            trust_remote_code=True,
-        )
+
+        load_kwargs: dict[str, Any] = {
+            "device_map": "auto",
+            "trust_remote_code": True,
+            "torch_dtype": "auto",
+        }
+        # 7B+ models don't fit a free Colab T4 (16 GB) in fp16, so load them in
+        # 4-bit. Controlled by COLAB_LOAD_4BIT (auto|1|0); falls back to fp16 if
+        # bitsandbytes isn't available so nothing hard-crashes.
+        want = os.getenv("COLAB_LOAD_4BIT", "auto").lower()
+        big_model = bool(re.search(r"\b\d{1,3}b\b", self.model_name.lower()) and
+                         not re.search(r"\b[0-3]b\b", self.model_name.lower()))
+        if want in ("1", "true", "yes") or (want == "auto" and big_model):
+            try:
+                from transformers import BitsAndBytesConfig
+                import bitsandbytes  # noqa: F401  fail fast if missing
+
+                load_kwargs.pop("torch_dtype", None)
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                )
+                print("[agent] loading in 4-bit (bitsandbytes)", flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[agent] 4-bit unavailable ({exc}); using fp16", flush=True)
+
+        self._model = AutoModelForCausalLM.from_pretrained(self.model_name, **load_kwargs)
         self._model.eval()
 
     def _render_prompt(
