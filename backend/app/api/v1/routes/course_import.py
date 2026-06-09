@@ -2366,7 +2366,9 @@ async def fetch_course_context_for_llm(
         )
 
     for related_url, related_html in related_pages:
-        page_text = preprocess_html_for_llm(related_html, max_chars=5000)
+        # Assignment/schedule pages can be long; give them more room so a full
+        # list of HWs/labs isn't truncated (the cause of "missing assignments").
+        page_text = preprocess_html_for_llm(related_html, max_chars=8000)
         if page_text:
             sections.append(f"Source URL: {related_url}\n{page_text}")
 
@@ -2509,9 +2511,46 @@ def infer_quarter_dates(course_url: str) -> tuple[str, str] | None:
     return f"{year}-{sm:02d}-{sd:02d}", f"{year}-{em:02d}-{ed:02d}"
 
 
+_ASSIGNMENT_NUM_RE = re.compile(
+    r"\b(?:hw|homework|assignment|asgn|lab|project|proj|quiz|pset|problem\s*set|"
+    r"reading|exam|a|p|q|r|c)\s*0*(\d{1,3})\b",
+    re.IGNORECASE,
+)
+
+
+def _drop_invented_numbered_assignments(assignments: list, source_text: str) -> list:
+    """Drop LLM assignments whose number never appears in the scraped page text.
+
+    A real "HW3" always leaves "hw3" / "hw 3" / "homework 3" somewhere in the
+    page text; an invented one (e.g. HW6 when the page only lists HW1-HW3) does
+    not. Assignments without a type+number are kept — they can't be judged this
+    way — so this only removes clearly-fabricated numbered items.
+    """
+    norm = re.sub(r"[^a-z0-9]+", "", source_text.lower())
+    kept = []
+    for item in assignments:
+        if not isinstance(item, dict):
+            continue
+        match = _ASSIGNMENT_NUM_RE.search(str(item.get("assignment_name") or ""))
+        if not match:
+            kept.append(item)
+            continue
+        num = match.group(1)
+        variants = (
+            f"hw{num}", f"homework{num}", f"assignment{num}", f"asgn{num}",
+            f"lab{num}", f"project{num}", f"proj{num}", f"quiz{num}",
+            f"pset{num}", f"problemset{num}", f"reading{num}", f"exam{num}",
+            f"a{num}", f"p{num}", f"q{num}", f"r{num}", f"c{num}",
+        )
+        if any(v in norm for v in variants):
+            kept.append(item)
+        # else: a numbered item the page never mentions -> drop as invented
+    return kept
+
+
 async def parse_with_ollama(html: str, course_name: str, course_url: str = "") -> dict:
     """Parse course HTML with Hermes 3 via schema-enforced structured outputs."""
-    text = preprocess_html_for_llm(html, max_chars=24000)
+    text = preprocess_html_for_llm(html, max_chars=32000)
     today = datetime.now().strftime("%Y-%m-%d")
     quarter = infer_quarter_dates(course_url)
     quarter_line = (
@@ -2519,10 +2558,19 @@ async def parse_with_ollama(html: str, course_name: str, course_url: str = "") -
         if quarter else ""
     )
 
-    prompt = f"""Extract every course event from this page into the schema.
+    prompt = f"""Extract the course events and assignments from the page content below into the schema.
 
 Today is {today}. Course: {course_name}.
 {quarter_line}
+CRITICAL — extract ONLY what is literally written in the Page content below:
+- Output ONLY assignments, homework, labs, projects, quizzes, and exams that EXPLICITLY appear
+  in the page text, using the exact name shown there.
+- NEVER invent, guess, infer, extrapolate, or "fill in" anything that is not written. If you see
+  HW1 and HW3 but not HW2, do NOT add HW2. Do not add future, assumed, or typical assignments.
+- If a due date or time is not written for an item, use null — do not guess it.
+- But DO include EVERY assignment that IS listed (every homework, lab, project, quiz) with its
+  name and due date. Do not skip any that appear in the text.
+
 Rules:
 - Times must use 24h HH:MM (e.g. "23:59"). Use null when no time is given.
 - Never output TBD, TBA, unknown, or "to be determined" as a name.
@@ -2532,10 +2580,12 @@ Rules:
 - event_type must be one of: lecture, lab, section, discussion, exam, office_hours.
 {ESTIMATE_AI_GUIDANCE}
 
-Recurring schedules:
-- If the page only describes a recurring pattern like "MWF 10:30-11:20" or
+Recurring schedules (CLASS MEETINGS ONLY — never assignments):
+- If the page only describes a recurring CLASS pattern like "MWF 10:30-11:20" or
   "Tue/Thu 1:30-3:20" without specific dates, EXPAND it into one entry per
   occurrence between the quarter start and end above.
+- This expansion applies ONLY to recurring lectures/sections/labs, NEVER to assignments —
+  assignments are only the specific ones explicitly listed in the text.
 - Skip US federal holidays and Thanksgiving/Veterans Day breaks if mentioned.
 - Use 24h start_time and end_time exactly as written; do not invent times.
 
@@ -2586,7 +2636,12 @@ Page content:
 
         result = response.json()
         response_text = result.get("response", "")
-        return parse_ollama_json(response_text)
+        parsed = parse_ollama_json(response_text)
+        # Guard against the model inventing assignments that aren't on the page.
+        parsed["assignments"] = _drop_invented_numbered_assignments(
+            parsed.get("assignments", []), text
+        )
+        return parsed
 
     except httpx.ConnectError:
         raise HTTPException(

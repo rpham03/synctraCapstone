@@ -580,3 +580,24 @@ def test_normalize_course_url_adds_current_quarter_for_uw_course_root():
     assert normalize_course_url("https://courses.cs.washington.edu/courses/cse391/26sp/", spring_2026) == (
         "https://courses.cs.washington.edu/courses/cse391/26sp/"
     )
+
+
+def test_drop_invented_numbered_assignments():
+    """LLM-invented numbered assignments are dropped; ones on the page are kept."""
+    from app.api.v1.routes.course_import import _drop_invented_numbered_assignments
+
+    page = (
+        "Schedule: HW1 due 4/10, HW2 due 4/17, HW3 due 4/24. "
+        "Lab 1 and Lab 2. Final Project due 6/1."
+    )
+    ai = [
+        {"assignment_name": "HW1"},          # on page -> keep
+        {"assignment_name": "Homework 3"},   # page says HW3 -> keep
+        {"assignment_name": "HW6"},          # not on page -> drop (invented)
+        {"assignment_name": "Lab 2"},        # on page -> keep
+        {"assignment_name": "Lab 9"},        # not on page -> drop (invented)
+        {"assignment_name": "Final Project"},# no number -> keep (can't judge)
+    ]
+    kept = {a["assignment_name"] for a in _drop_invented_numbered_assignments(ai, page)}
+    assert kept == {"HW1", "Homework 3", "Lab 2", "Final Project"}
+    assert "HW6" not in kept and "Lab 9" not in kept
