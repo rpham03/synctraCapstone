@@ -108,6 +108,8 @@ class TrainingExample:
 
 
 def manual_eval_examples() -> list[TrainingExample]:
+    """Return the legacy hand-authored manual evaluation subset."""
+
     rows_by_label = {
         "get_assignments": [
             "check canvas for new homework",
@@ -526,9 +528,8 @@ def manual_eval_examples() -> list[TrainingExample]:
         add("ai_agent", f"I need help to {request}")
 
     examples: list[TrainingExample] = []
-    for label in LABELS:
+    for label, expected in target_counts.items():
         texts = rows_by_label[label]
-        expected = target_counts[label]
         if len(texts) < expected:
             raise ValueError(
                 f"manual eval label {label} has {len(texts)} examples, expected at least {expected}"
@@ -2364,7 +2365,13 @@ def train_and_test(args: argparse.Namespace) -> None:
             if args.manual_eval_script_path
             else output_dir.parent / "evaluate_syntra_router_manual_colab.py"
         )
-        write_manual_eval_files(eval_path, script_path, output_dir)
+        try:
+            write_manual_eval_files(eval_path, script_path, output_dir)
+        except Exception as exc:
+            print(
+                "[manual-eval] optional legacy manual-evaluation files were not "
+                f"created: {exc}"
+            )
 
     classifier = pipeline(
         "text-classification",
