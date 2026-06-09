@@ -1842,33 +1842,44 @@ def test_nlp_router_empty_plan_falls_back_to_ai_agent(monkeypatch):
     assert reply == "Qwen fallback"
 
 
-def test_nlp_router_verifies_generic_schedule_before_executing(monkeypatch):
-    from app.services.chat_client_context import clear_client_context, get_schedule_proposals
+def test_nlp_router_generic_plan_auto_suggests_via_preference_scheduler(monkeypatch, tmp_path):
+    """"plan this week" / "suggest a schedule for my tasks" auto-builds a preview
+    for all flexible tasks (deadlines + study window + breaks), instead of the
+    per-task propose flow that asks for an event name and duration."""
+
+    from app.services import event_classification as clf_mod
+    from app.services import productivity_preferences as prefs_mod
+
+    monkeypatch.setattr(prefs_mod, "_store_path", tmp_path / "p.json")
+    monkeypatch.setattr(clf_mod, "_store_path", tmp_path / "c.json")
+
+    from app.services.chat_client_context import (
+        clear_client_context,
+        get_schedule_proposals,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+    )
     from app.services.nlp_router_chat_service import NlpRouterChatService
 
     service = NlpRouterChatService()
 
-    async def fake_fetch_plan(*_args, **_kwargs):
-        return [
-            {
-                "name": "propose_schedule_change",
-                "arguments": {
-                    "task_name": "this week",
-                    "hours": 1,
-                    "deadline": "2026-06-05T23:59:00",
-                    "estimated_minutes": 60,
-                },
-            }
-        ]
+    async def fail_fetch_plan(*_args, **_kwargs):
+        raise AssertionError("a generic plan request must not reach the per-task propose flow")
 
     try:
-        monkeypatch.setattr(service, "_fetch_plan", fake_fetch_plan)
+        monkeypatch.setattr(service, "_fetch_plan", fail_fetch_plan)
+        set_client_today("2026-06-09")
+        set_calendar_events([])
+        set_tasks([{"title": "HW6", "estimated_minutes": 120, "due_date": "2026-06-20T23:59:00"}])
         reply = asyncio.run(service.run_turn("plan this week"))
         proposals = get_schedule_proposals()
     finally:
         clear_client_context()
 
-    assert "what event name" in reply.lower()
+    # Came from the preference scheduler (default daytime window), preview-only.
+    assert "study window" in reply.lower()
+    assert "apply these" in reply.lower()
     assert proposals == []
 
 

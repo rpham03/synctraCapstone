@@ -1033,6 +1033,28 @@ class NlpRouterChatService:
             for target in self._RETRY_TARGETS
         )
 
+    _SUGGEST_SCHEDULE = re.compile(
+        r"\b(?:suggest|recommend|plan|build|create|make|put together|generate|"
+        r"organi[sz]e|draft|arrange|propose)\b[^.?!]*?\b(?:schedule|study\s+plan|"
+        r"week|tasks?|assignments?|homework|workload)\b"
+        r"|\b(?:plan|schedule|organi[sz]e)\s+my\s+(?:tasks?|week|day|assignments?|"
+        r"homework|study|studying|workload)\b",
+        re.IGNORECASE,
+    )
+
+    def _is_suggest_schedule_request(self, text: str) -> bool:
+        """A generic "suggest a schedule for my tasks/week" (no specific task/time).
+
+        Excludes requests that name an explicit duration ("schedule 2 hours for
+        lab 7") or a clock time ("add a study block at 8pm") — those are specific
+        adds handled by the per-task propose / add flow instead.
+        """
+        if re.search(r"\b\d+(?:\.\d+)?\s*(?:hour|hr|hrs|h|minute|min)s?\b", text, re.IGNORECASE):
+            return False
+        if self._message_has_clock_time(text):
+            return False
+        return bool(self._SUGGEST_SCHEDULE.search(text))
+
     def _is_bare_retry(self, text: str) -> bool:
         """A terse retry ("try again", "another", "try aain") with no other words.
 
@@ -1202,6 +1224,14 @@ class NlpRouterChatService:
             return (
                 "I don't have a schedule to redo yet. Tell me what to schedule — "
                 'for example, "suggest a schedule for my tasks".'
+            )
+
+        # Direct "suggest/plan a schedule for my tasks/week" — auto-build a preview
+        # for ALL flexible tasks (using their deadlines + the study window, with
+        # breaks), instead of the per-task propose flow that asks for a duration.
+        if self._is_suggest_schedule_request(lower):
+            return await self._offer_preference_schedule(
+                message, seed=None, user_id=user_id
             )
 
         has_cue = bool(self._PRODUCTIVE_CUE.search(lower)) or "preference" in lower

@@ -591,3 +591,32 @@ def test_router_bare_try_again_with_nothing_pending_asks_what_to_schedule(monkey
         clear_client_context()
 
     assert "don't have a schedule to redo" in reply.lower()
+
+
+def test_default_daytime_window_when_no_prefs_or_settings(tmp_path, monkeypatch):
+    """With no Settings window and no saved period, scheduling still works using
+    a sensible daytime default (never overnight) with breaks — not a refusal."""
+
+    _study_setup(tmp_path, monkeypatch)  # also pins now=08:00, today=2026-06-08
+    from app.services.chat_client_context import (
+        clear_client_context,
+        set_calendar_events,
+        set_client_today,
+        set_tasks,
+        set_user_id,
+    )
+
+    try:
+        set_user_id("u")
+        set_client_today("2026-06-08")
+        set_calendar_events([])
+        # No prefs.set_preferences and no set_study_preferences on purpose.
+        set_tasks([{"title": "HW6", "estimated_minutes": 120, "due_date": "2026-06-20T23:59:00"}])
+        result = sched.suggest_preference_schedule(user_id="u")
+    finally:
+        clear_client_context()
+
+    assert result["proposals"]  # produced a schedule rather than refusing
+    for p in result["proposals"]:
+        hour = int(p["start_time"][11:13])
+        assert 9 <= hour < 21  # default daytime window, never 3 AM
