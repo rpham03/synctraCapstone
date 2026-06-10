@@ -170,7 +170,14 @@ class HabitSchedulingEngine:
         calendar_events: Sequence[CalendarEvent],
         sessions: Sequence[HabitSession],
     ) -> List[ScoredCandidate]:
-        duration = timedelta(minutes=habit.duration_minutes)
+        max_m = max(
+            habit.duration_minutes,
+            habit.duration_max_minutes or habit.duration_minutes,
+        )
+        min_m = habit.duration_minutes
+        durations = [timedelta(minutes=max_m)]
+        if max_m > min_m:
+            durations.append(timedelta(minutes=min_m))
         occupied = occupied_with_sessions(
             calendar_events,
             sessions,
@@ -195,30 +202,33 @@ class HabitSchedulingEngine:
 
             time_ranges = habit.preferred_time_ranges.get(weekday)
             day_candidates: List[ScoredCandidate] = []
-            if time_ranges:
-                for tr in time_ranges:
-                    range_start = day.replace(hour=tr.start_minutes // 60, minute=tr.start_minutes % 60)
-                    range_end = day.replace(hour=tr.end_minutes // 60, minute=tr.end_minutes % 60)
-                    if tr.end_minutes <= tr.start_minutes:
-                        range_end += timedelta(days=1)
-                    day_candidates.extend(
-                        self._slots_in_window(
-                            range_start,
-                            range_end,
-                            duration,
-                            occupied,
-                            habit.id,
+            for duration in durations:
+                day_candidates.clear()
+                if time_ranges:
+                    for tr in time_ranges:
+                        range_start = day.replace(hour=tr.start_minutes // 60, minute=tr.start_minutes % 60)
+                        range_end = day.replace(hour=tr.end_minutes // 60, minute=tr.end_minutes % 60)
+                        if tr.end_minutes <= tr.start_minutes:
+                            range_end += timedelta(days=1)
+                        day_candidates.extend(
+                            self._slots_in_window(
+                                range_start,
+                                range_end,
+                                duration,
+                                occupied,
+                                habit.id,
+                            )
                         )
-                    )
-                # Flexible fallback when preferred windows are blocked by fixed events.
-                if not day_candidates:
+                    if not day_candidates:
+                        day_candidates.extend(
+                            self._slots_in_window(window_start, window_end, duration, occupied, habit.id)
+                        )
+                else:
                     day_candidates.extend(
                         self._slots_in_window(window_start, window_end, duration, occupied, habit.id)
                     )
-            else:
-                day_candidates.extend(
-                    self._slots_in_window(window_start, window_end, duration, occupied, habit.id)
-                )
+                if day_candidates:
+                    break
             candidates.extend(day_candidates)
             day += timedelta(days=1)
 

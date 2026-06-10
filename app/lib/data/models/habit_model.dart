@@ -23,6 +23,7 @@ class HabitModel {
   final String userId;
   final String title;
   final int durationMinutes;
+  final int durationMaxMinutes;
   final int frequencyPerWeek;
   final List<int> preferredDays;
   final Map<String, List<HabitTimeRange>> preferredTimeRanges;
@@ -34,6 +35,7 @@ class HabitModel {
     required this.userId,
     required this.title,
     required this.durationMinutes,
+    this.durationMaxMinutes = 0,
     required this.frequencyPerWeek,
     required this.preferredDays,
     required this.preferredTimeRanges,
@@ -59,6 +61,7 @@ class HabitModel {
     String? userId,
     String? title,
     int? durationMinutes,
+    int? durationMaxMinutes,
     int? frequencyPerWeek,
     List<int>? preferredDays,
     Map<String, List<HabitTimeRange>>? preferredTimeRanges,
@@ -70,6 +73,7 @@ class HabitModel {
         userId: userId ?? this.userId,
         title: title ?? this.title,
         durationMinutes: durationMinutes ?? this.durationMinutes,
+        durationMaxMinutes: durationMaxMinutes ?? this.durationMaxMinutes,
         frequencyPerWeek: frequencyPerWeek ?? this.frequencyPerWeek,
         preferredDays: preferredDays ?? this.preferredDays,
         preferredTimeRanges:
@@ -81,6 +85,9 @@ class HabitModel {
   Map<String, dynamic> toCreateJson() => {
         'title': title,
         'duration_minutes': durationMinutes,
+        'duration_max_minutes': durationMaxMinutes >= durationMinutes
+            ? durationMaxMinutes
+            : durationMinutes,
         'frequency_per_week': frequencyPerWeek,
         'preferred_days': preferredDays,
         'preferred_time_ranges': {
@@ -105,11 +112,14 @@ class HabitModel {
         }
       }
     }
+    final dur = json['duration_minutes'] as int? ?? 30;
+    final durMax = json['duration_max_minutes'] as int? ?? dur;
     return HabitModel(
       id: json['id'] as String? ?? '',
       userId: json['user_id'] as String? ?? '',
       title: json['title'] as String? ?? 'Habit',
-      durationMinutes: json['duration_minutes'] as int? ?? 30,
+      durationMinutes: dur,
+      durationMaxMinutes: durMax >= dur ? durMax : dur,
       frequencyPerWeek: json['frequency_per_week'] as int? ?? 1,
       preferredDays: (json['preferred_days'] as List<dynamic>? ?? [])
           .map((d) => d as int)

@@ -69,9 +69,7 @@ class _HabitsScreenState extends State<HabitsScreen> {
       await _service.updateHabit(id, payload);
     }
     await _load();
-    if (_sessionStore.hasCachedCalendarEvents) {
-      await _sessionStore.refreshFromCachedEvents();
-    }
+    await _sessionStore.refreshAfterHabitChange();
     if (mounted) {
       _closeEditor();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -101,9 +99,7 @@ class _HabitsScreenState extends State<HabitsScreen> {
     if (ok != true) return;
     await _service.deleteHabit(habit.id);
     await _load();
-    if (_sessionStore.hasCachedCalendarEvents) {
-      await _sessionStore.refreshFromCachedEvents();
-    }
+    await _sessionStore.refreshAfterHabitChange();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Deleted ${habit.title}')),
@@ -292,7 +288,7 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: AppTokens.space8),
             Text(
-              'Create flexible routines like lunch, gym, or focus time. '
+              'Create flexible routines like gym, study blocks, or breaks. '
               'Synctra schedules them around your classes.',
               textAlign: TextAlign.center,
               style: GoogleFonts.inter(

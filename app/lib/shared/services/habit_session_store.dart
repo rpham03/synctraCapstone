@@ -19,18 +19,32 @@ class HabitSessionStore extends ChangeNotifier {
   final HabitService _service;
   final List<HabitSessionModel> _sessions = [];
   List<EventModel> _lastCalendarEvents = [];
+  DateTime? _lastWeekStart;
   bool _scheduling = false;
+  int _scheduleGeneration = 0;
 
   HabitSessionStore({HabitService? service})
       : _service = service ?? HabitService();
 
   List<HabitSessionModel> get sessions => List.unmodifiable(_sessions);
+  List<EventModel> get calendarEvents => List.unmodifiable(_lastCalendarEvents);
   bool get isScheduling => _scheduling;
-  bool get hasCachedCalendarEvents => _lastCalendarEvents.isNotEmpty;
+
+  /// Sunday-start week anchor (matches [CalendarScreen] navigation).
+  static DateTime startOfWeek(DateTime d) {
+    final day = DateTime(d.year, d.month, d.day);
+    return day.subtract(Duration(days: day.weekday % 7));
+  }
 
   Future<void> refreshFromCachedEvents({DateTime? weekStart}) => refreshSchedule(
         calendarEvents: _lastCalendarEvents,
         weekStart: weekStart,
+      );
+
+  Future<void> refreshAfterHabitChange({DateTime? weekStart}) =>
+      refreshSchedule(
+        calendarEvents: _lastCalendarEvents,
+        weekStart: weekStart ?? _lastWeekStart ?? startOfWeek(DateTime.now()),
       );
 
   void setCalendarEvents(Iterable<EventModel> events) {
@@ -82,11 +96,16 @@ class HabitSessionStore extends ChangeNotifier {
     required Iterable<EventModel> calendarEvents,
     DateTime? weekStart,
   }) async {
+    final generation = ++_scheduleGeneration;
     _lastCalendarEvents = calendarEvents.toList();
+    if (weekStart != null) {
+      _lastWeekStart = startOfWeek(weekStart);
+    }
     _scheduling = true;
     notifyListeners();
     try {
       final habits = await _service.listHabits();
+      if (generation != _scheduleGeneration) return;
       if (habits.where((h) => h.isActive).isEmpty) {
         _sessions.clear();
         await _persist();
@@ -96,6 +115,7 @@ class HabitSessionStore extends ChangeNotifier {
         calendarEvents: _lastCalendarEvents,
         weekStart: weekStart,
       );
+      if (generation != _scheduleGeneration) return;
       _sessions
         ..clear()
         ..addAll(sessions);
@@ -103,8 +123,10 @@ class HabitSessionStore extends ChangeNotifier {
     } catch (e) {
       debugPrint('Habit schedule failed: $e');
     } finally {
-      _scheduling = false;
-      notifyListeners();
+      if (generation == _scheduleGeneration) {
+        _scheduling = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -119,6 +141,7 @@ class HabitSessionStore extends ChangeNotifier {
       );
       return;
     }
+    final generation = ++_scheduleGeneration;
     _scheduling = true;
     notifyListeners();
     try {
@@ -131,6 +154,7 @@ class HabitSessionStore extends ChangeNotifier {
         newEvent: newEvent,
         weekStart: weekStart,
       );
+      if (generation != _scheduleGeneration) return;
       _sessions
         ..clear()
         ..addAll(sessions);
@@ -138,8 +162,10 @@ class HabitSessionStore extends ChangeNotifier {
     } catch (e) {
       debugPrint('Habit reschedule failed: $e');
     } finally {
-      _scheduling = false;
-      notifyListeners();
+      if (generation == _scheduleGeneration) {
+        _scheduling = false;
+        notifyListeners();
+      }
     }
   }
 
