@@ -14,11 +14,33 @@ import '../utils/task_timeline_utils.dart';
 class CanvasTasksService extends ChangeNotifier {
   static const _cacheKey = 'synctra_canvas_tasks_v1';
   static const _lastSyncKey = 'synctra_canvas_last_sync_ms';
+  static const _tokenKey = 'synctra_canvas_token_v1';
   static const _maxPastRetentionDays = 120;
 
   DateTime? _lastSyncedAt;
 
   DateTime? get lastSyncedAt => _lastSyncedAt;
+
+  /// The student's saved Canvas personal access token, or null if not set.
+  Future<String?> loadToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString(_tokenKey)?.trim();
+    return (token == null || token.isEmpty) ? null : token;
+  }
+
+  Future<bool> hasToken() async => (await loadToken()) != null;
+
+  Future<void> saveToken(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_tokenKey, token.trim());
+    notifyListeners();
+  }
+
+  Future<void> clearToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_tokenKey);
+    notifyListeners();
+  }
 
   Future<void> loadLastSyncTime() async {
     final prefs = await SharedPreferences.getInstance();
@@ -93,8 +115,12 @@ class CanvasTasksService extends ChangeNotifier {
   /// Fetches from backend, merges into cache (keeps older past dues), returns all cached.
   Future<List<TaskModel>> syncFromApi() async {
     final existing = await loadCached();
+    final token = await loadToken();
     final response = await Dio().get<Map<String, dynamic>>(
       '${ApiConstants.baseUrl}/canvas/assignments',
+      options: (token != null)
+          ? Options(headers: {'X-Canvas-Token': token})
+          : null,
     );
     final raw = response.data?['tasks'];
     if (raw is! List) {

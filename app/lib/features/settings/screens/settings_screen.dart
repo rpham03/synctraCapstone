@@ -12,6 +12,7 @@ import '../../../data/models/user_settings.dart';
 import '../../../data/services/course_import_service.dart';
 import '../../../features/calendar/widgets/calendar_view_pill_toggle.dart';
 import '../../../shared/services/auth_service.dart';
+import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/services/ical_feed_service.dart';
 import '../../../shared/services/theme_mode_notifier.dart';
 import '../../../shared/services/user_settings_service.dart';
@@ -449,14 +450,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       'Integrations',
                       description: 'External services Synctra can connect to.',
                     ),
-                    SettingsInsetCard(
-                      padding: EdgeInsets.zero,
-                      child: SettingsActionRow(
-                        icon: Icons.school_outlined,
-                        label: 'Canvas LMS',
-                        description: ApiConstants.canvasWebBaseUrl,
-                      ),
-                    ),
+                    const _CanvasIntegrationCard(),
                     if (PreviewFlags.noAuth) ...[
                       const SettingsSectionHeader('Preview'),
                       SettingsInsetCard(
@@ -509,6 +503,212 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
             ),
+    );
+  }
+}
+
+/// Canvas LMS card: lets a student paste their personal access token (hidden by
+/// default), saves it on-device, and verifies it by syncing assignments.
+class _CanvasIntegrationCard extends StatefulWidget {
+  const _CanvasIntegrationCard();
+
+  @override
+  State<_CanvasIntegrationCard> createState() => _CanvasIntegrationCardState();
+}
+
+class _CanvasIntegrationCardState extends State<_CanvasIntegrationCard> {
+  final _canvas = GetIt.instance<CanvasTasksService>();
+  final _controller = TextEditingController();
+  bool _obscure = true;
+  bool _busy = false;
+  bool _connected = false;
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _canvas.hasToken().then((has) {
+      if (!mounted) return;
+      setState(() {
+        _connected = has;
+        _loaded = true;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _connect() async {
+    final token = _controller.text.trim();
+    if (token.isEmpty) {
+      _toast('Paste your Canvas access token first.');
+      return;
+    }
+    setState(() => _busy = true);
+    await _canvas.saveToken(token);
+    try {
+      final tasks = await _canvas.syncFromApi();
+      if (!mounted) return;
+      _controller.clear();
+      setState(() {
+        _connected = true;
+        _busy = false;
+        _obscure = true;
+      });
+      _toast('Canvas connected — ${tasks.length} assignment(s) synced.');
+    } catch (_) {
+      // Bad/expired token or unreachable Canvas — drop it so a broken token
+      // doesn't silently linger and block future syncs.
+      await _canvas.clearToken();
+      if (!mounted) return;
+      setState(() {
+        _connected = false;
+        _busy = false;
+      });
+      _toast('Could not reach Canvas. Check the token and try again.');
+    }
+  }
+
+  Future<void> _disconnect() async {
+    await _canvas.clearToken();
+    if (!mounted) return;
+    _controller.clear();
+    setState(() => _connected = false);
+    _toast('Canvas disconnected.');
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final brightness = Theme.of(context).brightness;
+    return SettingsInsetCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.school_outlined,
+                  size: AppTokens.iconStandard, color: scheme.onSurface),
+              const SizedBox(width: AppTokens.space16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Canvas LMS',
+                      style: CalendarTextStyles.upcomingRow(brightness)
+                          .copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: AppTokens.space4),
+                    Text(
+                      ApiConstants.canvasWebBaseUrl,
+                      style: CalendarTextStyles.hourLabel(brightness)
+                          .copyWith(height: 1.45),
+                    ),
+                  ],
+                ),
+              ),
+              if (_loaded) _CanvasStatusChip(connected: _connected),
+            ],
+          ),
+          const SizedBox(height: AppTokens.space16),
+          TextField(
+            controller: _controller,
+            obscureText: _obscure,
+            enableSuggestions: false,
+            autocorrect: false,
+            decoration: InputDecoration(
+              labelText:
+                  _connected ? 'Replace access token' : 'Canvas access token',
+              hintText: 'Paste your token…',
+              suffixIcon: IconButton(
+                icon: Icon(_obscure
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined),
+                tooltip: _obscure ? 'Show token' : 'Hide token',
+                onPressed: () => setState(() => _obscure = !_obscure),
+              ),
+            ),
+          ),
+          const SizedBox(height: AppTokens.space8),
+          Text(
+            'Create one in Canvas → Account → Settings → + New Access Token. '
+            'Your token is stored only on this device.',
+            style:
+                CalendarTextStyles.hourLabel(brightness).copyWith(height: 1.45),
+          ),
+          const SizedBox(height: AppTokens.space16),
+          Row(
+            children: [
+              if (_busy)
+                SizedBox(
+                  height: AppTokens.buttonHeight,
+                  width: 120,
+                  child: Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: scheme.primary),
+                    ),
+                  ),
+                )
+              else ...[
+                SynctraPrimaryButton(
+                  onPressed: _connect,
+                  label: _connected ? 'Reconnect' : 'Connect',
+                ),
+                if (_connected) ...[
+                  const SizedBox(width: AppTokens.space8),
+                  TextButton(
+                    onPressed: _disconnect,
+                    child: const Text('Disconnect'),
+                  ),
+                ],
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Small "Connected / Not connected" pill for the Canvas card header.
+class _CanvasStatusChip extends StatelessWidget {
+  const _CanvasStatusChip({required this.connected});
+
+  final bool connected;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = connected ? AppColors.success : scheme.onSurfaceVariant;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          connected ? Icons.check_circle : Icons.cancel_outlined,
+          size: 16,
+          color: color,
+        ),
+        const SizedBox(width: AppTokens.space4),
+        Text(
+          connected ? 'Connected' : 'Not connected',
+          style:
+              TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+        ),
+      ],
     );
   }
 }

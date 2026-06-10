@@ -27,9 +27,37 @@ def test_canvas_assignments_without_token_returns_503(monkeypatch):
     import app.core.config.settings as settings_mod
 
     monkeypatch.setattr(settings_mod.settings, "canvas_api_token", "")
+    # No X-Canvas-Token header and no env fallback -> ask the student to add one.
     r = client.get("/api/v1/canvas/assignments")
     assert r.status_code == 503
-    assert "CANVAS_API_TOKEN" in r.json().get("detail", "")
+    assert "Canvas token" in r.json().get("detail", "")
+
+
+def test_canvas_assignments_uses_student_token_header(monkeypatch):
+    """A per-student X-Canvas-Token header is honored even with no env token."""
+    import app.core.config.settings as settings_mod
+    import app.api.v1.routes.canvas as canvas_mod
+
+    monkeypatch.setattr(settings_mod.settings, "canvas_api_token", "")
+
+    captured: dict = {}
+
+    class _FakeClient:
+        def __init__(self, token, base_url=None):
+            captured["token"] = token
+            captured["base_url"] = base_url
+
+        async def list_tasks_normalized(self):
+            return [{"id": "1", "title": "HW1"}]
+
+    monkeypatch.setattr(canvas_mod, "CanvasClient", _FakeClient)
+    r = client.get(
+        "/api/v1/canvas/assignments",
+        headers={"X-Canvas-Token": "student-token-123"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"tasks": [{"id": "1", "title": "HW1"}]}
+    assert captured["token"] == "student-token-123"
 
 
 def test_chat_message(monkeypatch):
