@@ -14,6 +14,7 @@ import '../../../data/services/course_import_service.dart';
 import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
+import '../../../shared/utils/undo_snackbar.dart';
 import '../../../shared/utils/duration_format.dart';
 import '../../../shared/utils/sync_time_format.dart';
 import '../../../shared/utils/task_timeline_utils.dart';

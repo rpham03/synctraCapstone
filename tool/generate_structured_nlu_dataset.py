@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate Syntra's shared 1,000-example structured NLU dataset."""
+"""Generate Syntra's shared 5,000-example structured NLU dataset."""
 
 from __future__ import annotations
 

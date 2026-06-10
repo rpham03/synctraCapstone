@@ -32,6 +32,9 @@ _DEFAULT_TASK_MINUTES = 60
 # (e.g. a 4h task -> two 2h sessions; 3h -> 90+90).
 _MAX_SESSION_MINUTES = 120
 _DEFAULT_BREAK_MINUTES = 15
+# Used when the user hasn't set a Settings study window or a productive period.
+_DEFAULT_WINDOW_START = "09:00"
+_DEFAULT_WINDOW_END = "21:00"
 
 
 def _split_minutes(total: int, cap: int = _MAX_SESSION_MINUTES) -> list[int]:
@@ -146,14 +149,18 @@ def suggest_preference_schedule(
         session_cap = _MAX_SESSION_MINUTES
         window_label = ", ".join(p["period"] for p in prefs)
     else:
-        return {
-            "proposals": [],
-            "message": "Tell me when you're most productive first (e.g. \"I'm productive at night\"), "
-            "or set your study window in Settings.",
-            "signature": (),
-        }
+        # No Settings window and no saved period — use a sensible daytime
+        # default so a generic "suggest a schedule for my tasks" still works
+        # (placed during the day with breaks, never overnight).
+        windows = [(_DEFAULT_WINDOW_START, _DEFAULT_WINDOW_END)]
+        session_cap = _MAX_SESSION_MINUTES
+        window_label = (
+            f"{_pretty_clock(_DEFAULT_WINDOW_START)}–{_pretty_clock(_DEFAULT_WINDOW_END)}"
+        )
     session_cap = max(15, min(int(session_cap), 24 * 60))
-    break_minutes = max(0, int(break_minutes))
+    # Always leave a real break between same-day sessions — at least 15 min and
+    # at most 30 min, regardless of the (smaller) Settings default.
+    break_minutes = max(15, min(int(break_minutes), 30))
 
     events = get_calendar_events()
     classified = event_classification.classify_all_calendar_events(events, user_id=uid)["events"]

@@ -7,6 +7,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/router/app_router.dart';
 import 'shared/services/canvas_tasks_service.dart';
+import 'data/services/collaboration_service.dart';
 import 'shared/services/manual_events_store.dart';
 import 'shared/services/synctra_chat_service.dart';
 import 'shared/services/synctra_chat_store.dart';
@@ -51,8 +52,13 @@ Future<void> main() async {
 void _loadUserScopedData() {
   final store = GetIt.instance<SuggestedScheduleStore>();
   final habitStore = GetIt.instance<HabitSessionStore>();
+  final manual = GetIt.instance<ManualEventsStore>();
+  // loadPersisted/syncFromRemote reconcile the local cache with Supabase, so
+  // chat blocks and "+" events saved on any device reappear after login.
   unawaited(store.loadPersisted());
   unawaited(habitStore.loadPersisted());
+  unawaited(manual.syncFromRemote());
+  unawaited(CollaborationService().syncConfirmedEventsToCalendar());
   Supabase.instance.client.auth.onAuthStateChange.listen((data) {
     switch (data.event) {
       case AuthChangeEvent.initialSession:
@@ -60,7 +66,8 @@ void _loadUserScopedData() {
       case AuthChangeEvent.signedOut:
         unawaited(store.loadPersisted());
         unawaited(habitStore.loadPersisted());
-        GetIt.instance<ManualEventsStore>().refresh();
+        unawaited(manual.syncFromRemote());
+        unawaited(CollaborationService().syncConfirmedEventsToCalendar());
       default:
         break;
     }

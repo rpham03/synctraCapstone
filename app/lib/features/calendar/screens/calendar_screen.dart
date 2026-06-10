@@ -20,6 +20,7 @@ import '../../../data/models/event_model.dart';
 import '../../../data/models/habit_model.dart';
 import '../../../data/models/schedule_block_model.dart';
 import '../../../data/models/task_model.dart';
+import '../../../data/services/collaboration_service.dart';
 import '../../../data/services/course_import_service.dart';
 import '../../../shared/services/calendar_view_prefs.dart';
 import '../../../shared/services/canvas_tasks_service.dart';
@@ -103,6 +104,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   final ScrollController _timeScrollController = ScrollController();
   Timer? _nowTicker;
+  // Live-ish: poll for a confirmed group meeting so a participant's calendar
+  // updates within seconds of the organizer confirming. Tunable down to ~1s.
+  static const _collabPollInterval = Duration(seconds: 3);
+  Timer? _collabPollTimer;
+  bool _collabSyncing = false;
 
   /// Full 24-hour day column: midnight (0) through 11 PM (23).
   static const int _firstHour = 0;
@@ -131,6 +137,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _loadManualTaskEvents();
     _loadCourseImports();
     _reloadCanvasEvents();
+    // Pull any confirmed group meetings onto this user's calendar (the
+    // participant side of collaboration — not just the organizer), now and then
+    // on a short interval so it appears live without a manual refresh.
+    unawaited(_syncConfirmedCollabEvents());
+    _collabPollTimer =
+        Timer.periodic(_collabPollInterval, (_) => _syncConfirmedCollabEvents());
     _nowTicker = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted) setState(() {});
     });
@@ -218,8 +230,21 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _habitStore.removeListener(_onHabitStoreChanged);
     _manualEventsStore.removeListener(_loadManualEvents);
     _nowTicker?.cancel();
+    _collabPollTimer?.cancel();
     _timeScrollController.dispose();
     super.dispose();
+  }
+
+  /// Add any confirmed group meeting to this user's calendar, guarded so polls
+  /// never overlap. Safe no-op when signed out / offline.
+  Future<void> _syncConfirmedCollabEvents() async {
+    if (_collabSyncing || !mounted) return;
+    _collabSyncing = true;
+    try {
+      await CollaborationService().syncConfirmedEventsToCalendar();
+    } finally {
+      _collabSyncing = false;
+    }
   }
 
   Iterable<EventModel> _allEvents() sync* {
@@ -4205,9 +4230,14 @@ class _DayTimeColumn extends StatelessWidget {
     }
     if (s.block != null) {
       final b = s.block!;
-      final bg = b.isAiGenerated
-          ? AppColors.aiStudyBlock
-          : AppColors.confirmedStudyBlock;
+      // A confirmed group meeting gets its own color, distinct from study blocks.
+      final isCollab = b.taskId.startsWith('collab-') ||
+          b.description == 'Confirmed collaborative event';
+      final bg = isCollab
+          ? AppColors.collabEvent
+          : (b.isAiGenerated
+              ? AppColors.aiStudyBlock
+              : AppColors.confirmedStudyBlock);
       final ht = chipHeight(24);
       if (ht <= 0) return const SizedBox.shrink();
       final isDragging = activeDragId == s.id;
@@ -4218,7 +4248,7 @@ class _DayTimeColumn extends StatelessWidget {
         block: b,
         color: bg,
         onTap: () => onTapBlock(b),
-        flexible: b.isAiGenerated,
+        flexible: !isCollab && b.isAiGenerated,
         hideContent: false,
       );
       return Positioned(
@@ -4241,7 +4271,7 @@ class _DayTimeColumn extends StatelessWidget {
               widthPx: width,
               leftPx: left,
               accentColor: bg,
-              flexible: b.isAiGenerated,
+              flexible: !isCollab && b.isAiGenerated,
               block: b,
             ),
             pos,
@@ -4746,9 +4776,12 @@ class _StudyBlockChip extends StatelessWidget {
     final timeLabel =
         '${DateFormat('h:mm a').format(block.startTime)} – ${DateFormat('h:mm a').format(block.endTime)}';
 
-    final fill = flexible ? color.withValues(alpha: 0.25) : color;
+    // Solid fill so applied blocks read clearly on the grid (not a faint/blurred
+    // preview). Title/time/icon use the contrast color so they stay readable on
+    // the solid fill; the dashed border + sparkle still mark an AI suggestion.
+    final fill = color;
     final borderColor =
-        flexible ? color.withValues(alpha: 0.7) : Colors.transparent;
+        flexible ? onColor.withValues(alpha: 0.55) : Colors.transparent;
 
     return Tooltip(
       message: hideContent ? '' : 'Click to edit · drag to move',
@@ -4782,7 +4815,7 @@ class _StudyBlockChip extends StatelessWidget {
                                     Icon(
                                       Icons.auto_awesome,
                                       size: 10,
-                                      color: color,
+                                      color: onColor,
                                     ),
                                     const SizedBox(width: AppTokens.space4),
                                   ],
@@ -4791,9 +4824,7 @@ class _StudyBlockChip extends StatelessWidget {
                                       block.taskTitle,
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: CalendarTextStyles.eventTitle(
-                                        flexible ? color : onColor,
-                                      ),
+                                      style: CalendarTextStyles.eventTitle(onColor),
                                     ),
                                   ),
                                 ],
@@ -4803,9 +4834,7 @@ class _StudyBlockChip extends StatelessWidget {
                                   timeLabel,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: CalendarTextStyles.eventTime(
-                                    flexible ? color : onColor,
-                                  ),
+                                  style: CalendarTextStyles.eventTime(onColor),
                                 ),
                             ],
                           ),

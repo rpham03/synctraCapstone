@@ -78,8 +78,10 @@ class AppRouter {
           final isAuth = session != null;
           final isOnAuth = loc == '/login' || loc == '/signup';
 
-          // Allow /onboarding without login (preview / local-only setup).
-          if (!isAuth && !isOnAuth && !isOnboarding) return '/login';
+          // Onboarding requires login: never show the study-preferences wizard
+          // before the auth screens. It appears once right after signup (gated by
+          // onboardingComplete below) and not again once completed.
+          if (!isAuth && !isOnAuth) return '/login';
 
           if (isAuth && isOnAuth) {
 

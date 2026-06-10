@@ -21,7 +21,7 @@ The trained token-classification model is saved under ``slot_model`` inside
 the intent-model directory. Runtime rules still normalize dates/times and
 verify required slots before any tool executes.
 
-By default this trainer requires the shared 1,000-row structured dataset and
+By default this trainer requires the shared 5,000-row structured dataset and
 uses a deterministic 70% training / 30% testing split.
 """
 
@@ -38,6 +38,13 @@ from generate_structured_nlu_dataset import (
     DEFAULT_DATASET_SIZE,
     TEST_RATIO,
     balanced_split_indices,
+)
+from training_metrics import (
+    benchmark_model,
+    model_information,
+    text_fingerprint,
+    token_classification_report,
+    write_json,
 )
 
 
@@ -280,7 +287,8 @@ def train(args: argparse.Namespace) -> None:
         trainer_kwargs["tokenizer"] = tokenizer
 
     trainer = Trainer(**trainer_kwargs)
-    trainer.train()
+    train_result = trainer.train()
+    prediction_output = trainer.predict(dataset["test"])
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     trainer.save_model(output)
@@ -289,21 +297,111 @@ def train(args: argparse.Namespace) -> None:
         json.dumps({"labels": SLOT_LABELS}, indent=2),
         encoding="utf-8",
     )
-    (output / "training_meta.json").write_text(
-        json.dumps(
-            {
-                "structured_examples": len(examples),
-                "canonical_examples": len(canonical_examples),
+    predicted = np.argmax(prediction_output.predictions, axis=-1)
+    expected = np.asarray(prediction_output.label_ids)
+    true_sequences: list[list[int]] = []
+    predicted_sequences: list[list[int]] = []
+    for expected_row, predicted_row in zip(expected, predicted):
+        mask = expected_row != -100
+        true_sequences.append(expected_row[mask].astype(int).tolist())
+        predicted_sequences.append(predicted_row[mask].astype(int).tolist())
+    report = token_classification_report(
+        true_sequences,
+        predicted_sequences,
+        SLOT_LABELS,
+    )
+    held_out_messages = [examples[index].user_message for index in test_indices]
+    report.update(
+        {
+            "report_type": "trained_slot_extractor_held_out_test",
+            "split": {
+                "seed": args.seed,
+                "train_ratio": round(1 - args.test_ratio, 6),
+                "test_ratio": args.test_ratio,
+                "total_examples": len(examples),
                 "train_examples": len(dataset["train"]),
                 "test_examples": len(dataset["test"]),
-                "test_ratio": args.test_ratio,
+                "train_text_sha256": text_fingerprint(
+                    [examples[index].user_message for index in train_indices]
+                ),
+                "test_text_sha256": text_fingerprint(held_out_messages),
+            },
+            "training": {
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "learning_rate": args.learning_rate,
+                "weight_decay": kwargs["weight_decay"],
+                "max_sequence_length": 256,
+                "train_runtime_seconds": train_result.metrics.get("train_runtime"),
+                "train_samples_per_second": train_result.metrics.get(
+                    "train_samples_per_second"
+                ),
+                "train_steps_per_second": train_result.metrics.get(
+                    "train_steps_per_second"
+                ),
+                "train_loss": train_result.metrics.get("train_loss"),
+                "eval_loss": prediction_output.metrics.get(
+                    "test_loss", prediction_output.metrics.get("eval_loss")
+                ),
+                "eval_runtime_seconds": prediction_output.metrics.get(
+                    "test_runtime", prediction_output.metrics.get("eval_runtime")
+                ),
+                "eval_samples_per_second": prediction_output.metrics.get(
+                    "test_samples_per_second",
+                    prediction_output.metrics.get("eval_samples_per_second"),
+                ),
                 "rows_without_exact_slot_spans": skipped_without_spans,
-                "base_model": args.base_model,
+            },
+            "model": model_information(
+                model,
+                output,
+                base_model=args.base_model,
+                task="BIO token classification for NLU slot extraction",
+            ),
+            "latency": benchmark_model(model, tokenizer, held_out_messages),
+            "training_history": trainer.state.log_history,
+        }
+    )
+    write_json(output / "slot_metrics.json", report)
+    write_json(
+        output / "training_meta.json",
+        {
+            "structured_examples": len(examples),
+            "canonical_examples": len(canonical_examples),
+            "train_examples": len(dataset["train"]),
+            "test_examples": len(dataset["test"]),
+            "test_ratio": args.test_ratio,
+            "seed": args.seed,
+            "rows_without_exact_slot_spans": skipped_without_spans,
+            "base_model": args.base_model,
+            "entity_micro_f1": report["entity_micro"]["f1"],
+            "exact_sequence_accuracy": report["exact_sequence_accuracy"],
+            "metrics_artifact": "slot_metrics.json",
+        },
+    )
+    print("\n[slot-metrics] real held-out token-classifier results")
+    print(
+        json.dumps(
+            {
+                "entity_micro": report["entity_micro"],
+                "entity_macro_f1": report["entity_macro_f1"],
+                "exact_sequence_accuracy": report["exact_sequence_accuracy"],
+                "token_accuracy_including_o": report["token_accuracy_including_o"],
+                "non_o_token_accuracy": report["non_o_token_accuracy"],
+                "parameters": report["model"]["total_parameters"],
+                "artifact_size_mb": report["model"]["saved_artifact_size_mb"],
+                "latency": report["latency"],
             },
             indent=2,
-        ),
-        encoding="utf-8",
+        )
     )
+    print("\n[slot-metrics] per-slot held-out entity metrics")
+    print(f"{'slot':18} {'precision':>9} {'recall':>8} {'f1':>8} {'support':>8}")
+    for slot, row in report["per_slot"].items():
+        print(
+            f"{slot:18} {row['precision']:>9.4f} {row['recall']:>8.4f} "
+            f"{row['f1']:>8.4f} {row['support']:>8}"
+        )
     print(f"[slot-model] saved to {output}")
 
 

@@ -1,4 +1,6 @@
 // Collaborative scheduling polls: privacy-safe availability, voting, and confirmation.
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:get_it/get_it.dart';
@@ -23,15 +25,54 @@ class CollabScreen extends StatefulWidget {
 }
 
 class _CollabScreenState extends State<CollabScreen> {
+  // How often to re-check the backend for confirmations/votes while this screen
+  // is open. Lower = more "live" but more network calls. Tunable down to ~1s.
+  static const _pollInterval = Duration(seconds: 3);
+
   final _service = CollaborationService();
   var _polls = <CollaborationPoll>[];
   var _loading = true;
   String? _error;
+  Timer? _pollTimer;
+  bool _polling = false;
+  // When the user last voted / set preferences / confirmed locally. Used so a
+  // background poll that was already in flight never reverts a fresh change.
+  DateTime? _lastLocalChangeAt;
 
   @override
   void initState() {
     super.initState();
     _loadPolls();
+    // Live-ish updates: pick up other members' votes and the organizer's
+    // confirmation without a manual refresh.
+    _pollTimer = Timer.periodic(_pollInterval, (_) => _pollUpdates());
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  /// Lightweight background refresh (no spinner, no re-vote): just re-list the
+  /// polls so a confirmation shows live and lands on this user's calendar.
+  Future<void> _pollUpdates() async {
+    if (_polling || !mounted) return;
+    _polling = true;
+    final startedAt = DateTime.now();
+    try {
+      final polls = await _service.listPolls();
+      _syncConfirmedEvents(polls);
+      // Don't let a poll that started before a local vote/preference change
+      // overwrite that change with slightly older server state.
+      final localChange = _lastLocalChangeAt;
+      if (localChange != null && localChange.isAfter(startedAt)) return;
+      if (mounted) setState(() => _polls = polls);
+    } catch (_) {
+      // Transient network error — keep showing the last good state.
+    } finally {
+      _polling = false;
+    }
   }
 
   Future<void> _loadPolls() async {
@@ -220,6 +261,9 @@ class _CollabScreenState extends State<CollabScreen> {
   }
 
   void _replacePoll(CollaborationPoll updated) {
+    // A local vote/preference/confirm just landed — mark it so the next poll
+    // tick won't revert the freshly-updated counts.
+    _lastLocalChangeAt = DateTime.now();
     final index = _polls.indexWhere((poll) => poll.id == updated.id);
     if (index < 0) {
       _polls = [updated, ..._polls];
@@ -229,35 +273,7 @@ class _CollabScreenState extends State<CollabScreen> {
   }
 
   void _syncConfirmedEvents(List<CollaborationPoll> polls) {
-    final store = GetIt.instance<SuggestedScheduleStore>();
-    final additions = <ScheduleBlockModel>[];
-    for (final poll in polls) {
-      if (poll.status != 'confirmed' || poll.confirmedOptionId == null) {
-        continue;
-      }
-      CollaborationOption? option;
-      for (final candidate in poll.options) {
-        if (candidate.id == poll.confirmedOptionId) {
-          option = candidate;
-          break;
-        }
-      }
-      if (option == null) continue;
-      final blockId = 'collab-${poll.id}-${_service.participantIdFor(poll)}';
-      if (store.blocks.any((block) => block.id == blockId)) continue;
-      additions.add(
-        ScheduleBlockModel(
-          id: blockId,
-          taskId: 'collab-${poll.id}',
-          taskTitle: poll.title,
-          startTime: option.startTime,
-          endTime: option.endTime,
-          isAiGenerated: false,
-          description: 'Confirmed collaborative event',
-        ),
-      );
-    }
-    store.addStudyBlocks(additions);
+    _service.addConfirmedPollsToCalendar(polls);
   }
 
   void _showMessage(String message) {
