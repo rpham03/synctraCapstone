@@ -6,6 +6,25 @@ import '../../../data/models/habit_model.dart';
 import '../../../shared/widgets/synctra_page_scaffold.dart';
 import '../../../theme.dart';
 
+/// Theme-aware colors for habit create/edit — follows app light/dark/system.
+@immutable
+class _HabitChrome {
+  const _HabitChrome(this.scheme);
+  final ColorScheme scheme;
+
+  factory _HabitChrome.of(BuildContext context) =>
+      _HabitChrome(Theme.of(context).colorScheme);
+
+  Color get pageBg => scheme.surface;
+  Color get card => scheme.surfaceContainerHigh;
+  Color get fieldFill => scheme.surfaceContainerLow;
+  Color get mutedFill => scheme.surfaceContainerHighest;
+  Color get border => scheme.outlineVariant;
+  Color get textPrimary => scheme.onSurface;
+  Color get textSecondary => scheme.onSurfaceVariant;
+  Color get textHint => scheme.onSurfaceVariant;
+}
+
 /// Reclaim-style habit create / edit form.
 class HabitEditView extends StatefulWidget {
   const HabitEditView({
@@ -312,16 +331,19 @@ class _HabitEditViewState extends State<HabitEditView> {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     final isEdit = widget.habit != null;
     return Scaffold(
-      backgroundColor: AppColors.grey100,
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildTopBar(context, isEdit),
-          Expanded(
-            child: SingleChildScrollView(
-              child: SynctraPageContent(
+      backgroundColor: chrome.pageBg,
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildTopBar(context, isEdit),
+            Expanded(
+              child: SingleChildScrollView(
+                child: SynctraPageContent(
                 maxWidth: 720,
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 48),
                 child: Column(
@@ -439,7 +461,7 @@ class _HabitEditViewState extends State<HabitEditView> {
                         'Set the earliest and latest time Synctra can place this habit each day.',
                         style: GoogleFonts.inter(
                           fontSize: 13,
-                          color: AppColors.textTertiary,
+                          color: chrome.textHint,
                           height: 1.4,
                         ),
                       ),
@@ -484,14 +506,14 @@ class _HabitEditViewState extends State<HabitEditView> {
                       decoration: InputDecoration(
                         hintText: 'Add notes here…',
                         filled: true,
-                        fillColor: AppColors.surface,
+                        fillColor: chrome.fieldFill,
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-                          borderSide: const BorderSide(color: AppColors.border),
+                          borderSide: BorderSide(color: chrome.border),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-                          borderSide: const BorderSide(color: AppColors.border),
+                          borderSide: BorderSide(color: chrome.border),
                         ),
                       ),
                     ),
@@ -499,7 +521,7 @@ class _HabitEditViewState extends State<HabitEditView> {
                     Text(
                       'Notes are saved locally for now.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: AppColors.textTertiary,
+                            color: chrome.textHint,
                           ),
                     ),
                     const SizedBox(height: AppTokens.space32),
@@ -531,39 +553,50 @@ class _HabitEditViewState extends State<HabitEditView> {
             ),
           ),
         ],
+        ),
       ),
     );
   }
 
   Widget _buildTopBar(BuildContext context, bool isEdit) {
+    final chrome = _HabitChrome.of(context);
+    final compact = MediaQuery.sizeOf(context).width < 420;
+    final title = isEdit ? 'Edit habit' : 'New habit';
+
     return Material(
-      color: AppColors.surface,
+      color: chrome.pageBg,
       child: Container(
-        height: AppTokens.pageTopBarHeight,
-        padding: const EdgeInsets.symmetric(horizontal: AppTokens.space16),
-        decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: AppColors.border)),
+        height: compact ? 44 : AppTokens.pageTopBarHeight,
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? AppTokens.space4 : AppTokens.space12,
+        ),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: chrome.border)),
         ),
         child: Row(
           children: [
-            TextButton.icon(
+            IconButton(
               onPressed: widget.onCancel,
-              icon: const Icon(Icons.arrow_back, size: 18),
-              label: const Text('Back'),
-              style: TextButton.styleFrom(
-                foregroundColor: AppColors.textSecondary,
-                padding: EdgeInsets.zero,
+              icon: const Icon(Icons.arrow_back_rounded, size: 22),
+              tooltip: 'Back',
+              visualDensity: VisualDensity.compact,
+              color: chrome.textSecondary,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+            ),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.inter(
+                  fontSize: compact ? 15 : 16,
+                  color: chrome.textPrimary,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
-            const Spacer(),
-            Text(
-              isEdit ? 'Habit / Edit' : 'Habit / New',
-              style: GoogleFonts.inter(
-                fontSize: 13,
-                color: AppColors.textTertiary,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
+            const SizedBox(width: 40),
           ],
         ),
       ),
@@ -581,12 +614,13 @@ class _FrequencyBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Container(
       padding: const EdgeInsets.all(AppTokens.space16),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: chrome.card,
         borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: chrome.border),
       ),
       child: Row(
         children: [
@@ -614,7 +648,7 @@ class _FrequencyBanner extends StatelessWidget {
               summary,
               style: GoogleFonts.inter(
                 fontSize: 13,
-                color: AppColors.textSecondary,
+                color: chrome.textSecondary,
                 height: 1.4,
               ),
             ),
@@ -638,12 +672,17 @@ class _TitleField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return TextField(
       controller: controller,
-      style: GoogleFonts.inter(fontSize: 28, fontWeight: FontWeight.w600),
+      style: GoogleFonts.inter(
+        fontSize: 28,
+        fontWeight: FontWeight.w600,
+        color: chrome.textPrimary,
+      ),
       decoration: InputDecoration(
         filled: true,
-        fillColor: AppColors.surface,
+        fillColor: chrome.fieldFill,
         prefixIcon: GestureDetector(
           onTap: onEmojiTap,
           child: Padding(
@@ -655,11 +694,11 @@ class _TitleField extends StatelessWidget {
         hintText: 'Habit name',
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-          borderSide: const BorderSide(color: AppColors.border),
+          borderSide: BorderSide(color: chrome.border),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-          borderSide: const BorderSide(color: AppColors.border),
+          borderSide: BorderSide(color: chrome.border),
         ),
         contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
       ),
@@ -675,6 +714,7 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -683,7 +723,7 @@ class _SectionHeader extends StatelessWidget {
           style: GoogleFonts.inter(
             fontSize: 15,
             fontWeight: FontWeight.w600,
-            color: AppColors.textPrimary,
+            color: chrome.textPrimary,
           ),
         ),
         if (subtitle != null) ...[
@@ -692,7 +732,7 @@ class _SectionHeader extends StatelessWidget {
             subtitle!,
             style: GoogleFonts.inter(
               fontSize: 13,
-              color: AppColors.textTertiary,
+              color: chrome.textHint,
               height: 1.4,
             ),
           ),
@@ -710,6 +750,7 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Row(
       children: [
         Text(
@@ -717,7 +758,7 @@ class _SectionLabel extends StatelessWidget {
           style: GoogleFonts.inter(
             fontSize: 13,
             fontWeight: FontWeight.w500,
-            color: AppColors.textSecondary,
+            color: chrome.textSecondary,
           ),
         ),
         if (trailing != null) ...[
@@ -742,6 +783,7 @@ class _LabeledField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -750,7 +792,7 @@ class _LabeledField extends StatelessWidget {
           style: GoogleFonts.inter(
             fontSize: 13,
             fontWeight: FontWeight.w500,
-            color: AppColors.textSecondary,
+            color: chrome.textSecondary,
           ),
         ),
         const SizedBox(height: AppTokens.space8),
@@ -761,7 +803,7 @@ class _LabeledField extends StatelessWidget {
             helpText!,
             style: GoogleFonts.inter(
               fontSize: 12,
-              color: AppColors.textTertiary,
+              color: chrome.textHint,
               height: 1.4,
             ),
           ),
@@ -779,6 +821,7 @@ class _PrioritySelect extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     final safeValue = value.clamp(1, 10);
 
     return _DropdownShell<int>(
@@ -788,7 +831,7 @@ class _PrioritySelect extends StatelessWidget {
       leading: Icon(
         _HabitEditViewState._priorityIcon(safeValue),
         size: 18,
-        color: AppColors.textSecondary,
+        color: chrome.textSecondary,
       ),
       displayLabel: _HabitEditViewState._priorityLabel(safeValue),
       onChanged: (v) {
@@ -811,12 +854,13 @@ class _ColorSelect extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: chrome.fieldFill,
         borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: chrome.border),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<Color>(
@@ -899,12 +943,13 @@ class _DropdownShell<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: AppColors.surface,
+        color: chrome.fieldFill,
         borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-        border: Border.all(color: AppColors.border),
+        border: Border.all(color: chrome.border),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<T>(
@@ -978,11 +1023,11 @@ class _DayPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
+    final primary = Theme.of(context).colorScheme.primary;
     return Material(
-      color: selected ? AppColors.primary : AppColors.surface,
-      shape: const CircleBorder(
-        side: BorderSide(color: AppColors.border),
-      ),
+      color: selected ? primary : chrome.card,
+      shape: CircleBorder(side: BorderSide(color: chrome.border)),
       child: InkWell(
         onTap: onTap,
         customBorder: const CircleBorder(),
@@ -995,7 +1040,9 @@ class _DayPill extends StatelessWidget {
               style: GoogleFonts.inter(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: selected ? Colors.white : AppColors.textSecondary,
+                color: selected
+                    ? Theme.of(context).colorScheme.onPrimary
+                    : chrome.textSecondary,
               ),
             ),
           ),
@@ -1026,6 +1073,7 @@ class _DayScheduleRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1040,6 +1088,7 @@ class _DayScheduleRow extends StatelessWidget {
                   style: GoogleFonts.inter(
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
+                    color: chrome.textPrimary,
                   ),
                 ),
               ),
@@ -1052,7 +1101,7 @@ class _DayScheduleRow extends StatelessWidget {
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text('to', style: TextStyle(color: AppColors.textTertiary)),
+                child: Text('to', style: TextStyle(color: chrome.textHint)),
               ),
               Expanded(
                 child: _TimeInput(
@@ -1125,23 +1174,24 @@ class _TimeInputState extends State<_TimeInput> {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return TextField(
       controller: _controller,
       readOnly: widget.readOnly,
       onChanged: widget.readOnly ? null : widget.onChanged,
-      style: GoogleFonts.inter(fontSize: 14),
+      style: GoogleFonts.inter(fontSize: 14, color: chrome.textPrimary),
       decoration: InputDecoration(
         isDense: true,
         filled: true,
-        fillColor: widget.readOnly ? AppColors.grey100 : AppColors.surface,
+        fillColor: widget.readOnly ? chrome.mutedFill : chrome.fieldFill,
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-          borderSide: const BorderSide(color: AppColors.border),
+          borderSide: BorderSide(color: chrome.border),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-          borderSide: const BorderSide(color: AppColors.border),
+          borderSide: BorderSide(color: chrome.border),
         ),
       ),
     );
@@ -1167,20 +1217,21 @@ class _DurationStepper extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
-          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+          style: GoogleFonts.inter(fontSize: 13, color: chrome.textSecondary),
         ),
         const SizedBox(height: AppTokens.space8),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
-            color: AppColors.surface,
+            color: chrome.fieldFill,
             borderRadius: BorderRadius.circular(AppTokens.radiusMd),
-            border: Border.all(color: AppColors.border),
+            border: Border.all(color: chrome.border),
           ),
           child: Row(
             children: [
@@ -1192,7 +1243,10 @@ class _DurationStepper extends StatelessWidget {
                 child: Text(
                   _label,
                   textAlign: TextAlign.center,
-                  style: GoogleFonts.inter(fontWeight: FontWeight.w500),
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w500,
+                    color: chrome.textPrimary,
+                  ),
                 ),
               ),
               _StepBtn(
@@ -1215,11 +1269,12 @@ class _StepBtn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
     return IconButton(
       onPressed: onTap,
       icon: Icon(icon, size: 18),
       visualDensity: VisualDensity.compact,
-      color: AppColors.textSecondary,
+      color: chrome.textSecondary,
     );
   }
 }
@@ -1237,8 +1292,10 @@ class _ConflictOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final chrome = _HabitChrome.of(context);
+    final primary = Theme.of(context).colorScheme.primary;
     return Material(
-      color: selected ? AppColors.grey100 : AppColors.surface,
+      color: selected ? chrome.mutedFill : chrome.card,
       borderRadius: BorderRadius.circular(AppTokens.radiusMd),
       child: InkWell(
         onTap: onTap,
@@ -1248,7 +1305,7 @@ class _ConflictOption extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(AppTokens.radiusMd),
             border: Border.all(
-              color: selected ? AppColors.primary.withValues(alpha: 0.4) : AppColors.border,
+              color: selected ? primary.withValues(alpha: 0.4) : chrome.border,
             ),
           ),
           child: Row(
@@ -1256,10 +1313,16 @@ class _ConflictOption extends StatelessWidget {
               Icon(
                 selected ? Icons.radio_button_checked : Icons.radio_button_off,
                 size: 20,
-                color: selected ? AppColors.primary : AppColors.textTertiary,
+                color: selected ? primary : chrome.textHint,
               ),
               const SizedBox(width: AppTokens.space12),
-              Text(label, style: GoogleFonts.inter(fontSize: 14)),
+              Text(
+                label,
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  color: chrome.textPrimary,
+                ),
+              ),
             ],
           ),
         ),

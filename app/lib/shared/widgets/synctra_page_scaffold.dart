@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_tokens.dart';
 import '../../theme.dart';
+import '../state/calendar_shell_bridge.dart';
+import '../state/shell_sidebar_controller.dart';
 
 /// Reclaim-style page shell — matches calendar top bar and surface chrome.
 class SynctraPageScaffold extends StatelessWidget {
@@ -11,57 +14,97 @@ class SynctraPageScaffold extends StatelessWidget {
     required this.body,
     this.bottomBar,
     this.leading,
+    this.actions,
+    this.showSidebarToggle = true,
+    this.showSettings = false,
   });
 
   final String title;
   final Widget body;
   final Widget? bottomBar;
   final Widget? leading;
+  final List<Widget>? actions;
+  final bool showSidebarToggle;
+  final bool showSettings;
 
   @override
   Widget build(BuildContext context) {
     final divider = AppTokens.calendarDivider(context);
     final surface = AppTokens.calendarGridSurface(context);
+    final isDesktop =
+        MediaQuery.sizeOf(context).width >= ShellSidebarController.desktopBreakpoint;
+    final showMenu = showSidebarToggle && !isDesktop && leading == null;
+    final trailing = <Widget>[
+      ...?actions,
+      if (showSettings)
+        IconButton(
+          tooltip: 'Settings',
+          icon: Icon(
+            Icons.settings_outlined,
+            color: AppColors.textSecondary,
+            size: AppTokens.iconStandard,
+          ),
+          onPressed: () => context.push('/settings'),
+        ),
+    ];
 
     return Scaffold(
       backgroundColor: surface,
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Material(
-            color: surface,
-            elevation: 0,
-            child: Container(
-              height: AppTokens.pageTopBarHeight,
-              padding: const EdgeInsets.symmetric(horizontal: AppTokens.space8),
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    color: divider,
-                    width: AppTokens.calendarDividerThickness,
-                  ),
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Material(
+              color: surface,
+              elevation: 0,
+              child: Container(
+                height: AppTokens.pageTopBarHeight,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: AppTokens.space8,
                 ),
-              ),
-              child: Row(
-                children: [
-                  if (leading != null) leading!,
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: CalendarTextStyles.topBarDate(
-                        Theme.of(context).brightness,
-                      ).copyWith(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: divider,
+                      width: AppTokens.calendarDividerThickness,
                     ),
                   ),
-                ],
+                ),
+                child: Row(
+                  children: [
+                    if (leading != null)
+                      leading!
+                    else if (showMenu)
+                      IconButton(
+                        tooltip: 'Navigation menu',
+                        icon: Icon(
+                          Icons.menu,
+                          color: AppColors.textSecondary,
+                          size: AppTokens.iconStandard,
+                        ),
+                        onPressed: () =>
+                            CalendarShellBridge.instance.openDrawer?.call(),
+                      ),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: CalendarTextStyles.topBarDate(
+                          Theme.of(context).brightness,
+                        ).copyWith(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    ...trailing,
+                  ],
+                ),
               ),
             ),
-          ),
-          Expanded(child: body),
-        ],
+            Expanded(child: body),
+          ],
+        ),
       ),
       bottomNavigationBar: bottomBar == null
           ? null

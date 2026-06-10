@@ -120,6 +120,7 @@ class _HabitsScreenState extends State<HabitsScreen> {
 
     return SynctraPageScaffold(
       title: 'Habits',
+      showSettings: true,
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
@@ -267,6 +268,8 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(AppTokens.space32),
@@ -284,6 +287,7 @@ class _EmptyState extends StatelessWidget {
               style: GoogleFonts.inter(
                 fontSize: 20,
                 fontWeight: FontWeight.w600,
+                color: colorScheme.onSurface,
               ),
             ),
             const SizedBox(height: AppTokens.space8),
@@ -293,7 +297,7 @@ class _EmptyState extends StatelessWidget {
               textAlign: TextAlign.center,
               style: GoogleFonts.inter(
                 fontSize: 14,
-                color: AppColors.textSecondary,
+                color: colorScheme.onSurfaceVariant,
                 height: 1.5,
               ),
             ),
