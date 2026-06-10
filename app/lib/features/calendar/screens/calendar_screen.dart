@@ -514,10 +514,38 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _pushExternalBusyToStore();
   }
 
-  Future<void> _addCourseImport(String url, String name) async {
-    await _courseImportService.addImport(url, name);
-    await _loadCourseImports();
-    CourseImportTasksBridge.instance.refresh();
+  /// Import a course in the background so it keeps running (and finishes) even
+  /// after the user dismisses the Course Import sheet. Imports can take a while,
+  /// so feedback is given via snackbars rather than blocking the sheet.
+  Future<void> _importCourseInBackground(String url, String name) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('Importing course in the background — this can take a minute…'),
+        duration: Duration(seconds: 4),
+      ),
+    );
+    try {
+      final record = await _courseImportService.addImport(url, name);
+      await _loadCourseImports();
+      CourseImportTasksBridge.instance.refresh();
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Imported ${record.courseName} · ${record.eventCount} events'),
+        ),
+      );
+    } on DioException catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('Course import failed: ${CourseImportService.friendlyError(e)}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('Course import failed: $e')),
+      );
+    }
   }
 
   Future<void> _removeCourseImport(String importId) async {
@@ -671,7 +699,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       ),
       builder: (_) => _CourseImportSheet(
         imports: List.from(_courseImports),
-        onImport: _addCourseImport,
+        onImport: _importCourseInBackground,
         onRemove: _removeCourseImport,
       ),
     );
@@ -5286,29 +5314,11 @@ class _CourseImportSheetState extends State<_CourseImportSheet> {
       return;
     }
 
-    setState(() {
-      _isLoading = true;
-      _error = null;
-    });
-    try {
-      await widget.onImport(url, _nameCtrl.text.trim());
-      if (mounted) Navigator.of(context).pop();
-    } on DioException catch (e) {
-      if (!mounted) return;
-      final detail = e.response?.data?['detail']?.toString() ??
-          e.message ??
-          'Unknown error';
-      setState(() {
-        _isLoading = false;
-        _error = detail;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isLoading = false;
-        _error = e.toString();
-      });
-    }
+    // Kick off the import in the background and close immediately. The import
+    // runs on the calendar screen, so dismissing this sheet never cancels it;
+    // progress and completion are reported via snackbars.
+    unawaited(widget.onImport(url, _nameCtrl.text.trim()));
+    Navigator.of(context).pop();
   }
 
   Future<void> _deleteCourse(CourseImportRecord course) async {
