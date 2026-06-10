@@ -4732,18 +4732,22 @@ class _TimedEventChip extends StatelessWidget {
                     final h = constraints.maxHeight;
                     final showTime = h >= 40;
                     return Padding(
-                      padding: const EdgeInsets.symmetric(
+                      padding: EdgeInsets.symmetric(
                         horizontal: AppTokens.space8,
-                        vertical: AppTokens.space4,
+                        // Trim padding on very short chips so the title isn't
+                        // squeezed past the slot (would overflow by a px or two).
+                        vertical: h < 28 ? 1 : AppTokens.space4,
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            line1,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: CalendarTextStyles.eventTitle(onColor),
+                          Flexible(
+                            child: Text(
+                              line1,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: CalendarTextStyles.eventTitle(onColor),
+                            ),
                           ),
                           if (showTime)
                             Text(
@@ -4810,9 +4814,9 @@ class _StudyBlockChip extends StatelessWidget {
                         final h = constraints.maxHeight;
                         final showTime = h >= 40;
                         return Padding(
-                          padding: const EdgeInsets.symmetric(
+                          padding: EdgeInsets.symmetric(
                             horizontal: AppTokens.space8,
-                            vertical: AppTokens.space4,
+                            vertical: h < 28 ? 1 : AppTokens.space4,
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -4905,7 +4909,7 @@ class _HabitSessionChip extends StatelessWidget {
                           padding: EdgeInsets.symmetric(
                             horizontal:
                                 w < 56 ? AppTokens.space4 : AppTokens.space8,
-                            vertical: AppTokens.space4,
+                            vertical: h < 28 ? 1 : AppTokens.space4,
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
