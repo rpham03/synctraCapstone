@@ -111,10 +111,32 @@ class HabitSessionStore extends ChangeNotifier {
         await _persist();
         return;
       }
-      final sessions = await _service.scheduleWeek(
-        calendarEvents: _lastCalendarEvents,
-        weekStart: weekStart,
-      );
+      final scheduleStart =
+          startOfWeek(weekStart ?? _lastWeekStart ?? DateTime.now());
+      _lastWeekStart = scheduleStart;
+      List<HabitSessionModel> sessions;
+      try {
+        sessions = await _service.scheduleWeek(
+          calendarEvents: _lastCalendarEvents,
+          weekStart: scheduleStart,
+        );
+        if (sessions.isEmpty) {
+          sessions = _buildLocalFallbackSchedule(
+            habits: habits,
+            calendarEvents: _lastCalendarEvents,
+            weekStart: scheduleStart,
+          );
+        }
+      } catch (error) {
+        debugPrint(
+          'Habit scheduling endpoint failed; using local placement: $error',
+        );
+        sessions = _buildLocalFallbackSchedule(
+          habits: habits,
+          calendarEvents: _lastCalendarEvents,
+          weekStart: scheduleStart,
+        );
+      }
       if (generation != _scheduleGeneration) return;
       _sessions
         ..clear()
@@ -128,6 +150,103 @@ class HabitSessionStore extends ChangeNotifier {
         notifyListeners();
       }
     }
+  }
+
+  static List<HabitSessionModel> _buildLocalFallbackSchedule({
+    required Iterable<HabitModel> habits,
+    required Iterable<EventModel> calendarEvents,
+    required DateTime weekStart,
+  }) {
+    final sessions = <HabitSessionModel>[];
+    final busy = <({DateTime start, DateTime end})>[
+      for (final event in calendarEvents)
+        if (event.endTime.isAfter(event.startTime))
+          (start: event.startTime, end: event.endTime),
+    ];
+    final active = habits.where((habit) => habit.isActive).toList()
+      ..sort((a, b) => b.priority.compareTo(a.priority));
+
+    for (final habit in active) {
+      final preferredDays = habit.preferredDays.isEmpty
+          ? List<int>.generate(7, (day) => day)
+          : habit.preferredDays;
+      var placed = 0;
+      for (final backendDay in preferredDays) {
+        if (placed >= habit.frequencyPerWeek) break;
+        final day = _dateForBackendWeekday(weekStart, backendDay);
+        final ranges = habit.preferredTimeRanges[backendDay.toString()];
+        final windows = ranges == null || ranges.isEmpty
+            ? const [HabitTimeRange(start: '8:00am', end: '10:00pm')]
+            : ranges;
+        DateTime? selectedStart;
+        for (final window in windows) {
+          final rangeStart = _clockOnDay(day, window.start);
+          var rangeEnd = _clockOnDay(day, window.end);
+          if (!rangeEnd.isAfter(rangeStart)) {
+            rangeEnd = rangeEnd.add(const Duration(days: 1));
+          }
+          var candidate = rangeStart;
+          final duration = Duration(minutes: habit.durationMinutes);
+          while (!candidate.add(duration).isAfter(rangeEnd)) {
+            final candidateEnd = candidate.add(duration);
+            final overlaps = busy.any(
+              (entry) =>
+                  candidate.isBefore(entry.end) &&
+                  candidateEnd.isAfter(entry.start),
+            );
+            if (!overlaps) {
+              selectedStart = candidate;
+              break;
+            }
+            candidate = candidate.add(const Duration(minutes: 15));
+          }
+          if (selectedStart != null) break;
+        }
+        if (selectedStart == null) continue;
+        final selectedEnd =
+            selectedStart.add(Duration(minutes: habit.durationMinutes));
+        busy.add((start: selectedStart, end: selectedEnd));
+        sessions.add(
+          HabitSessionModel(
+            id: 'local-${habit.id}-${selectedStart.toIso8601String()}',
+            habitId: habit.id,
+            habitTitle: habit.title,
+            startTime: selectedStart,
+            endTime: selectedEnd,
+            explanation:
+                'Placed locally in an available preferred habit window.',
+          ),
+        );
+        placed += 1;
+      }
+    }
+    return sessions;
+  }
+
+  static DateTime _dateForBackendWeekday(DateTime weekStart, int backendDay) {
+    final start = startOfWeek(weekStart);
+    final sundayBasedOffset = (backendDay + 1) % 7;
+    return DateTime(start.year, start.month, start.day)
+        .add(Duration(days: sundayBasedOffset));
+  }
+
+  static DateTime _clockOnDay(DateTime day, String value) {
+    final text = value.trim().toLowerCase().replaceAll('.', '');
+    final match =
+        RegExp(r'^(\d{1,2})(?::(\d{1,2}))?\s*(am|pm)?$').firstMatch(text);
+    if (match == null) return DateTime(day.year, day.month, day.day, 8);
+    var hour = int.tryParse(match.group(1) ?? '') ?? 8;
+    final minute = int.tryParse(match.group(2) ?? '') ?? 0;
+    final meridiem = match.group(3);
+    if (meridiem == 'pm' && hour != 12) hour += 12;
+    if (meridiem == 'am' && hour == 12) hour = 0;
+    return DateTime(
+      day.year,
+      day.month,
+      day.day,
+      hour.clamp(0, 23).toInt(),
+      minute.clamp(0, 59).toInt(),
+    );
   }
 
   Future<void> rescheduleForNewEvent({

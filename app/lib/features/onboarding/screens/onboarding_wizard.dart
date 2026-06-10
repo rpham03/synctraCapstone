@@ -836,7 +836,7 @@ class _CourseWebsitesStepState extends State<_CourseWebsitesStep> {
     } catch (e, st) {
       debugPrint('course import error: $e\n$st');
       setState(() {
-        _errorText = "Couldn't parse this page — check the URL or try again in Settings";
+        _errorText = CourseImportService.friendlyError(e);
         _status = null;
       });
     } finally {

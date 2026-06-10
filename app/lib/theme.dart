@@ -61,6 +61,7 @@ abstract final class AppColors {
   /// Default timed event fill (Reclaim sky blue blocks).
   static const Color calendarEventBlue = Color(0xFF7FB7E8);
   static const Color calendarEventOnColor = Color(0xFFFFFFFF);
+  static const Color manualCalendarEvent = Color(0xFF0891B2);
 
   static const Color canvasAssignment = secondary;
   static const Color canvasAssignmentContainer = Color(0xFFFFF6E8);

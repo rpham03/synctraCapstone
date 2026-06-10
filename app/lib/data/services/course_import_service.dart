@@ -46,6 +46,39 @@ class CourseImportService {
 
   static const _courseTasksKey = 'synctra_course_import_tasks_v1';
 
+  static String friendlyError(Object error) {
+    if (error is! DioException) return error.toString();
+
+    final responseData = error.response?.data;
+    if (responseData is Map) {
+      final detail = responseData['detail']?.toString().trim();
+      if (detail != null && detail.isNotEmpty) return detail;
+    }
+
+    final cannotReachBackend = error.response == null &&
+        (error.type == DioExceptionType.connectionError ||
+            error.type == DioExceptionType.unknown);
+    if (cannotReachBackend) {
+      return 'Cannot reach the Synctra backend at ${ApiConstants.baseUrl}. '
+          'If you are using Colab, keep the backend uvicorn cell and backend '
+          'Cloudflare tunnel cell running, then restart Flutter with the latest '
+          'API_BASE_URL printed by the tunnel.';
+    }
+
+    if (error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.sendTimeout ||
+        error.type == DioExceptionType.receiveTimeout) {
+      return 'Course import timed out while contacting ${ApiConstants.baseUrl}. '
+          'Keep the backend and course-import agent running, then try again.';
+    }
+
+    final statusCode = error.response?.statusCode;
+    if (statusCode != null) {
+      return 'Course import failed with backend HTTP $statusCode.';
+    }
+    return error.message ?? 'Course import failed.';
+  }
+
   String get _userId {
     final uid = _db.auth.currentUser?.id;
     if (uid != null) return uid;

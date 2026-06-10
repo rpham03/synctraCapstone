@@ -279,7 +279,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       'canvas' => AppColors.canvasAssignment,
       'course' => AppColors.courseOrange,
       'manual_task' => AppColors.manualTask,
-      'manual' => AppColors.fixedEvent,
+      'manual' => AppColors.manualCalendarEvent,
       _ => AppColors.fixedEvent,
     };
   }
@@ -387,6 +387,37 @@ class _CalendarScreenState extends State<CalendarScreen> {
       ));
     }
 
+    for (final habit in _habitStore.sessions) {
+      if (habit.startTime.isBefore(now.subtract(const Duration(hours: 1)))) {
+        continue;
+      }
+      final day = DateTime(
+        habit.startTime.year,
+        habit.startTime.month,
+        habit.startTime.day,
+      );
+      String timeLabel;
+      if (isSameDay(habit.startTime, now)) {
+        timeLabel = DateFormat('h:mm a').format(habit.startTime);
+      } else if (isSameDay(
+        habit.startTime,
+        now.add(const Duration(days: 1)),
+      )) {
+        timeLabel = 'Tomorrow';
+      } else {
+        timeLabel = DateFormat('MMM d').format(habit.startTime);
+      }
+      items.add((
+        sort: habit.startTime,
+        item: CalendarUpcomingItem(
+          title: habit.habitTitle,
+          timeLabel: timeLabel,
+          color: AppColors.habitBlock,
+          targetDay: day,
+        ),
+      ));
+    }
+
     items.sort((a, b) => a.sort.compareTo(b.sort));
     return items.take(limit).map((e) => e.item).toList();
   }
@@ -408,6 +439,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       _focusedDay = day;
       _selectedDay = day;
     });
+    unawaited(_scheduleHabits());
   }
 
   Future<void> _reloadCanvasEvents() async {
@@ -602,6 +634,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       _focusedDay = n;
       _selectedDay = n;
     });
+    unawaited(_scheduleHabits());
   }
 
   bool _isViewingToday() {
@@ -662,6 +695,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
       _selectedDay = selected;
       _focusedDay = focused;
     });
+    unawaited(_scheduleHabits());
+  }
+
+  void _onPageChanged(DateTime focused) {
+    setState(() => _focusedDay = focused);
+    unawaited(_scheduleHabits());
   }
 
   void _openIcalFeedsSheet() {
@@ -776,7 +815,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
     EventModel event,
     BuildContext sheetCtx,
   ) async {
-    Navigator.pop(sheetCtx);
+    // Close the edit sheet, but only if it's actually still on top. The sheet
+    // is pushed onto go_router's navigator, so an unconditional pop on a stale
+    // sheet context would pop the calendar page itself ("popped the last page
+    // off of the stack").
+    final sheetNav = Navigator.of(sheetCtx);
+    if (sheetNav.canPop()) {
+      sheetNav.pop();
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1325,7 +1371,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       monthFormat: _monthFormat,
       onMonthFormatChanged: (f) => setState(() => _monthFormat = f),
       onDaySelected: _onDaySelected,
-      onPageChanged: (d) => setState(() => _focusedDay = d),
+      onPageChanged: _onPageChanged,
       timedEventsOnDay: _timedEventsOnDay,
       canvasOnDay: _canvasChipsOnDay,
       courseAllDayOnDay: _courseAllDayOnDay,
@@ -1374,7 +1420,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       focusedDay: _focusedDay,
       selectedDay: _selectedDay,
       onDaySelected: _onDaySelected,
-      onPageChanged: (d) => setState(() => _focusedDay = d),
+      onPageChanged: _onPageChanged,
       upcoming: _upcomingItems(),
       feedChips: _feedChipData(),
       onUpcomingTap: _navigateToDay,
@@ -1492,9 +1538,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       : null,
                   clipBehavior: chatPanelOpen ? Clip.hardEdge : Clip.none,
                   child: chatPanelOpen
-                      ? _CalendarChatSidePanel(
-                          onClose: _closeAiChat,
-                          suggestionChips: _calendarChatChips,
+                      ? OverflowBox(
+                          alignment: Alignment.centerLeft,
+                          minWidth: AppTokens.calendarRightPanelWidth,
+                          maxWidth: AppTokens.calendarRightPanelWidth,
+                          child: _CalendarChatSidePanel(
+                            onClose: _closeAiChat,
+                            suggestionChips: _calendarChatChips,
+                          ),
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -2178,7 +2229,7 @@ class _DayAgendaItem {
       'canvas' => AppColors.canvasAssignment,
       'course' => AppColors.deadline,
       'manual_task' => AppColors.manualTask,
-      'manual' => AppColors.fixedEvent,
+      'manual' => AppColors.manualCalendarEvent,
       _ when event.source.startsWith('ical') => AppColors.icalAccent,
       _ => AppColors.primary,
     };

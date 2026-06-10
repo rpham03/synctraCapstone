@@ -156,7 +156,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await _load();
       _toast('Course imported');
     } catch (e) {
-      setState(() => _courseError = "Couldn't import this course — check the URL");
+      setState(() => _courseError = CourseImportService.friendlyError(e));
     } finally {
       if (mounted) setState(() => _courseBusy = false);
     }
