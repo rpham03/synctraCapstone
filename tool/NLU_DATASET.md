@@ -17,6 +17,11 @@ The 5,000 rows have fixed split metadata:
   occur in neither training nor development.
 - `human_style_test`: 500 generated conversational/noisy proxy rows.
 
+Development, unseen-template, and human-style suites are balanced to 29-30
+examples per tool. Both realistic test suites cover every supported slot type.
+Template families are interleaved before row selection so one large generated
+product cannot crowd out the other wording families for a tool.
+
 The human-style suite is not a real human-written benchmark. Before reporting
 human accuracy, replace or extend it with untouched prompts collected from
 people who did not see the generated templates.
@@ -32,9 +37,16 @@ The training rows use this generated mix:
 - 10% clarification generated
 - 5% hard-boundary generated
 
+The training pool includes explicit hard-boundary wording for commonly confused
+intents, including task-list versus live Canvas sync, calendar listing versus
+event deletion, one-event versus whole-calendar classification, and
+classification questions versus fixed/flexible overrides. Assignment-sync
+examples always name a live source such as Canvas, LMS, or a course portal.
+
 Every row records `source`, `difficulty`, `split`, and `template_family_id`.
 `syntra_nlu_dataset_manifest.json` records split counts, label counts, source
-mix, and template-family leakage checks.
+mix, per-split slot coverage, per-tool template-family counts, and
+template-family leakage checks.
 
 ## Reporting Results
 

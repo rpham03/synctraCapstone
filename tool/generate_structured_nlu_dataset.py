@@ -39,6 +39,21 @@ TRAIN_SOURCE_MIX = {
     "clarification_generated": 0.10,
     "hard_boundary_generated": 0.05,
 }
+HELD_OUT_PREFERRED_SLOTS = {
+    "propose_schedule_change": {"deadline", "duration"},
+    "add_calendar_block": {"title", "date", "start_time", "end_time"},
+    "set_productivity_preferences": {"period"},
+}
+SLOT_NAMES = {
+    "course",
+    "date",
+    "deadline",
+    "duration",
+    "end_time",
+    "period",
+    "start_time",
+    "title",
+}
 TOOLS = [
     "get_assignments",
     "find_free_slots",
@@ -125,6 +140,33 @@ def template_family_id(row: dict[str, Any]) -> str:
     skeleton = template_skeleton(row)
     digest = hashlib.sha256(f"{row['tool']}:{skeleton}".encode("utf-8")).hexdigest()
     return f"{row['tool']}:{digest[:16]}"
+
+
+def _family_diverse_rows(
+    rows: list[dict[str, Any]],
+    rng: random.Random,
+) -> list[dict[str, Any]]:
+    """Interleave wording families so large generated products cannot dominate."""
+
+    by_family: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_family.setdefault(template_family_id(row), []).append(row)
+    families = list(by_family)
+    rng.shuffle(families)
+    for family_rows in by_family.values():
+        rng.shuffle(family_rows)
+
+    ordered: list[dict[str, Any]] = []
+    while families:
+        next_families: list[str] = []
+        for family in families:
+            family_rows = by_family[family]
+            ordered.append(family_rows.pop())
+            if family_rows:
+                next_families.append(family)
+        rng.shuffle(next_families)
+        families = next_families
+    return ordered
 
 
 def explicit_split_indices(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
@@ -220,9 +262,25 @@ def _held_out_template_indices(rows: list[dict[str, Any]]) -> set[int]:
     minimum_per_tool = math.ceil(DEFAULT_SPLIT_COUNTS["unseen_template_test"] / len(TOOLS))
     for tool in TOOLS:
         selected_for_tool = 0
+        target = _balanced_targets(DEFAULT_SPLIT_COUNTS["unseen_template_test"])[tool]
+        preferred_slots = HELD_OUT_PREFERRED_SLOTS.get(tool, set())
         families = sorted(
             by_tool[tool].items(),
-            key=lambda item: (len(item[1]), item[0]),
+            key=lambda item: (
+                not any(rows[index].get("slots") for index in item[1]),
+                -len(
+                    preferred_slots
+                    & {
+                        slot
+                        for index in item[1]
+                        for slot in rows[index].get("slots", {})
+                    }
+                ),
+                abs(len(item[1]) - max(2, target // 3)),
+                len(item[1]) > target,
+                len(item[1]),
+                item[0],
+            ),
         )
         for _, indices in families:
             held_out.update(indices)
@@ -259,21 +317,33 @@ def _style_row(row: dict[str, Any], source: str, variant: int) -> dict[str, Any]
     message = str(row["user_message"])
     slots = dict(row.get("slots", {}))
     if source == "conversational_generated":
-        wrappers = (
-            ("Hey, can you ", ""),
-            ("Quick question: ", ""),
-            ("When you get a chance, ", " please"),
-            ("I was wondering if you could ", ""),
-        )
-        prefix, suffix = wrappers[variant % len(wrappers)]
-        message = prefix + message[0].lower() + message[1:] + suffix
+        if _looks_like_question(message):
+            wrappers = ("Hey, ", "Quick question: ", "Just checking, ", "Do you know: ")
+            message = wrappers[variant % len(wrappers)] + message[0].lower() + message[1:]
+        else:
+            wrappers = (
+                ("Could you ", ""),
+                ("Please ", ""),
+                ("When you get a chance, ", " please"),
+                ("I need you to ", ""),
+            )
+            prefix, suffix = wrappers[variant % len(wrappers)]
+            message = prefix + message[0].lower() + message[1:] + suffix
     elif source == "paraphrase_generated":
-        wrappers = (
-            ("Could you help me with this: ", ""),
-            ("What I need is this: ", ""),
-            ("Please handle this request: ", ""),
-            ("Here is what I am trying to do: ", ""),
-        )
+        if _looks_like_question(message):
+            wrappers = (
+                ("I need to know: ", ""),
+                ("Can you tell me: ", ""),
+                ("Help me check this: ", ""),
+                ("For planning purposes, ", ""),
+            )
+        else:
+            wrappers = (
+                ("Could you help me do this: ", ""),
+                ("What I need is: ", ""),
+                ("Please handle this: ", ""),
+                ("Here is what I am trying to do: ", ""),
+            )
         prefix, suffix = wrappers[variant % len(wrappers)]
         message = prefix + message[0].lower() + message[1:] + suffix
     elif source == "noisy_generated":
@@ -289,19 +359,58 @@ def _style_row(row: dict[str, Any], source: str, variant: int) -> dict[str, Any]
             replacement_sets[variant % len(replacement_sets)],
         )
     elif source == "human_style_proxy":
-        wrappers = (
-            ("hey, ", ""),
-            ("quick question, ", ""),
-            ("not sure how to phrase this but ", ""),
-            ("when u get a sec, ", " pls"),
-            ("can you help me out and ", ""),
-        )
+        if _looks_like_question(message):
+            wrappers = (
+                ("hey, ", ""),
+                ("quick question, ", ""),
+                ("just checking, ", ""),
+                ("when u get a sec, ", ""),
+                ("do you know: ", ""),
+                ("need to know: ", ""),
+            )
+        else:
+            wrappers = (
+                ("hey, can you ", ""),
+                ("quick request: ", ""),
+                ("not sure how to phrase this but ", ""),
+                ("when u get a sec, ", " pls"),
+                ("can you help me out and ", ""),
+                ("please ", ""),
+            )
         prefix, suffix = wrappers[variant % len(wrappers)]
         message = prefix + message[0].lower() + message[1:] + suffix
 
     styled["user_message"] = " ".join(message.split())
     styled["source"] = source
     return styled
+
+
+def _looks_like_question(message: str) -> bool:
+    first = re.sub(r"[^a-z ]", "", message.lower()).split()
+    return bool(
+        message.rstrip().endswith("?")
+        or first
+        and first[0]
+        in {
+            "am",
+            "are",
+            "can",
+            "could",
+            "did",
+            "do",
+            "does",
+            "have",
+            "how",
+            "is",
+            "should",
+            "what",
+            "when",
+            "where",
+            "which",
+            "who",
+            "would",
+        }
+    )
 
 
 def _clarification_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -332,6 +441,37 @@ def _clarification_row(row: dict[str, Any]) -> dict[str, Any]:
         .strip(" ,.?")
         .split()
     )
+    if key == "title" and row["tool"] == "delete_calendar_block":
+        verb_match = re.search(
+            r"\b(delete|remove|cancel|take|clear|drop|erase|get rid of)\b",
+            row["user_message"],
+            re.IGNORECASE,
+        )
+        verb = verb_match.group(1).capitalize() if verb_match else "Remove"
+        date_value = changed["slots"].get("date", "")
+        changed["user_message"] = f"{verb} an event from my calendar {date_value}".strip()
+    elif key == "title" and row["tool"] == "classify_calendar_item":
+        if row["user_message"].lower().startswith(("is ", "would ")):
+            changed["user_message"] = "Is this event fixed or flexible?"
+        elif "check" in row["user_message"].lower():
+            changed["user_message"] = "Check whether this event is fixed or flexible"
+        elif "tell" in row["user_message"].lower():
+            changed["user_message"] = "Tell me whether this event is fixed or flexible"
+        else:
+            changed["user_message"] = "Classify this event as fixed or flexible"
+    elif key == "title" and row["tool"] == "set_event_flexibility_override":
+        verb_match = re.search(
+            r"\b(mark|set|treat|make|tag|label|keep|allow|change|lock|override)\b",
+            row["user_message"],
+            re.IGNORECASE,
+        )
+        verb = verb_match.group(1).capitalize() if verb_match else "Mark"
+        flexibility = (
+            "fixed"
+            if re.search(r"\b(fixed|lock|don't move)\b", row["user_message"], re.IGNORECASE)
+            else "flexible"
+        )
+        changed["user_message"] = f"{verb} an event as {flexibility}"
     missing = list(dict.fromkeys([*row.get("missing_slots", []), key]))
     changed["needs_followup"] = True
     changed["missing_slots"] = missing
@@ -780,6 +920,127 @@ def _candidate_examples() -> dict[str, list[dict[str, Any]]]:
             )
         )
 
+    # Conversational read-only queries. These two tools were under-represented and
+    # got absorbed by delete_calendar_block on unseen/human phrasings, so widen the
+    # variety (and raise their counts) with everyday ways people ask to SEE things.
+    calendar_query_templates = [
+        "What's on my calendar {date}?",
+        "What do I have {date}?",
+        "What's on my schedule {date}?",
+        "Show me my schedule {date}",
+        "What does my {date} look like?",
+        "Do I have anything {date}?",
+        "What's coming up {date}?",
+        "Show my calendar {date}",
+        "Any meetings {date}?",
+        "What's planned {date}?",
+        "Pull up my calendar {date}",
+        "What am I doing {date}?",
+        "List my events {date}",
+        "Whats on my agenda {date}?",
+    ]
+    for date_value, template in product(dates, calendar_query_templates):
+        pools["get_calendar_events"].append(
+            example(
+                template.format(date=date_value),
+                "get_calendar_events",
+                slots={"date": date_value},
+            )
+        )
+    for template in [
+        "What's on my calendar?",
+        "What do I have coming up?",
+        "Show me my schedule",
+        "What's on my agenda?",
+        "What meetings do I have?",
+        "Pull up my calendar",
+        "What does my week look like?",
+        "What's planned for me?",
+    ]:
+        pools["get_calendar_events"].append(example(template, "get_calendar_events"))
+
+    task_query_templates = [
+        "What's due {date}?",
+        "What do I need to do {date}?",
+        "What homework is due {date}?",
+        "What assignments do I have {date}?",
+        "Anything due {date}?",
+        "What do I have to turn in {date}?",
+        "Show my tasks {date}",
+        "What's on my to-do list {date}?",
+        "What work is due {date}?",
+        "What do I owe {date}?",
+        "List my deadlines {date}",
+        "What's on my plate {date}?",
+        "What assignments are coming up {date}?",
+        "What's due for me {date}?",
+    ]
+    for date_value, template in product(dates, task_query_templates):
+        pools["get_tasks"].append(
+            example(
+                template.format(date=date_value),
+                "get_tasks",
+                slots={"date": date_value},
+            )
+        )
+    for template in [
+        "What's due?",
+        "What do I need to do?",
+        "What homework do I have?",
+        "What assignments are due?",
+        "Show my to-do list",
+        "What's on my plate?",
+        "What deadlines are coming up?",
+        "What do I have to turn in?",
+        "Any homework?",
+        "What tasks do I have?",
+    ]:
+        pools["get_tasks"].append(example(template, "get_tasks"))
+
+    # Sharpen classify-one vs classify-all vs override (the other weak boundary).
+    for template in [
+        "Classify everything on my calendar",
+        "Sort all my events into fixed and flexible",
+        "Which of my events are fixed and which are flexible?",
+        "Go through my whole calendar and label fixed vs flexible",
+        "Tell me what's fixed and what's flexible",
+        "Label all my events by flexibility",
+        "Break down my calendar into fixed and flexible",
+        "Which things on my calendar can move?",
+    ]:
+        pools["classify_all_calendar_events"].append(
+            example(template, "classify_all_calendar_events")
+        )
+    for template, item in product(
+        [
+            "Is {title} fixed or flexible?",
+            "Is my {title} a fixed event?",
+            "Tell me if {title} is fixed or flexible",
+            "Is {title} flexible?",
+            "What is {title} — fixed or flexible?",
+            "Can {title} be moved or is it fixed?",
+        ],
+        work_items,
+    ):
+        pools["classify_calendar_item"].append(
+            example(template.format(title=item), "classify_calendar_item", slots={"title": item})
+        )
+    for template, item in product(
+        [
+            "Mark {title} as fixed",
+            "Treat {title} as flexible",
+            "Set {title} to fixed",
+            "Make {title} flexible",
+            "Lock {title} as a fixed event",
+            "Always treat {title} as fixed",
+            "Flag {title} as flexible from now on",
+        ],
+        work_items,
+    ):
+        pools["set_event_flexibility_override"].append(
+            example(template.format(title=item), "set_event_flexibility_override", slots={"title": item})
+        )
+
     for item, duration, deadline in product(work_items, durations, dates):
         pools["propose_schedule_change"].append(
             example(
@@ -999,6 +1260,7 @@ def _candidate_examples() -> dict[str, list[dict[str, Any]]]:
         pools["ai_agent"].append(example(greeting, "ai_agent"))
 
     _add_feature_pools(pools)
+    _add_weak_boundary_pools(pools, courses, dates, work_items)
     return pools
 
 
@@ -1233,8 +1495,10 @@ def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
          "Look up my", "Load my"],
         ["assignments", "Canvas assignments", "homework from Canvas", "new assignments",
          "assignment list", "Canvas homework", "upcoming assignments", "graded work"],
-        ["", "?", " from Canvas"],
+        [" from Canvas", " on the LMS", " from the course portal"],
     ):
+        if any(source in obj.lower() for source in ("canvas", "lms", "portal")):
+            tail = ""
         pools["get_assignments"].append(
             example(f"{lead} {obj}{tail}".strip(), "get_assignments")
         )
@@ -1350,6 +1614,233 @@ def _add_feature_pools(pools: dict[str, list[dict[str, Any]]]) -> None:
         )
 
 
+def _add_weak_boundary_pools(
+    pools: dict[str, list[dict[str, Any]]],
+    courses: list[str],
+    dates: list[str],
+    work_items: list[str],
+) -> None:
+    """Add semantically varied examples around the model's hardest boundaries."""
+
+    task_templates = [
+        "List the work due for {course} {date}",
+        "Which {course} items need submitting {date}?",
+        "Anything due for {course} {date}?",
+        "Give me the {course} due dates for {date}",
+        "What needs turning in for {course} {date}?",
+        "Are there deadlines for {course} {date}?",
+        "Show coursework due in {course} {date}",
+        "Tell me what is due for {course} {date}",
+        "List pending {course} submissions for {date}",
+        "What deadlines are coming up in {course} {date}?",
+        "Which {course} assignments have to be finished {date}?",
+        "Do I owe anything for {course} {date}?",
+        "Show the to-do list for {course} {date}",
+        "What should I turn in for {course} {date}?",
+        "Find my outstanding {course} work for {date}",
+        "What {course} deliverables are due {date}?",
+    ]
+    for template, course, date_value in product(task_templates, courses, dates):
+        pools["get_tasks"].append(
+            example(
+                template.format(course=course, date=date_value),
+                "get_tasks",
+                slots={"course": course, "date": date_value},
+            )
+        )
+    for template, item, date_value in product(
+        [
+            "When do I need to turn in {item} {date}?",
+            "Check whether {item} is due {date}",
+            "Is {item} on my to-do list for {date}?",
+            "Tell me the deadline for {item} {date}",
+            "Does {item} need submitting {date}?",
+        ],
+        work_items,
+        dates,
+    ):
+        pools["get_tasks"].append(
+            example(
+                template.format(item=item, date=date_value),
+                "get_tasks",
+                slots={"title": item, "date": date_value},
+            )
+        )
+
+    for template, item, duration, deadline in product(
+        [
+            "Block {duration} to work on {item} before {deadline}",
+            "Make a {duration} study plan for {item} due {deadline}",
+            "Reserve {duration} for finishing {item} by {deadline}",
+            "I need {duration} to finish {item} before {deadline}",
+            "Fit {item} into my schedule for {duration} by {deadline}",
+            "Set aside {duration} for {item} ahead of {deadline}",
+            "Build me a {duration} work session for {item} before {deadline}",
+            "Put {duration} of study time toward {item} by {deadline}",
+            "Help me schedule {duration} for {item} before {deadline}",
+            "Find room for a {duration} {item} session by {deadline}",
+            "Create a {duration} plan to complete {item} by {deadline}",
+            "Arrange {duration} of focus time for {item} before {deadline}",
+        ],
+        work_items,
+        ["30 minutes", "1 hour", "90 minutes", "2 hours"],
+        dates,
+    ):
+        pools["propose_schedule_change"].append(
+            example(
+                template.format(item=item, duration=duration, deadline=deadline),
+                "propose_schedule_change",
+                slots={"title": item, "duration": duration, "deadline": deadline},
+            )
+        )
+
+    for template, title, start_time, end_time in product(
+        [
+            "Reschedule {title} from {start} to {end}",
+            "Shift {title} from {start} to {end}",
+            "Change {title} from {start} to {end}",
+            "Move the time for {title} from {start} until {end}",
+            "Update {title} so it moves from {start} to {end}",
+            "Put {title} at {end} instead of {start}",
+        ],
+        [
+            "study block",
+            "bible study",
+            "workout",
+            "meeting",
+            "dentist",
+            "lab review",
+            "office hours",
+            "project work",
+        ],
+        ["9 AM", "1 PM", "2 PM", "6 PM"],
+        ["11 AM", "4 PM", "7 PM", "9 PM"],
+    ):
+        pools["move_calendar_block"].append(
+            example(
+                template.format(title=title, start=start_time, end=end_time),
+                "move_calendar_block",
+                slots={
+                    "title": title,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                },
+            )
+        )
+
+    calendar_templates = [
+        "List my {course} events {date}",
+        "What's on my schedule for {course} {date}?",
+        "Show appointments and classes for {course} {date}",
+        "What have I got for {course} {date}?",
+        "Pull up my {course} schedule {date}",
+        "What calendar items do I have for {course} {date}?",
+        "Are there any {course} events {date}?",
+        "Tell me what is booked for {course} {date}",
+        "Show everything scheduled for {course} {date}",
+        "What is already planned for {course} {date}?",
+        "Walk me through my {course} calendar {date}",
+        "Give me my {course} agenda for {date}",
+        "What commitments do I have for {course} {date}?",
+        "Display my {course} timetable {date}",
+    ]
+    for template, course, date_value in product(calendar_templates, courses, dates):
+        pools["get_calendar_events"].append(
+            example(
+                template.format(course=course, date=date_value),
+                "get_calendar_events",
+                slots={"course": course, "date": date_value},
+            )
+        )
+
+    for template, course, date_value in product(
+        [
+            "Sync new {course} work from Canvas {date}",
+            "Refresh the {course} LMS assignments posted {date}",
+            "Check the course portal for new {course} homework {date}",
+            "Pull newly posted {course} assignments from Canvas {date}",
+            "Look on the LMS for new {course} coursework {date}",
+        ],
+        courses,
+        dates,
+    ):
+        pools["get_assignments"].append(
+            example(
+                template.format(course=course, date=date_value),
+                "get_assignments",
+                slots={"course": course, "date": date_value},
+            )
+        )
+
+    classification_titles = [
+        "lecture",
+        "dentist appointment",
+        "study session",
+        "gym",
+        "project meeting",
+        "office hours",
+        "bible study",
+        "coding practice",
+        "club meeting",
+        "lab review",
+    ]
+    for template, title in product(
+        [
+            "For {title}, is it fixed or can it move?",
+            "Does {title} have to stay at its time?",
+            "Can my {title} be rescheduled?",
+            "How should {title} be categorized?",
+            "Is {title} movable or locked in?",
+            "Check whether {title} can move",
+            "Would {title} count as a fixed event?",
+            "Tell me whether {title} is flexible",
+        ],
+        classification_titles,
+    ):
+        pools["classify_calendar_item"].append(
+            example(template.format(title=title), "classify_calendar_item", slots={"title": title})
+        )
+
+    for message in [
+        "Tell me which calendar items can move and which cannot",
+        "Review every event and separate fixed from flexible",
+        "Which parts of my whole schedule are movable?",
+        "Check all calendar entries for flexibility",
+        "Go through the entire calendar and classify each event",
+        "Separate all my commitments into fixed and flexible",
+        "Identify every movable event on my schedule",
+        "Classify the events across my calendar",
+        "Review my full week for fixed and flexible events",
+        "Tell me what can move anywhere on my calendar",
+    ]:
+        pools["classify_all_calendar_events"].append(
+            example(message, "classify_all_calendar_events")
+        )
+
+    for template, title in product(
+        [
+            "Keep {title} fixed",
+            "Allow {title} to move",
+            "Don't move {title}",
+            "Make {title} movable",
+            "Change {title} to flexible",
+            "Change {title} to fixed",
+            "Lock {title} in place",
+            "Set only {title} as flexible",
+            "I want {title} treated as fixed",
+            "Override {title} so it can move",
+        ],
+        classification_titles,
+    ):
+        pools["set_event_flexibility_override"].append(
+            example(
+                template.format(title=title),
+                "set_event_flexibility_override",
+                slots={"title": title},
+            )
+        )
+
+
 def build_structured_examples(
     target_size: int = DEFAULT_DATASET_SIZE,
     seed: int = DEFAULT_SEED,
@@ -1373,7 +1864,7 @@ def build_structured_examples(
     rng = random.Random(seed)
     pools = _candidate_examples()
     for tool in TOOLS:
-        rng.shuffle(pools[tool])
+        pools[tool] = _family_diverse_rows(pools[tool], rng)
 
     base_count, remainder = divmod(target_size, len(TOOLS))
     targets = {
@@ -1415,9 +1906,41 @@ def validate_examples(rows: list[dict[str, Any]], *, target_size: int) -> None:
         raise ValueError(
             f"Dataset split counts do not match {DEFAULT_SPLIT_COUNTS}: {split_counts}"
         )
+    for split in ("development", "unseen_template_test", "human_style_test"):
+        label_counts = Counter(
+            row["tool"] for row in rows if row["split"] == split
+        )
+        if max(label_counts.values()) - min(label_counts.values()) > 1:
+            raise ValueError(f"{split} is not balanced across tools: {label_counts}")
+    for split in ("unseen_template_test", "human_style_test"):
+        covered_slots = {
+            slot
+            for row in rows
+            if row["split"] == split
+            for slot in row.get("slots", {})
+        }
+        if covered_slots != SLOT_NAMES:
+            raise ValueError(
+                f"{split} slot coverage is {covered_slots}; expected {SLOT_NAMES}"
+            )
     train_families = {
         row["template_family_id"] for row in rows if row["split"] == "train"
     }
+    train_families_by_tool = {
+        tool: {
+            row["template_family_id"]
+            for row in rows
+            if row["split"] == "train" and row["tool"] == tool
+        }
+        for tool in TOOLS
+    }
+    sparse_tools = {
+        tool: len(families)
+        for tool, families in train_families_by_tool.items()
+        if len(families) < 8
+    }
+    if sparse_tools:
+        raise ValueError(f"Training template-family coverage is too sparse: {sparse_tools}")
     unseen_families = {
         row["template_family_id"]
         for row in rows
@@ -1535,6 +2058,29 @@ def dataset_manifest(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "label_counts_by_split": {
             split: Counter(rows[index]["tool"] for index in indices)
+            for split, indices in split_indices.items()
+        },
+        "template_family_counts_by_split": {
+            split: Counter(
+                {
+                    tool: len(
+                        {
+                            rows[index]["template_family_id"]
+                            for index in indices
+                            if rows[index]["tool"] == tool
+                        }
+                    )
+                    for tool in TOOLS
+                }
+            )
+            for split, indices in split_indices.items()
+        },
+        "slot_counts_by_split": {
+            split: Counter(
+                slot
+                for index in indices
+                for slot in rows[index].get("slots", {})
+            )
             for split, indices in split_indices.items()
         },
         "unseen_template_family_overlap_with_train": len(

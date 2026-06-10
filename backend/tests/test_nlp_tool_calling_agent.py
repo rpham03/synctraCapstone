@@ -24,6 +24,7 @@ from generate_structured_nlu_dataset import (
     DATASET_SPLITS,
     DEFAULT_DATASET_SIZE,
     DEFAULT_SPLIT_COUNTS,
+    SLOT_NAMES,
     TEST_RATIO,
     TOOLS,
     TRAIN_SOURCE_MIX,
@@ -87,6 +88,88 @@ def test_realistic_dataset_has_followups_noise_and_human_style_proxy():
         for row in rows
         if row["split"] == "human_style_test"
     )
+
+
+def test_realistic_evaluation_suites_are_balanced_and_cover_every_slot():
+    rows = build_structured_examples()
+
+    for split in ("development", "unseen_template_test", "human_style_test"):
+        counts = Counter(row["tool"] for row in rows if row["split"] == split)
+        assert max(counts.values()) - min(counts.values()) <= 1
+
+    for split in ("unseen_template_test", "human_style_test"):
+        covered_slots = {
+            slot
+            for row in rows
+            if row["split"] == split
+            for slot in row["slots"]
+        }
+        assert covered_slots == SLOT_NAMES
+
+
+def test_training_selection_keeps_diverse_template_families_for_every_tool():
+    rows = build_structured_examples()
+    family_counts = {
+        tool: len(
+            {
+                row["template_family_id"]
+                for row in rows
+                if row["split"] == "train" and row["tool"] == tool
+            }
+        )
+        for tool in TOOLS
+    }
+
+    assert min(family_counts.values()) >= 8
+
+
+def test_training_data_teaches_the_weak_intent_boundaries():
+    rows = build_structured_examples()
+    messages_by_tool = {
+        tool: [
+            row["user_message"].lower()
+            for row in rows
+            if row["split"] == "train" and row["tool"] == tool
+        ]
+        for tool in TOOLS
+    }
+
+    assert any("needs turning in" in message for message in messages_by_tool["get_tasks"])
+    assert any("already planned" in message for message in messages_by_tool["get_calendar_events"])
+    assert any(
+        "canvas" in message and any(verb in message for verb in ("sync", "check", "refresh"))
+        for message in messages_by_tool["get_assignments"]
+    )
+    assert any(
+        "before" in message and "focus time" in message
+        for message in messages_by_tool["propose_schedule_change"]
+    )
+    assert any("can move" in message for message in messages_by_tool["classify_calendar_item"])
+    assert any(
+        "anywhere on my calendar" in message
+        for message in messages_by_tool["classify_all_calendar_events"]
+    )
+    assert any("lock" in message for message in messages_by_tool["set_event_flexibility_override"])
+
+
+def test_assignment_sync_examples_name_a_live_course_source():
+    rows = build_structured_examples()
+    source_words = ("canvas", "lms", "portal", "course site")
+
+    assert all(
+        any(source in row["user_message"].lower() for source in source_words)
+        for row in rows
+        if row["tool"] == "get_assignments"
+    )
+
+
+def test_generated_conversational_rows_do_not_contain_known_broken_fragments():
+    rows = build_structured_examples()
+    messages = [row["user_message"].lower() for row in rows]
+
+    assert not any("i was wondering if you could when" in message for message in messages)
+    assert not any(" my as " in message for message in messages)
+    assert not any("is my fixed or flexible" in message for message in messages)
 
 
 def test_calendar_training_data_uses_general_natural_phrasing():
