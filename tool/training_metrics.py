@@ -447,10 +447,10 @@ def label_counts(labels: list[str]) -> dict[str, int]:
 
 
 def text_fingerprint(texts: list[str]) -> str:
-    """Return a stable SHA-256 fingerprint for an ordered text split."""
+    """Return a stable, order-independent SHA-256 fingerprint for a text split."""
 
     digest = hashlib.sha256()
-    for text in texts:
+    for text in sorted(texts):
         digest.update(text.encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()

@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
+import re
 from collections import Counter
 from itertools import product
 from pathlib import Path
@@ -17,6 +19,26 @@ DEFAULT_DATASET_SIZE = 5000
 DEFAULT_SEED = 13
 TRAIN_RATIO = 0.70
 TEST_RATIO = 0.30
+DATASET_SPLITS = (
+    "train",
+    "development",
+    "unseen_template_test",
+    "human_style_test",
+)
+DEFAULT_SPLIT_COUNTS = {
+    "train": 3500,
+    "development": 500,
+    "unseen_template_test": 500,
+    "human_style_test": 500,
+}
+TRAIN_SOURCE_MIX = {
+    "structured_generated": 0.35,
+    "conversational_generated": 0.25,
+    "paraphrase_generated": 0.15,
+    "noisy_generated": 0.10,
+    "clarification_generated": 0.10,
+    "hard_boundary_generated": 0.05,
+}
 TOOLS = [
     "get_assignments",
     "find_free_slots",
@@ -75,6 +97,436 @@ def example(
         "missing_slots": missing,
         "followup_question": followup_question if missing else None,
     }
+
+
+def template_skeleton(row: dict[str, Any]) -> str:
+    """Normalize slot values so related generated prompts share one family."""
+
+    text = " ".join(str(row["user_message"]).lower().split())
+    values = sorted(
+        (
+            (len(str(value)), str(key), str(value).lower())
+            for key, value in row.get("slots", {}).items()
+            if str(value).strip()
+        ),
+        reverse=True,
+    )
+    for _, key, value in values:
+        text = re.sub(
+            rf"(?<!\w){re.escape(value)}(?!\w)",
+            f"<{key}>",
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text
+
+
+def template_family_id(row: dict[str, Any]) -> str:
+    skeleton = template_skeleton(row)
+    digest = hashlib.sha256(f"{row['tool']}:{skeleton}".encode("utf-8")).hexdigest()
+    return f"{row['tool']}:{digest[:16]}"
+
+
+def explicit_split_indices(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
+    """Return indices from dataset split metadata, validating all split names."""
+
+    split_indices = {name: [] for name in DATASET_SPLITS}
+    for index, row in enumerate(rows):
+        split = str(row.get("split") or "")
+        if split not in split_indices:
+            raise ValueError(f"Dataset row {index} has unsupported split {split!r}")
+        split_indices[split].append(index)
+    return split_indices
+
+
+def _balanced_targets(total: int) -> dict[str, int]:
+    base, remainder = divmod(total, len(TOOLS))
+    return {
+        tool: base + (1 if index < remainder else 0)
+        for index, tool in enumerate(TOOLS)
+    }
+
+
+def _select_balanced_indices(
+    candidates: Iterable[int],
+    rows: list[dict[str, Any]],
+    total: int,
+    rng: random.Random,
+) -> list[int]:
+    by_tool = {tool: [] for tool in TOOLS}
+    for index in sorted(candidates):
+        by_tool[rows[index]["tool"]].append(index)
+    targets = _balanced_targets(total)
+    selected: list[int] = []
+    for tool in TOOLS:
+        items = list(by_tool[tool])
+        rng.shuffle(items)
+        if len(items) < targets[tool]:
+            raise ValueError(
+                f"Only {len(items)} {tool} rows available for a {total}-row "
+                f"balanced split; need {targets[tool]}"
+            )
+        selected.extend(items[: targets[tool]])
+    rng.shuffle(selected)
+    return selected
+
+
+def _fill_split_indices(
+    required: Iterable[int],
+    candidates: Iterable[int],
+    rows: list[dict[str, Any]],
+    total: int,
+    rng: random.Random,
+) -> list[int]:
+    """Fill a split while keeping required family-held-out rows outside train."""
+
+    selected = list(dict.fromkeys(required))
+    if len(selected) > total:
+        raise ValueError(f"{len(selected)} required rows do not fit in a {total}-row split")
+    selected_set = set(selected)
+    remaining = sorted(index for index in candidates if index not in selected_set)
+    rng.shuffle(remaining)
+    counts = Counter(rows[index]["tool"] for index in selected)
+    while len(selected) < total:
+        if not remaining:
+            raise ValueError(f"Could not fill a {total}-row split")
+        lowest_count = min(counts.get(tool, 0) for tool in TOOLS)
+        next_index = next(
+            (
+                index
+                for index in remaining
+                if counts.get(rows[index]["tool"], 0) == lowest_count
+            ),
+            remaining[0],
+        )
+        remaining.remove(next_index)
+        selected.append(next_index)
+        counts[rows[next_index]["tool"]] += 1
+    rng.shuffle(selected)
+    return selected
+
+
+def _held_out_template_indices(rows: list[dict[str, Any]]) -> set[int]:
+    """Reserve complete template families before choosing unseen-test rows."""
+
+    by_tool: dict[str, dict[str, list[int]]] = {
+        tool: {} for tool in TOOLS
+    }
+    for index, row in enumerate(rows):
+        family = row["template_family_id"]
+        by_tool[row["tool"]].setdefault(family, []).append(index)
+
+    held_out: set[int] = set()
+    minimum_per_tool = math.ceil(DEFAULT_SPLIT_COUNTS["unseen_template_test"] / len(TOOLS))
+    for tool in TOOLS:
+        selected_for_tool = 0
+        families = sorted(
+            by_tool[tool].items(),
+            key=lambda item: (len(item[1]), item[0]),
+        )
+        for _, indices in families:
+            held_out.update(indices)
+            selected_for_tool += len(indices)
+            if selected_for_tool >= minimum_per_tool:
+                break
+    return held_out
+
+
+def _replace_outside_slots(
+    message: str,
+    slots: dict[str, Any],
+    replacements: tuple[tuple[str, str], ...],
+) -> str:
+    """Apply noise without changing exact slot spans used by the slot trainer."""
+
+    protected: dict[str, str] = {}
+    result = message
+    for index, value in enumerate(
+        sorted((str(value) for value in slots.values()), key=len, reverse=True)
+    ):
+        marker = f"__SYNTRA_SLOT_{index}__"
+        protected[marker] = value
+        result = re.sub(re.escape(value), marker, result, flags=re.IGNORECASE)
+    for pattern, replacement in replacements:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    for marker, value in protected.items():
+        result = result.replace(marker, value)
+    return " ".join(result.split())
+
+
+def _style_row(row: dict[str, Any], source: str, variant: int) -> dict[str, Any]:
+    styled = dict(row)
+    message = str(row["user_message"])
+    slots = dict(row.get("slots", {}))
+    if source == "conversational_generated":
+        wrappers = (
+            ("Hey, can you ", ""),
+            ("Quick question: ", ""),
+            ("When you get a chance, ", " please"),
+            ("I was wondering if you could ", ""),
+        )
+        prefix, suffix = wrappers[variant % len(wrappers)]
+        message = prefix + message[0].lower() + message[1:] + suffix
+    elif source == "paraphrase_generated":
+        wrappers = (
+            ("Could you help me with this: ", ""),
+            ("What I need is this: ", ""),
+            ("Please handle this request: ", ""),
+            ("Here is what I am trying to do: ", ""),
+        )
+        prefix, suffix = wrappers[variant % len(wrappers)]
+        message = prefix + message[0].lower() + message[1:] + suffix
+    elif source == "noisy_generated":
+        replacement_sets = (
+            ((r"\bplease\b", "pls"), (r"\byou\b", "u")),
+            ((r"\btomorrow\b", "tmrw"), (r"\bcalendar\b", "cal")),
+            ((r"\bassignment\b", "assignmnt"), (r"\bschedule\b", "sched")),
+            ((r"[?.!,]", ""),),
+        )
+        message = _replace_outside_slots(
+            message.lower(),
+            slots,
+            replacement_sets[variant % len(replacement_sets)],
+        )
+    elif source == "human_style_proxy":
+        wrappers = (
+            ("hey, ", ""),
+            ("quick question, ", ""),
+            ("not sure how to phrase this but ", ""),
+            ("when u get a sec, ", " pls"),
+            ("can you help me out and ", ""),
+        )
+        prefix, suffix = wrappers[variant % len(wrappers)]
+        message = prefix + message[0].lower() + message[1:] + suffix
+
+    styled["user_message"] = " ".join(message.split())
+    styled["source"] = source
+    return styled
+
+
+def _clarification_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Remove one actionable slot so the row genuinely requires a follow-up."""
+
+    required_by_tool = {
+        "add_calendar_block": ("title", "date", "start_time", "end_time"),
+        "propose_schedule_change": ("title", "duration", "deadline"),
+        "move_calendar_block": ("title", "date", "start_time"),
+        "delete_calendar_block": ("title",),
+        "set_productivity_preferences": ("period", "start_time"),
+        "classify_calendar_item": ("title",),
+        "set_event_flexibility_override": ("title",),
+    }
+    required = required_by_tool.get(row["tool"], ())
+    removable = [key for key in required if key in row.get("slots", {})]
+    if not removable:
+        return row
+
+    key = removable[-1]
+    value = str(row["slots"][key])
+    changed = dict(row)
+    changed["slots"] = dict(row["slots"])
+    changed["slots"].pop(key)
+    changed["user_message"] = " ".join(
+        re.sub(re.escape(value), "", row["user_message"], count=1, flags=re.IGNORECASE)
+        .replace("  ", " ")
+        .strip(" ,.?")
+        .split()
+    )
+    missing = list(dict.fromkeys([*row.get("missing_slots", []), key]))
+    changed["needs_followup"] = True
+    changed["missing_slots"] = missing
+    changed["followup_question"] = f"What {key.replace('_', ' ')} should I use?"
+    changed["source"] = "clarification_generated"
+    return changed
+
+
+def _apply_training_mix(
+    rows: list[dict[str, Any]],
+    train_indices: list[int],
+    rng: random.Random,
+) -> None:
+    available = list(train_indices)
+    rng.shuffle(available)
+    counts = {
+        source: int(round(len(train_indices) * ratio))
+        for source, ratio in TRAIN_SOURCE_MIX.items()
+    }
+    counts["structured_generated"] += len(train_indices) - sum(counts.values())
+
+    clarification_candidates = [
+        index
+        for index in available
+        if rows[index]["tool"]
+        in {
+            "add_calendar_block",
+            "propose_schedule_change",
+            "move_calendar_block",
+            "delete_calendar_block",
+            "set_productivity_preferences",
+            "classify_calendar_item",
+            "set_event_flexibility_override",
+        }
+        and rows[index].get("slots")
+    ]
+    hard_boundary_candidates = [
+        index
+        for index in available
+        if rows[index]["tool"]
+        in {
+            "add_calendar_block",
+            "propose_schedule_change",
+            "find_free_slots",
+            "get_calendar_events",
+            "get_assignments",
+            "get_tasks",
+            "suggest_preference_schedule",
+            "apply_preference_schedule",
+            "ai_agent",
+        }
+    ]
+
+    assigned: set[int] = set()
+
+    def take(candidates: Iterable[int], count: int) -> list[int]:
+        chosen = [index for index in candidates if index not in assigned][:count]
+        if len(chosen) != count:
+            raise ValueError(f"Could only assign {len(chosen)} of {count} requested rows")
+        assigned.update(chosen)
+        return chosen
+
+    clarification = take(clarification_candidates, counts["clarification_generated"])
+    for index in clarification:
+        rows[index] = _clarification_row(rows[index])
+
+    hard = take(hard_boundary_candidates, counts["hard_boundary_generated"])
+    for index in hard:
+        rows[index]["source"] = "hard_boundary_generated"
+
+    for source in (
+        "noisy_generated",
+        "conversational_generated",
+        "paraphrase_generated",
+        "structured_generated",
+    ):
+        chosen = take(available, counts[source])
+        for variant, index in enumerate(chosen):
+            rows[index] = _style_row(rows[index], source, variant)
+
+
+def _assign_dataset_splits(rows: list[dict[str, Any]], seed: int) -> None:
+    if len(rows) != DEFAULT_DATASET_SIZE:
+        raise ValueError(
+            "Explicit four-way evaluation currently requires exactly "
+            f"{DEFAULT_DATASET_SIZE} rows"
+        )
+    rng = random.Random(seed)
+    for row in rows:
+        row["template_family_id"] = template_family_id(row)
+
+    held_out_templates = _held_out_template_indices(rows)
+    unseen = _select_balanced_indices(
+        held_out_templates,
+        rows,
+        DEFAULT_SPLIT_COUNTS["unseen_template_test"],
+        rng,
+    )
+    unseen_set = set(unseen)
+    unseen_families = {rows[index]["template_family_id"] for index in unseen}
+    reserved_siblings = [
+        index
+        for index, row in enumerate(rows)
+        if row["template_family_id"] in unseen_families and index not in unseen_set
+    ]
+    rng.shuffle(reserved_siblings)
+    # Keep every sibling of an unseen-test family out of both training and the
+    # development set. Development is used while tuning, so putting these rows
+    # there would leak the supposedly unseen wording family.
+    human_required = reserved_siblings
+    development_required: list[int] = []
+
+    remaining = [index for index in range(len(rows)) if index not in unseen_set]
+    human_style = _fill_split_indices(
+        human_required,
+        [index for index in remaining if index not in set(development_required)],
+        rows,
+        DEFAULT_SPLIT_COUNTS["human_style_test"],
+        rng,
+    )
+    human_set = set(human_style)
+    remaining = [index for index in remaining if index not in human_set]
+    development = _fill_split_indices(
+        development_required,
+        remaining,
+        rows,
+        DEFAULT_SPLIT_COUNTS["development"],
+        rng,
+    )
+    development_set = set(development)
+    train = [index for index in remaining if index not in development_set]
+
+    for index in train:
+        rows[index]["split"] = "train"
+    for index in development:
+        rows[index]["split"] = "development"
+        rows[index]["source"] = "development_generated"
+    for index in unseen:
+        rows[index]["split"] = "unseen_template_test"
+        rows[index]["source"] = "unseen_template_generated"
+    for variant, index in enumerate(human_style):
+        rows[index]["split"] = "human_style_test"
+        rows[index] = _style_row(rows[index], "human_style_proxy", variant)
+
+    _apply_training_mix(rows, train, rng)
+    for row in rows:
+        row["difficulty"] = (
+            "hard"
+            if row.get("needs_followup")
+            or row.get("source")
+            in {
+                "noisy_generated",
+                "hard_boundary_generated",
+                "human_style_proxy",
+                "unseen_template_generated",
+            }
+            else "medium"
+            if row.get("source")
+            in {"conversational_generated", "paraphrase_generated"}
+            else "easy"
+        )
+
+
+def _ensure_unique_messages(rows: list[dict[str, Any]]) -> None:
+    """Keep transformed rows unique without changing their slots or labels."""
+
+    prefixes = (
+        "Please ",
+        "Could you ",
+        "Can you ",
+        "Hey, ",
+        "Quick request: ",
+        "When possible, ",
+        "For me, ",
+        "I need you to ",
+        "Would you ",
+        "Help me ",
+    )
+    suffixes = ("", " please", " for me", " when possible", " thanks")
+    seen: set[str] = set()
+    for row in rows:
+        original = str(row["user_message"]).strip()
+        candidate = original
+        attempt = 0
+        key = " ".join(candidate.lower().split())
+        while key in seen:
+            prefix = prefixes[attempt % len(prefixes)]
+            suffix = suffixes[(attempt // len(prefixes)) % len(suffixes)]
+            candidate = f"{prefix}{original[0].lower()}{original[1:]}{suffix}"
+            key = " ".join(candidate.lower().split())
+            attempt += 1
+            if attempt > len(prefixes) * len(suffixes):
+                raise ValueError(f"Could not make transformed message unique: {original}")
+        row["user_message"] = " ".join(candidate.split())
+        seen.add(key)
 
 
 def _base_examples() -> list[dict[str, Any]]:
@@ -940,6 +1392,8 @@ def build_structured_examples(
             )
 
     rows = [row for tool in TOOLS for row in by_tool[tool]]
+    _assign_dataset_splits(rows, seed)
+    _ensure_unique_messages(rows)
     rng.shuffle(rows)
     validate_examples(rows, target_size=target_size)
     return rows
@@ -956,6 +1410,46 @@ def validate_examples(rows: list[dict[str, Any]], *, target_size: int) -> None:
         raise ValueError(f"Dataset tool labels do not match expected tools: {counts}")
     if max(counts.values()) - min(counts.values()) > 1:
         raise ValueError(f"Dataset is not balanced across tools: {counts}")
+    split_counts = Counter(str(row.get("split")) for row in rows)
+    if split_counts != Counter(DEFAULT_SPLIT_COUNTS):
+        raise ValueError(
+            f"Dataset split counts do not match {DEFAULT_SPLIT_COUNTS}: {split_counts}"
+        )
+    train_families = {
+        row["template_family_id"] for row in rows if row["split"] == "train"
+    }
+    unseen_families = {
+        row["template_family_id"]
+        for row in rows
+        if row["split"] == "unseen_template_test"
+    }
+    overlap = train_families & unseen_families
+    if overlap:
+        raise ValueError(
+            f"{len(overlap)} unseen-template families also occur in training"
+        )
+    development_families = {
+        row["template_family_id"] for row in rows if row["split"] == "development"
+    }
+    development_overlap = development_families & unseen_families
+    if development_overlap:
+        raise ValueError(
+            f"{len(development_overlap)} unseen-template families occur in development"
+        )
+    expected_train_sources = {
+        source: int(round(DEFAULT_SPLIT_COUNTS["train"] * ratio))
+        for source, ratio in TRAIN_SOURCE_MIX.items()
+    }
+    expected_train_sources["structured_generated"] += (
+        DEFAULT_SPLIT_COUNTS["train"] - sum(expected_train_sources.values())
+    )
+    train_sources = Counter(
+        row.get("source") for row in rows if row["split"] == "train"
+    )
+    if train_sources != Counter(expected_train_sources):
+        raise ValueError(
+            f"Training source mix does not match {expected_train_sources}: {train_sources}"
+        )
 
 
 def balanced_split_indices(
@@ -1013,6 +1507,50 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
+def dataset_manifest(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    split_indices = explicit_split_indices(rows)
+    train_families = {
+        rows[index]["template_family_id"] for index in split_indices["train"]
+    }
+    unseen_families = {
+        rows[index]["template_family_id"]
+        for index in split_indices["unseen_template_test"]
+    }
+    development_families = {
+        rows[index]["template_family_id"]
+        for index in split_indices["development"]
+    }
+    return {
+        "total_examples": len(rows),
+        "split_strategy": "explicit_four_way_with_unseen_template_family_holdout",
+        "split_counts": {
+            split: len(indices) for split, indices in split_indices.items()
+        },
+        "training_source_mix": Counter(
+            rows[index]["source"] for index in split_indices["train"]
+        ),
+        "difficulty_counts": Counter(row["difficulty"] for row in rows),
+        "needs_followup_counts": Counter(
+            str(bool(row["needs_followup"])).lower() for row in rows
+        ),
+        "label_counts_by_split": {
+            split: Counter(rows[index]["tool"] for index in indices)
+            for split, indices in split_indices.items()
+        },
+        "unseen_template_family_overlap_with_train": len(
+            train_families & unseen_families
+        ),
+        "unseen_template_family_overlap_with_development": len(
+            development_families & unseen_families
+        ),
+        "human_style_test_note": (
+            "This is a generated conversational/noisy proxy. Replace or extend it "
+            "with untouched prompts collected from real users before claiming "
+            "human-written evaluation accuracy."
+        ),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1021,25 +1559,40 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", type=int, default=DEFAULT_DATASET_SIZE)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--manifest-output",
+        help="Optional manifest JSON path. Defaults next to --output.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     dataset = build_structured_examples(args.size, args.seed)
-    write_jsonl(Path(args.output), dataset)
-    counts = Counter(row["tool"] for row in dataset)
-    train_indices, test_indices = balanced_split_indices(
-        [row["tool"] for row in dataset],
-        seed=args.seed,
+    output_path = Path(args.output)
+    write_jsonl(output_path, dataset)
+    manifest_path = (
+        Path(args.manifest_output)
+        if args.manifest_output
+        else output_path.with_name("syntra_nlu_dataset_manifest.json")
     )
+    manifest = dataset_manifest(dataset)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    counts = Counter(row["tool"] for row in dataset)
     print(
         json.dumps(
             {
                 "output": args.output,
+                "manifest": str(manifest_path),
                 "total_examples": len(dataset),
-                "train_examples": len(train_indices),
-                "test_examples": len(test_indices),
+                "split_counts": manifest["split_counts"],
+                "training_source_mix": manifest["training_source_mix"],
+                "unseen_template_family_overlap_with_train": manifest[
+                    "unseen_template_family_overlap_with_train"
+                ],
+                "unseen_template_family_overlap_with_development": manifest[
+                    "unseen_template_family_overlap_with_development"
+                ],
                 "label_counts": counts,
             },
             indent=2,

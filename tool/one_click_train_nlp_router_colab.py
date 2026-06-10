@@ -14,8 +14,8 @@ Default behavior:
 - supports json/jsonl/csv/txt/tsv/parquet and dialogue JSON with turns
 - trains a transformer intent classifier
 - trains a second token-classification model for slots from structured NLU JSONL
-- uses the same 5,000 structured examples and 70/30 split for both models
-- records real held-out per-tool/per-slot metrics, model size, parameters, and latency
+- uses explicit train, development, unseen-template, and human-style proxy splits
+- records per-suite per-tool/per-slot metrics, model size, parameters, and latency
 - saves the model to /content/syntra_tool_router
 - tests several prompts and prints the predicted Syntra tool calls
 """
@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from generate_structured_nlu_dataset import (
+    DATASET_SPLITS,
     DEFAULT_DATASET_SIZE,
     TEST_RATIO,
     balanced_split_indices,
@@ -105,6 +106,9 @@ DEFAULT_TEST_PROMPTS = [
 class TrainingExample:
     text: str
     label: str
+    split: str = "train"
+    source: str = "unspecified"
+    template_family_id: str = ""
 
 
 def manual_eval_examples() -> list[TrainingExample]:
@@ -1612,9 +1616,32 @@ def load_structured_nlu_examples(path: Path) -> list[TrainingExample]:
         text = extract_user_text(row)
         label = extract_exact_label(row)
         if text and label:
-            examples.append(TrainingExample(text=text, label=label))
+            examples.append(
+                TrainingExample(
+                    text=text,
+                    label=label,
+                    split=str(row.get("split") or "train"),
+                    source=str(row.get("source") or "unspecified"),
+                    template_family_id=str(row.get("template_family_id") or ""),
+                )
+            )
     print(f"[structured-nlu] loaded {len(examples)} canonical intent rows from {path}")
     return examples
+
+
+def explicit_training_split_indices(
+    examples: list[TrainingExample],
+) -> dict[str, list[int]] | None:
+    """Use canonical split metadata when every row provides a supported split."""
+
+    if not examples or any(example.split not in DATASET_SPLITS for example in examples):
+        return None
+    split_indices = {split: [] for split in DATASET_SPLITS}
+    for index, example in enumerate(examples):
+        split_indices[example.split].append(index)
+    if any(not split_indices[split] for split in DATASET_SPLITS):
+        return None
+    return split_indices
 
 
 def train_slot_model(args: argparse.Namespace, output_dir: Path) -> None:
@@ -1920,8 +1947,8 @@ def select_balanced_dataset(
     if len(examples) == target_size and all(
         len(by_label[label]) == targets[label] for label in LABELS
     ):
-        # Preserve canonical order so the intent and slot trainers produce the
-        # same deterministic held-out split from the shared structured dataset.
+        # Preserve canonical order and explicit split metadata so the intent and
+        # slot trainers evaluate the same development and test rows.
         return examples
 
     rng = random.Random(seed)
@@ -2094,20 +2121,48 @@ def train_and_test(args: argparse.Namespace) -> None:
             "label": [label_to_id[ex.label] for ex in examples],
         }
     )
-    train_indices, test_indices = balanced_split_indices(
-        [ex.label for ex in examples],
-        train_ratio=1 - args.test_ratio,
-        seed=args.seed,
-    )
+    explicit_splits = explicit_training_split_indices(examples)
+    if explicit_splits is not None:
+        train_indices = explicit_splits["train"]
+        development_indices = explicit_splits["development"]
+        test_indices = explicit_splits["unseen_template_test"]
+        human_style_indices = explicit_splits["human_style_test"]
+        unseen_families = {
+            examples[index].template_family_id for index in test_indices
+        }
+        for split_name, indices in (
+            ("train", train_indices),
+            ("development", development_indices),
+        ):
+            overlap = unseen_families & {
+                examples[index].template_family_id for index in indices
+            }
+            if overlap:
+                raise ValueError(
+                    f"{len(overlap)} unseen-template families leaked into "
+                    f"{split_name}"
+                )
+    else:
+        train_indices, test_indices = balanced_split_indices(
+            [ex.label for ex in examples],
+            train_ratio=1 - args.test_ratio,
+            seed=args.seed,
+        )
+        development_indices = test_indices
+        human_style_indices = test_indices
     dataset = DatasetDict(
         {
             "train": full_dataset.select(train_indices),
             "test": full_dataset.select(test_indices),
+            "development": full_dataset.select(development_indices),
+            "human_style_test": full_dataset.select(human_style_indices),
         }
     )
     print(
         f"[data] split: {len(dataset['train'])} training / "
-        f"{len(dataset['test'])} testing"
+        f"{len(dataset['development'])} development / "
+        f"{len(dataset['test'])} unseen-template testing / "
+        f"{len(dataset['human_style_test'])} human-style proxy testing"
     )
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
@@ -2161,7 +2216,7 @@ def train_and_test(args: argparse.Namespace) -> None:
         "model": model,
         "args": TrainingArguments(**training_kwargs),
         "train_dataset": tokenized["train"],
-        "eval_dataset": tokenized["test"],
+        "eval_dataset": tokenized["development"],
         "data_collator": DataCollatorWithPadding(tokenizer=tokenizer),
         "compute_metrics": compute_metrics,
     }
@@ -2202,25 +2257,103 @@ def train_and_test(args: argparse.Namespace) -> None:
         LABELS,
         confidences.tolist(),
     )
+    unseen_suite_report = dict(report)
+    unseen_suite_report["text_sha256"] = text_fingerprint(held_out_texts)
+    unseen_suite_report["label_counts"] = label_counts(held_out_labels)
+
+    def evaluate_suite(
+        dataset_key: str,
+        indices: list[int],
+    ) -> dict[str, Any]:
+        suite_output = trainer.predict(tokenized[dataset_key])
+        suite_logits = np.asarray(suite_output.predictions)
+        suite_expected = np.asarray(suite_output.label_ids).astype(int)
+        suite_predicted = np.argmax(suite_logits, axis=-1).astype(int)
+        suite_shifted = suite_logits - np.max(suite_logits, axis=-1, keepdims=True)
+        suite_probabilities = np.exp(suite_shifted) / np.exp(suite_shifted).sum(
+            axis=-1, keepdims=True
+        )
+        suite_report = classification_report(
+            suite_expected.tolist(),
+            suite_predicted.tolist(),
+            LABELS,
+            np.max(suite_probabilities, axis=-1).tolist(),
+        )
+        suite_report["text_sha256"] = text_fingerprint(
+            [examples[index].text for index in indices]
+        )
+        suite_report["label_counts"] = label_counts(
+            [examples[index].label for index in indices]
+        )
+        return suite_report
+
+    development_suite_report = evaluate_suite(
+        "development",
+        development_indices,
+    )
+    human_style_suite_report = evaluate_suite(
+        "human_style_test",
+        human_style_indices,
+    )
+    evaluation_suites = {
+        "development": development_suite_report,
+        "unseen_template_test": unseen_suite_report,
+        "human_style_test": human_style_suite_report,
+    }
     report.update(
         {
-            "report_type": "trained_intent_classifier_held_out_test",
+            "report_type": "trained_intent_classifier_unseen_template_test",
             "split": {
                 "seed": args.seed,
-                "train_ratio": round(1 - args.test_ratio, 6),
-                "test_ratio": args.test_ratio,
+                "strategy": (
+                    "explicit_four_way_dataset_split"
+                    if explicit_splits is not None
+                    else "legacy_balanced_random_split"
+                ),
                 "total_examples": len(examples),
                 "train_examples": len(dataset["train"]),
-                "test_examples": len(dataset["test"]),
+                "development_examples": len(dataset["development"]),
+                "unseen_template_test_examples": len(dataset["test"]),
+                "human_style_test_examples": len(dataset["human_style_test"]),
                 "train_label_counts": label_counts(
                     [examples[index].label for index in train_indices]
                 ),
-                "test_label_counts": label_counts(held_out_labels),
+                "development_label_counts": label_counts(
+                    [examples[index].label for index in development_indices]
+                ),
+                "unseen_template_test_label_counts": label_counts(held_out_labels),
+                "human_style_test_label_counts": label_counts(
+                    [examples[index].label for index in human_style_indices]
+                ),
                 "train_text_sha256": text_fingerprint(
                     [examples[index].text for index in train_indices]
                 ),
-                "test_text_sha256": text_fingerprint(held_out_texts),
+                "development_text_sha256": text_fingerprint(
+                    [examples[index].text for index in development_indices]
+                ),
+                "unseen_template_test_text_sha256": text_fingerprint(held_out_texts),
+                "human_style_test_text_sha256": text_fingerprint(
+                    [examples[index].text for index in human_style_indices]
+                ),
+                "unseen_template_family_overlap_with_train": len(
+                    {
+                        examples[index].template_family_id for index in train_indices
+                    }
+                    & {
+                        examples[index].template_family_id for index in test_indices
+                    }
+                ),
+                "unseen_template_family_overlap_with_development": len(
+                    {
+                        examples[index].template_family_id
+                        for index in development_indices
+                    }
+                    & {
+                        examples[index].template_family_id for index in test_indices
+                    }
+                ),
             },
+            "evaluation_suites": evaluation_suites,
             "training": {
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
@@ -2290,27 +2423,38 @@ def train_and_test(args: argparse.Namespace) -> None:
         {
             "total_examples": len(examples),
             "train_examples": len(dataset["train"]),
-            "test_examples": len(dataset["test"]),
-            "test_ratio": args.test_ratio,
+            "development_examples": len(dataset["development"]),
+            "unseen_template_test_examples": len(dataset["test"]),
+            "human_style_test_examples": len(dataset["human_style_test"]),
             "seed": args.seed,
             "structured_nlu_examples": len(structured),
             "base_model": args.base_model,
             "label_counts": counts,
-            "held_out_accuracy": report["accuracy"],
-            "held_out_macro_f1": report["macro_average"]["f1"],
+            "evaluation_accuracy": {
+                name: suite["accuracy"] for name, suite in evaluation_suites.items()
+            },
+            "evaluation_macro_f1": {
+                name: suite["macro_average"]["f1"]
+                for name, suite in evaluation_suites.items()
+            },
             "metrics_artifact": "intent_metrics.json",
             "predictions_artifact": "intent_test_predictions.jsonl",
             "confusion_matrix_artifact": "intent_confusion_matrix.csv",
         },
     )
-    print("\n[intent-metrics] real held-out transformer results")
+    print("\n[intent-metrics] real transformer results by evaluation suite")
     print(
         json.dumps(
             {
-                "accuracy": report["accuracy"],
-                "macro_f1": report["macro_average"]["f1"],
-                "weighted_f1": report["weighted_average"]["f1"],
-                "test_examples": report["total"],
+                "evaluation_suites": {
+                    name: {
+                        "accuracy": suite["accuracy"],
+                        "macro_f1": suite["macro_average"]["f1"],
+                        "weighted_f1": suite["weighted_average"]["f1"],
+                        "examples": suite["total"],
+                    }
+                    for name, suite in evaluation_suites.items()
+                },
                 "parameters": report["model"]["total_parameters"],
                 "artifact_size_mb": report["model"]["saved_artifact_size_mb"],
                 "latency": report["latency"],
@@ -2318,7 +2462,7 @@ def train_and_test(args: argparse.Namespace) -> None:
             indent=2,
         )
     )
-    print("\n[intent-metrics] per-tool held-out metrics")
+    print("\n[intent-metrics] per-tool unseen-template metrics")
     print(
         f"{'tool':38} {'accuracy':>9} {'precision':>9} "
         f"{'recall':>8} {'f1':>8} {'support':>8}"
@@ -2350,6 +2494,11 @@ def train_and_test(args: argparse.Namespace) -> None:
                     output_dir / "intent_confusion_matrix.csv"
                 ),
                 "slot_metrics": str(slot_metrics_path),
+                "dataset_manifest": str(
+                    Path(args.structured_nlu_data).with_name(
+                        "syntra_nlu_dataset_manifest.json"
+                    )
+                ),
             },
         },
     )
@@ -2423,7 +2572,10 @@ def parse_args() -> argparse.Namespace:
         "--test-ratio",
         type=float,
         default=TEST_RATIO,
-        help="Evaluation split used by both models. Default: 0.30 (3500/1500).",
+        help=(
+            "Legacy fallback test ratio when input rows lack explicit split "
+            "metadata. The canonical 5,000-row dataset uses four fixed splits."
+        ),
     )
     parser.add_argument("--base-model", default="distilbert-base-uncased")
     parser.add_argument("--epochs", type=float, default=6.0)

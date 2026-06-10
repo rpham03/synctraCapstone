@@ -21,12 +21,17 @@ from nlp_tool_calling_agent import (
     NlpToolCallingAgent,
 )
 from generate_structured_nlu_dataset import (
+    DATASET_SPLITS,
     DEFAULT_DATASET_SIZE,
+    DEFAULT_SPLIT_COUNTS,
     TEST_RATIO,
     TOOLS,
+    TRAIN_SOURCE_MIX,
     TRAIN_RATIO,
     balanced_split_indices,
     build_structured_examples,
+    dataset_manifest,
+    explicit_split_indices,
 )
 from one_click_train_nlp_router_colab import (
     TrainingExample,
@@ -46,6 +51,42 @@ def test_shared_structured_nlu_dataset_has_5000_balanced_examples():
     assert set(counts) == set(TOOLS)
     assert max(counts.values()) - min(counts.values()) <= 1
     assert len({" ".join(row["user_message"].lower().split()) for row in rows}) == 5000
+
+
+def test_shared_dataset_has_explicit_realistic_evaluation_splits():
+    rows = build_structured_examples()
+    split_indices = explicit_split_indices(rows)
+    manifest = dataset_manifest(rows)
+
+    assert set(split_indices) == set(DATASET_SPLITS)
+    assert {name: len(indices) for name, indices in split_indices.items()} == (
+        DEFAULT_SPLIT_COUNTS
+    )
+    assert manifest["unseen_template_family_overlap_with_train"] == 0
+    assert manifest["unseen_template_family_overlap_with_development"] == 0
+    assert manifest["training_source_mix"] == Counter(
+        {
+            source: int(round(DEFAULT_SPLIT_COUNTS["train"] * ratio))
+            for source, ratio in TRAIN_SOURCE_MIX.items()
+        }
+    )
+
+
+def test_realistic_dataset_has_followups_noise_and_human_style_proxy():
+    rows = build_structured_examples()
+
+    assert sum(
+        row["split"] == "train" and row["needs_followup"] for row in rows
+    ) >= 350
+    assert any(
+        row["split"] == "train" and row["source"] == "noisy_generated"
+        for row in rows
+    )
+    assert all(
+        row["source"] == "human_style_proxy"
+        for row in rows
+        if row["split"] == "human_style_test"
+    )
 
 
 def test_calendar_training_data_uses_general_natural_phrasing():
@@ -82,6 +123,9 @@ def test_checked_in_structured_nlu_dataset_matches_generated_rows():
     examples = load_examples(TOOL_DIR / "syntra_nlu_training_data.jsonl")
 
     assert len(examples) == DEFAULT_DATASET_SIZE
+    assert Counter(example.split for example in examples) == Counter(
+        DEFAULT_SPLIT_COUNTS
+    )
     assert all(
         not example.slots or find_slot_spans(example.user_message, example.slots)
         for example in examples
@@ -153,7 +197,9 @@ def test_canonical_nlu_data_contains_slots_and_followup_ground_truth():
     incomplete = next(
         example
         for example in examples
-        if example.user_message == "Add a calendar block tomorrow"
+        if example.tool == ADD_CALENDAR_BLOCK_ACTION
+        and example.slots == {"date": "tomorrow"}
+        and example.missing_slots == ("title", "start_time", "end_time")
     )
 
     assert complete.tool == ADD_CALENDAR_BLOCK_ACTION

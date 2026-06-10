@@ -1,0 +1,108 @@
+{
+  "total_examples": 5000,
+  "split_strategy": "explicit_four_way_with_unseen_template_family_holdout",
+  "split_counts": {
+    "train": 3500,
+    "development": 500,
+    "unseen_template_test": 500,
+    "human_style_test": 500
+  },
+  "training_source_mix": {
+    "conversational_generated": 875,
+    "structured_generated": 1225,
+    "hard_boundary_generated": 175,
+    "noisy_generated": 350,
+    "paraphrase_generated": 525,
+    "clarification_generated": 350
+  },
+  "difficulty_counts": {
+    "medium": 1400,
+    "hard": 1875,
+    "easy": 1725
+  },
+  "needs_followup_counts": {
+    "false": 4579,
+    "true": 421
+  },
+  "label_counts_by_split": {
+    "train": {
+      "get_calendar_events": 164,
+      "suggest_preference_schedule": 210,
+      "get_assignments": 210,
+      "set_productivity_preferences": 209,
+      "get_tasks": 193,
+      "remove_productivity_preferences": 209,
+      "propose_schedule_change": 207,
+      "classify_all_calendar_events": 210,
+      "get_productivity_preferences": 211,
+      "add_calendar_block": 208,
+      "ai_agent": 211,
+      "apply_preference_schedule": 211,
+      "find_free_slots": 210,
+      "classify_calendar_item": 210,
+      "move_calendar_block": 209,
+      "set_event_flexibility_override": 209,
+      "delete_calendar_block": 209
+    },
+    "development": {
+      "get_calendar_events": 30,
+      "classify_calendar_item": 29,
+      "propose_schedule_change": 30,
+      "ai_agent": 29,
+      "move_calendar_block": 29,
+      "remove_productivity_preferences": 30,
+      "get_tasks": 29,
+      "classify_all_calendar_events": 29,
+      "suggest_preference_schedule": 29,
+      "set_productivity_preferences": 30,
+      "get_assignments": 29,
+      "add_calendar_block": 30,
+      "get_productivity_preferences": 29,
+      "apply_preference_schedule": 29,
+      "set_event_flexibility_override": 30,
+      "find_free_slots": 29,
+      "delete_calendar_block": 30
+    },
+    "unseen_template_test": {
+      "propose_schedule_change": 30,
+      "suggest_preference_schedule": 29,
+      "remove_productivity_preferences": 29,
+      "get_calendar_events": 30,
+      "move_calendar_block": 30,
+      "get_tasks": 30,
+      "set_productivity_preferences": 29,
+      "delete_calendar_block": 29,
+      "add_calendar_block": 30,
+      "classify_all_calendar_events": 29,
+      "set_event_flexibility_override": 29,
+      "get_productivity_preferences": 29,
+      "find_free_slots": 30,
+      "get_assignments": 30,
+      "apply_preference_schedule": 29,
+      "classify_calendar_item": 29,
+      "ai_agent": 29
+    },
+    "human_style_test": {
+      "get_tasks": 42,
+      "find_free_slots": 26,
+      "set_event_flexibility_override": 26,
+      "propose_schedule_change": 27,
+      "classify_calendar_item": 26,
+      "get_assignments": 26,
+      "ai_agent": 25,
+      "get_calendar_events": 70,
+      "classify_all_calendar_events": 26,
+      "add_calendar_block": 26,
+      "get_productivity_preferences": 25,
+      "remove_productivity_preferences": 26,
+      "suggest_preference_schedule": 26,
+      "apply_preference_schedule": 25,
+      "delete_calendar_block": 26,
+      "move_calendar_block": 26,
+      "set_productivity_preferences": 26
+    }
+  },
+  "unseen_template_family_overlap_with_train": 0,
+  "unseen_template_family_overlap_with_development": 0,
+  "human_style_test_note": "This is a generated conversational/noisy proxy. Replace or extend it with untouched prompts collected from real users before claiming human-written evaluation accuracy."
+}

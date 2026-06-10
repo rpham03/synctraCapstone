@@ -22,7 +22,7 @@ the intent-model directory. Runtime rules still normalize dates/times and
 verify required slots before any tool executes.
 
 By default this trainer requires the shared 5,000-row structured dataset and
-uses a deterministic 70% training / 30% testing split.
+uses its explicit train, development, unseen-template, and human-style splits.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from generate_structured_nlu_dataset import (
+    DATASET_SPLITS,
     DEFAULT_DATASET_SIZE,
     TEST_RATIO,
     balanced_split_indices,
@@ -73,6 +74,8 @@ class StructuredNluExample:
     needs_followup: bool
     missing_slots: tuple[str, ...]
     followup_question: str | None
+    split: str
+    template_family_id: str
 
 
 def load_examples(path: Path) -> list[StructuredNluExample]:
@@ -107,11 +110,26 @@ def load_examples(path: Path) -> list[StructuredNluExample]:
                         if raw.get("followup_question")
                         else None
                     ),
+                    split=str(raw.get("split") or "train"),
+                    template_family_id=str(raw.get("template_family_id") or ""),
                 )
             )
     if not examples:
         raise ValueError(f"No structured NLU examples found in {path}")
     return examples
+
+
+def explicit_slot_split_indices(
+    examples: list[StructuredNluExample],
+) -> dict[str, list[int]] | None:
+    if not examples or any(example.split not in DATASET_SPLITS for example in examples):
+        return None
+    split_indices = {split: [] for split in DATASET_SPLITS}
+    for index, example in enumerate(examples):
+        split_indices[example.split].append(index)
+    if any(not split_indices[split] for split in DATASET_SPLITS):
+        return None
+    return split_indices
 
 
 def dedupe_examples(
@@ -222,20 +240,48 @@ def train(args: argparse.Namespace) -> None:
         rows.append(encoded)
 
     full_dataset = Dataset.from_list(rows)
-    train_indices, test_indices = balanced_split_indices(
-        [example.tool for example in examples],
-        train_ratio=1 - args.test_ratio,
-        seed=args.seed,
-    )
+    explicit_splits = explicit_slot_split_indices(examples)
+    if explicit_splits is not None:
+        train_indices = explicit_splits["train"]
+        development_indices = explicit_splits["development"]
+        test_indices = explicit_splits["unseen_template_test"]
+        human_style_indices = explicit_splits["human_style_test"]
+        unseen_families = {
+            examples[index].template_family_id for index in test_indices
+        }
+        for split_name, indices in (
+            ("train", train_indices),
+            ("development", development_indices),
+        ):
+            overlap = unseen_families & {
+                examples[index].template_family_id for index in indices
+            }
+            if overlap:
+                raise ValueError(
+                    f"{len(overlap)} unseen-template families leaked into "
+                    f"{split_name}"
+                )
+    else:
+        train_indices, test_indices = balanced_split_indices(
+            [example.tool for example in examples],
+            train_ratio=1 - args.test_ratio,
+            seed=args.seed,
+        )
+        development_indices = test_indices
+        human_style_indices = test_indices
     dataset = DatasetDict(
         {
             "train": full_dataset.select(train_indices),
             "test": full_dataset.select(test_indices),
+            "development": full_dataset.select(development_indices),
+            "human_style_test": full_dataset.select(human_style_indices),
         }
     )
     print(
         f"[slot-model] split: {len(dataset['train'])} training / "
-        f"{len(dataset['test'])} testing"
+        f"{len(dataset['development'])} development / "
+        f"{len(dataset['test'])} unseen-template testing / "
+        f"{len(dataset['human_style_test'])} human-style proxy testing"
     )
     model = AutoModelForTokenClassification.from_pretrained(
         args.base_model,
@@ -276,7 +322,7 @@ def train(args: argparse.Namespace) -> None:
         "model": model,
         "args": TrainingArguments(**kwargs),
         "train_dataset": dataset["train"],
-        "eval_dataset": dataset["test"],
+        "eval_dataset": dataset["development"],
         "data_collator": DataCollatorForTokenClassification(tokenizer=tokenizer),
         "compute_metrics": metrics,
     }
@@ -311,21 +357,86 @@ def train(args: argparse.Namespace) -> None:
         SLOT_LABELS,
     )
     held_out_messages = [examples[index].user_message for index in test_indices]
+    unseen_suite_report = dict(report)
+    unseen_suite_report["text_sha256"] = text_fingerprint(held_out_messages)
+
+    def evaluate_slot_suite(
+        dataset_key: str,
+        indices: list[int],
+    ) -> dict[str, Any]:
+        suite_output = trainer.predict(dataset[dataset_key])
+        suite_predicted = np.argmax(suite_output.predictions, axis=-1)
+        suite_expected = np.asarray(suite_output.label_ids)
+        suite_true_sequences: list[list[int]] = []
+        suite_predicted_sequences: list[list[int]] = []
+        for expected_row, predicted_row in zip(suite_expected, suite_predicted):
+            mask = expected_row != -100
+            suite_true_sequences.append(expected_row[mask].astype(int).tolist())
+            suite_predicted_sequences.append(predicted_row[mask].astype(int).tolist())
+        suite_report = token_classification_report(
+            suite_true_sequences,
+            suite_predicted_sequences,
+            SLOT_LABELS,
+        )
+        suite_report["text_sha256"] = text_fingerprint(
+            [examples[index].user_message for index in indices]
+        )
+        return suite_report
+
+    evaluation_suites = {
+        "development": evaluate_slot_suite("development", development_indices),
+        "unseen_template_test": unseen_suite_report,
+        "human_style_test": evaluate_slot_suite(
+            "human_style_test",
+            human_style_indices,
+        ),
+    }
     report.update(
         {
-            "report_type": "trained_slot_extractor_held_out_test",
+            "report_type": "trained_slot_extractor_unseen_template_test",
             "split": {
                 "seed": args.seed,
-                "train_ratio": round(1 - args.test_ratio, 6),
-                "test_ratio": args.test_ratio,
+                "strategy": (
+                    "explicit_four_way_dataset_split"
+                    if explicit_splits is not None
+                    else "legacy_balanced_random_split"
+                ),
                 "total_examples": len(examples),
                 "train_examples": len(dataset["train"]),
-                "test_examples": len(dataset["test"]),
+                "development_examples": len(dataset["development"]),
+                "unseen_template_test_examples": len(dataset["test"]),
+                "human_style_test_examples": len(dataset["human_style_test"]),
                 "train_text_sha256": text_fingerprint(
                     [examples[index].user_message for index in train_indices]
                 ),
-                "test_text_sha256": text_fingerprint(held_out_messages),
+                "development_text_sha256": text_fingerprint(
+                    [examples[index].user_message for index in development_indices]
+                ),
+                "unseen_template_test_text_sha256": text_fingerprint(
+                    held_out_messages
+                ),
+                "human_style_test_text_sha256": text_fingerprint(
+                    [examples[index].user_message for index in human_style_indices]
+                ),
+                "unseen_template_family_overlap_with_train": len(
+                    {
+                        examples[index].template_family_id for index in train_indices
+                    }
+                    & {
+                        examples[index].template_family_id for index in test_indices
+                    }
+                ),
+                "unseen_template_family_overlap_with_development": len(
+                    {
+                        examples[index].template_family_id
+                        for index in development_indices
+                    }
+                    & {
+                        examples[index].template_family_id for index in test_indices
+                    }
+                ),
             },
+            "evaluation_suites": evaluation_suites,
             "training": {
                 "epochs": args.epochs,
                 "batch_size": args.batch_size,
@@ -369,25 +480,37 @@ def train(args: argparse.Namespace) -> None:
             "structured_examples": len(examples),
             "canonical_examples": len(canonical_examples),
             "train_examples": len(dataset["train"]),
-            "test_examples": len(dataset["test"]),
-            "test_ratio": args.test_ratio,
+            "development_examples": len(dataset["development"]),
+            "unseen_template_test_examples": len(dataset["test"]),
+            "human_style_test_examples": len(dataset["human_style_test"]),
             "seed": args.seed,
             "rows_without_exact_slot_spans": skipped_without_spans,
             "base_model": args.base_model,
-            "entity_micro_f1": report["entity_micro"]["f1"],
-            "exact_sequence_accuracy": report["exact_sequence_accuracy"],
+            "evaluation_entity_micro_f1": {
+                name: suite["entity_micro"]["f1"]
+                for name, suite in evaluation_suites.items()
+            },
+            "evaluation_exact_sequence_accuracy": {
+                name: suite["exact_sequence_accuracy"]
+                for name, suite in evaluation_suites.items()
+            },
             "metrics_artifact": "slot_metrics.json",
         },
     )
-    print("\n[slot-metrics] real held-out token-classifier results")
+    print("\n[slot-metrics] real token-classifier results by evaluation suite")
     print(
         json.dumps(
             {
-                "entity_micro": report["entity_micro"],
-                "entity_macro_f1": report["entity_macro_f1"],
-                "exact_sequence_accuracy": report["exact_sequence_accuracy"],
-                "token_accuracy_including_o": report["token_accuracy_including_o"],
-                "non_o_token_accuracy": report["non_o_token_accuracy"],
+                "evaluation_suites": {
+                    name: {
+                        "entity_micro_f1": suite["entity_micro"]["f1"],
+                        "entity_macro_f1": suite["entity_macro_f1"],
+                        "exact_sequence_accuracy": suite["exact_sequence_accuracy"],
+                        "non_o_token_accuracy": suite["non_o_token_accuracy"],
+                        "examples": suite["test_sequences"],
+                    }
+                    for name, suite in evaluation_suites.items()
+                },
                 "parameters": report["model"]["total_parameters"],
                 "artifact_size_mb": report["model"]["saved_artifact_size_mb"],
                 "latency": report["latency"],
@@ -395,7 +518,7 @@ def train(args: argparse.Namespace) -> None:
             indent=2,
         )
     )
-    print("\n[slot-metrics] per-slot held-out entity metrics")
+    print("\n[slot-metrics] per-slot unseen-template entity metrics")
     print(f"{'slot':18} {'precision':>9} {'recall':>8} {'f1':>8} {'support':>8}")
     for slot, row in report["per_slot"].items():
         print(
@@ -418,7 +541,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-5)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--dataset-size", type=int, default=DEFAULT_DATASET_SIZE)
-    parser.add_argument("--test-ratio", type=float, default=TEST_RATIO)
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=TEST_RATIO,
+        help=(
+            "Legacy fallback ratio when input rows lack explicit split metadata. "
+            "The canonical dataset uses four fixed splits."
+        ),
+    )
     return parser.parse_args()
 
 
