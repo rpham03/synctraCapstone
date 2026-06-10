@@ -303,7 +303,6 @@ class _CollabScreenState extends State<CollabScreen> {
       backgroundColor: AppTokens.calendarGridSurface(context),
       appBar: SynctraPageHeader(
         title: 'Collab',
-        subtitle: 'Schedule without exposing calendar details',
         actions: [
           IconButton(
             tooltip: 'Refresh polls',
@@ -317,7 +316,7 @@ class _CollabScreenState extends State<CollabScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
           children: [
-            _PrivacyBanner(onCreate: _createPoll),
+            const _PrivacyBanner(),
             const SizedBox(height: 24),
             Row(
               children: [
@@ -369,6 +368,7 @@ class _CollabScreenState extends State<CollabScreen> {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
+        heroTag: 'synctra_new_poll',
         onPressed: _loading ? null : _createPoll,
         backgroundColor: AppColors.primary,
         elevation: 0,
@@ -380,59 +380,43 @@ class _CollabScreenState extends State<CollabScreen> {
 }
 
 class _PrivacyBanner extends StatelessWidget {
-  const _PrivacyBanner({required this.onCreate});
-
-  final VoidCallback onCreate;
+  const _PrivacyBanner();
 
   @override
   Widget build(BuildContext context) {
     final brightness = Theme.of(context).brightness;
     return SettingsInsetCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              CircleAvatar(
-                backgroundColor: AppColors.collabEvent.withAlpha(30),
-                child: const Icon(
-                  Icons.lock_outline,
-                  color: AppColors.collabEvent,
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Busy-only availability',
-                      style: CalendarTextStyles.upcomingRow(brightness).copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Synctra compares unavailable time ranges without sharing event names. '
-                      'Invitees vote before the organizer confirms.',
-                      style: CalendarTextStyles.hourLabel(brightness).copyWith(
-                        fontSize: 12,
-                        height: 1.45,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+          CircleAvatar(
+            backgroundColor: AppColors.collabEvent.withAlpha(30),
+            child: const Icon(
+              Icons.lock_outline,
+              color: AppColors.collabEvent,
+            ),
           ),
-          const SizedBox(height: 12),
-          Align(
-            alignment: Alignment.centerRight,
-            child: SynctraPrimaryButton(
-              onPressed: onCreate,
-              icon: Icons.schedule,
-              label: 'Find time',
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Busy-only availability',
+                  style: CalendarTextStyles.upcomingRow(brightness).copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Synctra compares unavailable time ranges without sharing event names. '
+                  'Invitees vote before the organizer confirms.',
+                  style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                    fontSize: 12,
+                    height: 1.45,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -479,18 +463,25 @@ class _PollCard extends StatelessWidget {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '${poll.durationMinutes} min · ${poll.participants.length} participants',
-                      style: CalendarTextStyles.hourLabel(brightness).copyWith(
-                        fontSize: 12,
-                        height: 1.4,
-                      ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        _StatusChip(status: poll.status),
+                        Text(
+                          '${poll.durationMinutes} min · ${poll.participants.length} participants',
+                          style: CalendarTextStyles.hourLabel(brightness).copyWith(
+                            fontSize: 12,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
               ),
-              _StatusLabel(status: poll.status),
               if (poll.status == 'open')
                 IconButton(
                   tooltip: 'Set preferred meeting times',
@@ -668,8 +659,8 @@ class _OptionRow extends StatelessWidget {
   }
 }
 
-class _StatusLabel extends StatelessWidget {
-  const _StatusLabel({required this.status});
+class _StatusChip extends StatelessWidget {
+  const _StatusChip({required this.status});
 
   final String status;
 
@@ -681,14 +672,21 @@ class _StatusLabel extends StatelessWidget {
       'cancelled' => scheme.error,
       _ => scheme.primary,
     };
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
       child: Text(
         status.toUpperCase(),
         style: TextStyle(
           color: color,
-          fontSize: 11,
-          fontWeight: FontWeight.bold,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.4,
+          height: 1.2,
         ),
       ),
     );

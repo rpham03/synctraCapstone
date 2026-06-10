@@ -38,7 +38,6 @@ import '../../../shared/state/shell_sidebar_controller.dart';
 import '../../../shared/state/course_import_tasks_bridge.dart';
 import '../../../shared/state/manual_tasks_bridge.dart';
 import '../../../shared/utils/calendar_display_utils.dart';
-import '../../../shared/utils/local_time_format.dart';
 import '../../../shared/utils/undo_snackbar.dart';
 import '../../../shared/utils/manual_tasks_calendar.dart';
 import '../../../shared/utils/task_schedule_utils.dart';
@@ -85,7 +84,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
   int _weekNavDirection = 1;
   final Set<String> _hiddenFeedIds = {};
   final Map<String, String> _eventIdToFeedId = {};
-  final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   static const _hiddenFeedsKey = 'synctra_hidden_ical_feeds';
 
@@ -102,7 +100,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
   final List<Map<String, String>> _icalFeeds = [];
   final List<CourseImportRecord> _courseImports = [];
 
-  final ScrollController _timeScrollController = ScrollController();
   Timer? _nowTicker;
   // Live-ish: poll for a confirmed group meeting so a participant's calendar
   // updates within seconds of the organizer confirming. Tunable down to ~1s.
@@ -231,7 +228,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
     _manualEventsStore.removeListener(_loadManualEvents);
     _nowTicker?.cancel();
     _collabPollTimer?.cancel();
-    _timeScrollController.dispose();
     super.dispose();
   }
 
@@ -1272,7 +1268,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Widget _buildMainPanel({
     required CalendarLayoutInfo layout,
     required bool showMenuButton,
-    VoidCallback? onOpenCalendarSidebar,
   }) {
     return _CalendarMainPanel(
       toolbarTitle: _toolbarTitle(),
@@ -1283,10 +1278,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       aiChatOpen: _calendarChatOpen,
       onToggleAiChat: _toggleAiChat,
       showMenuButton: showMenuButton,
-      onOpenMenu: () {
-        onOpenCalendarSidebar?.call();
-        CalendarShellBridge.instance.openDrawer?.call();
-      },
+      onOpenMenu: () => CalendarShellBridge.instance.openDrawer?.call(),
       onNew: _openQuickAddSheet,
       onPrev: () => _shiftPeriod(-1),
       onNext: () => _shiftPeriod(1),
@@ -1317,7 +1309,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
       firstHour: _firstHour,
       lastHour: _lastHour,
       hourHeight: _hourHeight,
-      timeScrollController: _timeScrollController,
       onOpenEvent: _openEventDetail,
       onOpenCalendarEntry: _openCalendarEntry,
       onTapBlock: _openBlockSheet,
@@ -1344,15 +1335,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
   void _toggleCalendarSidebar() {
     setState(() => _calendarSidebarOpen = !_calendarSidebarOpen);
-  }
-
-  void _openCalendarSidebar() {
-    final layout = CalendarLayoutInfo(width: MediaQuery.sizeOf(context).width);
-    if (layout.size == CalendarLayoutSize.expanded) {
-      setState(() => _calendarSidebarOpen = true);
-    } else {
-      _scaffoldKey.currentState?.openDrawer();
-    }
   }
 
   void _closeAiChat() {
@@ -1441,7 +1423,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
         final mainPanel = _buildMainPanel(
           layout: layout,
           showMenuButton: showShellMenu,
-          onOpenCalendarSidebar: canDockSidebar ? null : _openCalendarSidebar,
         );
 
         Widget content = Row(
@@ -1495,11 +1476,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
         content = _buildMobileChatOverlay(layout, content);
 
         return Scaffold(
-          key: _scaffoldKey,
           backgroundColor: AppTokens.calendarGridSurface(context),
-          drawer: canDockSidebar
-              ? null
-              : Drawer(child: _buildCalendarSidebar()),
           body: SafeArea(
             child: Stack(
               clipBehavior: Clip.none,
@@ -1619,7 +1596,6 @@ class _CalendarMainPanel extends StatelessWidget {
   final int firstHour;
   final int lastHour;
   final double hourHeight;
-  final ScrollController timeScrollController;
   final void Function(EventModel) onOpenEvent;
   final void Function(Object) onOpenCalendarEntry;
   final void Function(ScheduleBlockModel) onTapBlock;
@@ -1671,7 +1647,6 @@ class _CalendarMainPanel extends StatelessWidget {
     required this.firstHour,
     required this.lastHour,
     required this.hourHeight,
-    required this.timeScrollController,
     required this.onOpenEvent,
     required this.onOpenCalendarEntry,
     required this.onTapBlock,
@@ -1708,7 +1683,6 @@ class _CalendarMainPanel extends StatelessWidget {
             firstHour: firstHour,
             lastHour: lastHour,
             hourHeight: hourHeight,
-            scrollController: timeScrollController,
             timedEventsOnDay: timedEventsOnDay,
             canvasOnDay: canvasOnDay,
             courseAllDayOnDay: courseAllDayOnDay,
@@ -3209,7 +3183,6 @@ class _WeekDayTimeGrid extends StatefulWidget {
   final int firstHour;
   final int lastHour;
   final double hourHeight;
-  final ScrollController scrollController;
   final List<EventModel> Function(DateTime) timedEventsOnDay;
   final List<EventModel> Function(DateTime) canvasOnDay;
   final List<EventModel> Function(DateTime) courseAllDayOnDay;
@@ -3236,7 +3209,6 @@ class _WeekDayTimeGrid extends StatefulWidget {
     required this.firstHour,
     required this.lastHour,
     required this.hourHeight,
-    required this.scrollController,
     required this.timedEventsOnDay,
     required this.canvasOnDay,
     required this.courseAllDayOnDay,
@@ -3260,6 +3232,7 @@ class _WeekDayTimeGrid extends StatefulWidget {
 
 class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
   final _gridDaysRowKey = GlobalKey();
+  late final ScrollController _scrollController;
   _GridDragSession? _drag;
 
   double get _gridHeight =>
@@ -3363,14 +3336,14 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
 
   /// Scroll to the first visible timed event, falling back to ~7:00.
   void _scrollToRelevantTime() {
-    final c = widget.scrollController;
-    if (!c.hasClients) return;
+    final c = _scrollController;
+    if (!c.hasClients || c.positions.length != 1) return;
     final firstEventMinute = _firstTimedEventMinute();
     final raw = firstEventMinute == null
         ? (7 - widget.firstHour) * widget.hourHeight
         : ((firstEventMinute - widget.firstHour * 60 - 45) / 60.0) *
             widget.hourHeight;
-    final max = c.position.maxScrollExtent;
+    final max = c.positions.first.maxScrollExtent;
     c.jumpTo(raw.clamp(0.0, max));
   }
 
@@ -3407,7 +3380,14 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
   @override
   void initState() {
     super.initState();
+    _scrollController = ScrollController();
     _scheduleWhenVisible(_scrollToRelevantTime);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -3438,10 +3418,10 @@ class _WeekDayTimeGridState extends State<_WeekDayTimeGrid> {
         ),
         Expanded(
           child: Scrollbar(
-            controller: widget.scrollController,
+            controller: _scrollController,
             thumbVisibility: true,
             child: SingleChildScrollView(
-              controller: widget.scrollController,
+              controller: _scrollController,
               physics: _drag != null
                   ? const NeverScrollableScrollPhysics()
                   : null,

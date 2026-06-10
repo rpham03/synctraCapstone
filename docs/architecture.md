@@ -1,24 +1,42 @@
-# Architecture Overview
+# Synctra Architecture
+
+**One slide — copy everything below the line.**
+
+---
+
+## Synctra System Architecture
 
 ```
-Flutter App  <-->  FastAPI Backend  <-->  PostgreSQL / Redis
-                        |
-              +---------+---------+
-              |                   |
-        Canvas API       Google Calendar API
-              |                   |
-              +---------+---------+
-                        |
-                   ML Module
-              (task estimator,
-               schedule optimizer,
-               intent parser)
+                         ┌─────────────────────────────────────┐
+                         │     Flutter App (iOS · Android)      │
+                         │  Planner │ Habits │ Tasks │ Chat │ Collab │
+                         └──────────────────┬──────────────────┘
+                                            │
+              ┌─────────────────────────────┼─────────────────────────────┐
+              │                             │                             │
+              ▼                             ▼                             ▼
+     ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+     │    Supabase     │         │  FastAPI Backend │         │   On-device     │
+     │  Auth · Settings│         │    /api/v1       │         │     cache       │
+     │  Tasks · Events │         │                  │         │                 │
+     └─────────────────┘         └────────┬────────┘         └─────────────────┘
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    │                     │                     │
+                    ▼                     ▼                     ▼
+            ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+            │ Canvas LMS   │    │  iCal feeds  │    │Course import │
+            │ assignments  │    │  calendars   │    │  (schedule)  │
+            └──────────────┘    └──────────────┘    └──────────────┘
+                                          │
+                                          ▼
+                              ┌───────────────────────┐
+                              │  Scheduling engine    │
+                              │  Chat · Habits · Tasks│
+                              │  Collab polls         │
+                              └───────────────────────┘
 ```
 
-## Data Flow
+**Fixed** classes & calendars → **Flexible** tasks, habits & AI blocks → **One Planner**
 
-1. User authenticates via Google OAuth
-2. Backend syncs Canvas assignments and Google Calendar events
-3. ML scheduler suggests flexible study blocks
-4. Flutter app displays unified calendar view
-5. User sends chat message -> intent parser -> schedule action -> UI update
+Flutter · FastAPI · Supabase · NLP tool router · Canvas · iCal

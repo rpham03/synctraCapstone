@@ -551,9 +551,6 @@ class _TasksScreenState extends State<TasksScreen> {
       backgroundColor: AppTokens.calendarGridSurface(context),
       appBar: SynctraPageHeader(
         title: 'Tasks',
-        subtitle: _weekView
-            ? 'Week review · use List view for today onward'
-            : 'Today and upcoming · scroll up for older work',
         showSettings: true,
         actions: [
           IconButton(
@@ -669,6 +666,7 @@ class _TasksScreenState extends State<TasksScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: 'synctra_add_task',
         onPressed: _showAddTask,
         backgroundColor: AppColors.primary,
         elevation: 0,
