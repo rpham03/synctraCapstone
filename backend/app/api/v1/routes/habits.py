@@ -27,6 +27,7 @@ class TimeRangeIn(BaseModel):
 class HabitCreateIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     duration_minutes: int = Field(ge=5, le=480)
+    duration_max_minutes: Optional[int] = Field(default=None, ge=5, le=480)
     frequency_per_week: int = Field(ge=1, le=14)
     preferred_days: List[int] = Field(
         default_factory=list,
@@ -43,6 +44,7 @@ class HabitCreateIn(BaseModel):
 class HabitUpdateIn(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     duration_minutes: Optional[int] = Field(default=None, ge=5, le=480)
+    duration_max_minutes: Optional[int] = Field(default=None, ge=5, le=480)
     frequency_per_week: Optional[int] = Field(default=None, ge=1, le=14)
     preferred_days: Optional[List[int]] = None
     preferred_time_ranges: Optional[Dict[str, List[TimeRangeIn]]] = None
@@ -87,6 +89,7 @@ def _habit_to_dict(habit) -> dict:
         "user_id": habit.user_id,
         "title": habit.title,
         "duration_minutes": habit.duration_minutes,
+        "duration_max_minutes": max(habit.duration_max_minutes, habit.duration_minutes),
         "frequency_per_week": habit.frequency_per_week,
         "preferred_days": habit.preferred_days,
         "preferred_time_ranges": {

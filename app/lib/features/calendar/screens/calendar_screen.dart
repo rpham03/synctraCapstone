@@ -203,7 +203,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Future<void> _scheduleHabits() async {
     await _habitStore.refreshSchedule(
       calendarEvents: _allEvents(),
-      weekStart: _startOfWeek(_focusedDay),
+      weekStart: HabitSessionStore.startOfWeek(_focusedDay),
     );
   }
 
@@ -3976,49 +3976,6 @@ class _DayTimeColumn extends StatelessWidget {
     return raw;
   }
 
-  static void _annotateOverlapClusters(List<_SegLay> segs) {
-    for (final s in segs) {
-      final cluster = segs
-          .where((o) => o.startMin < s.endMin && o.endMin > s.startMin)
-          .toList()
-        ..sort((a, b) => a.col.compareTo(b.col));
-      s.overlapTotal = cluster.length;
-      s.overlapIndex = cluster.indexOf(s) + 1;
-      s.clusterMaxCols =
-          cluster.map((c) => c.col).reduce(math.max) + 1;
-    }
-  }
-
-  /// Side-by-side overlap with a readable minimum width; cascades when tight.
-  static ({double left, double width}) _sideBySideRect({
-    required double pad,
-    required double inner,
-    required int col,
-    required int clusterMaxCols,
-  }) {
-    if (clusterMaxCols <= 1) {
-      return (left: pad, width: inner);
-    }
-    final cols = math.min(clusterMaxCols, _kMaxOverlapCols);
-    const gap = 1.0;
-    const minColW = 28.0;
-    final evenSplit = (inner - gap * (cols - 1)) / cols;
-    final colW = math.max(minColW, evenSplit);
-    final colIndex = col.clamp(0, cols - 1);
-    final totalNeeded = colW * cols + gap * (cols - 1);
-    if (totalNeeded > inner && cols > 1) {
-      final step = math.max(10.0, (inner - minColW) / (cols - 1));
-      return (
-        left: pad + colIndex * step,
-        width: math.min(minColW, inner),
-      );
-    }
-    return (
-      left: pad + colIndex * (colW + gap),
-      width: colW,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -4710,35 +4667,6 @@ class _TimedEventChip extends StatelessWidget {
     this.locked = true,
     this.hideContent = false,
   });
-
-  String _compactTitle(String title, String? course) {
-    if (course != null && course.isNotEmpty) {
-      return course.length > 14 ? '${course.substring(0, 13)}…' : course;
-    }
-    return title.length > 16 ? '${title.substring(0, 15)}…' : title;
-  }
-
-  Widget _overlapBadge(BuildContext context) {
-    if (overlapIndex == null || overlapTotal == null || overlapTotal! <= 1) {
-      return const SizedBox.shrink();
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.28),
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        '$overlapIndex/$overlapTotal',
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              fontSize: 9,
-              height: 1,
-            ),
-      ),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {

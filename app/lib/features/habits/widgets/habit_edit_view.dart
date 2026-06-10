@@ -34,12 +34,51 @@ class _HabitEditViewState extends State<HabitEditView> {
   late String _emoji;
   late String _category;
   late Color _habitColor;
-  late String _hoursType;
+  late String _timeWindowPreset;
   late bool _removeOnConflict;
   bool _saving = false;
 
   static const _defaultDays = [0, 1, 2, 3, 4];
-  static const _defaultRange = HabitTimeRange(start: '11:30am', end: '2:00pm');
+  static const _defaultRange = HabitTimeRange(start: '9:00am', end: '5:00pm');
+
+  /// Presets applied to all selected days. Custom uses the per-day inputs below.
+  static const _timePresets = <String, HabitTimeRange>{
+    'anytime': HabitTimeRange(start: '8:00am', end: '10:00pm'),
+    'morning': HabitTimeRange(start: '6:00am', end: '12:00pm'),
+    'afternoon': HabitTimeRange(start: '12:00pm', end: '5:00pm'),
+    'evening': HabitTimeRange(start: '5:00pm', end: '10:00pm'),
+  };
+
+  static const _timePresetOptions = [
+    'custom',
+    'anytime',
+    'morning',
+    'afternoon',
+    'evening',
+  ];
+
+  static String _timePresetLabel(String key) => switch (key) {
+        'custom' => 'Custom times',
+        'anytime' => 'Anytime (8 AM – 10 PM)',
+        'morning' => 'Morning (6 AM – 12 PM)',
+        'afternoon' => 'Afternoon (12 – 5 PM)',
+        'evening' => 'Evening (5 – 10 PM)',
+        _ => key,
+      };
+
+  static String _timePresetHelp(String key) => switch (key) {
+        'custom' =>
+          'Pick start and end times for each day. Synctra places the session inside that window.',
+        'anytime' =>
+          'Synctra can schedule this habit any time between 8:00 AM and 10:00 PM on your selected days.',
+        'morning' =>
+          'Synctra schedules between 6:00 AM and 12:00 PM — good for workouts or focused work before classes.',
+        'afternoon' =>
+          'Synctra schedules between 12:00 PM and 5:00 PM — good for breaks between afternoon classes.',
+        'evening' =>
+          'Synctra schedules between 5:00 PM and 10:00 PM — good for winding down or evening routines.',
+        _ => '',
+      };
 
   /// Display order: Su … Sa (backend weekday in parens).
   static const _dayOrder = [
@@ -87,18 +126,66 @@ class _HabitEditViewState extends State<HabitEditView> {
     _title = TextEditingController(text: h?.title ?? '');
     _notes = TextEditingController();
     _durationMin = h?.durationMinutes ?? 30;
-    _durationMax = (h?.durationMinutes ?? 60).clamp(_durationMin, 180);
+    _durationMax = (h?.durationMaxMinutes ?? h?.durationMinutes ?? 60)
+        .clamp(_durationMin, 240);
     _priority = (h?.priority ?? 9).clamp(1, 10);
     _days = Set<int>.from(h?.preferredDays ?? _defaultDays);
-    _ranges = Map<String, List<HabitTimeRange>>.from(
-      h?.preferredTimeRanges ??
-          {for (final d in _defaultDays) d.toString(): const [_defaultRange]},
-    );
+    if (h == null) {
+      _timeWindowPreset = 'anytime';
+      _ranges = {
+        for (final d in _defaultDays)
+          d.toString(): [HabitTimeRange(start: _timePresets['anytime']!.start, end: _timePresets['anytime']!.end)],
+      };
+    } else {
+      _ranges = Map<String, List<HabitTimeRange>>.from(h.preferredTimeRanges);
+      _timeWindowPreset = _detectPreset(_ranges);
+    }
     _emoji = _emojiForTitle(h?.title ?? '');
     _category = 'Personal';
     _habitColor = AppColors.habitBlock;
-    _hoursType = 'One-off hours';
     _removeOnConflict = false;
+    _title.addListener(() {
+      final next = _emojiForTitle(_title.text);
+      if (next != _emoji && mounted) setState(() => _emoji = next);
+    });
+  }
+
+  String _detectPreset(Map<String, List<HabitTimeRange>> ranges) {
+    for (final entry in _timePresets.entries) {
+      final matchesAll = _days.every((day) {
+        final dayRanges = ranges[day.toString()];
+        return dayRanges != null &&
+            dayRanges.length == 1 &&
+            dayRanges.first.start == entry.value.start &&
+            dayRanges.first.end == entry.value.end;
+      });
+      if (matchesAll) return entry.key;
+    }
+    return 'custom';
+  }
+
+  void _applyTimePreset(String preset) {
+    if (preset == 'custom') return;
+    final template = _timePresets[preset];
+    if (template == null) return;
+    setState(() {
+      for (final day in _days) {
+        _ranges[day.toString()] = [
+          HabitTimeRange(start: template.start, end: template.end),
+        ];
+      }
+    });
+  }
+
+  void _onTimeRangeEdited(int day, int index, HabitTimeRange range) {
+    setState(() {
+      final list = List<HabitTimeRange>.from(
+        _ranges[day.toString()] ?? const [_defaultRange],
+      );
+      list[index] = range;
+      _ranges[day.toString()] = list;
+      _timeWindowPreset = 'custom';
+    });
   }
 
   @override
@@ -120,19 +207,18 @@ class _HabitEditViewState extends State<HabitEditView> {
   int get _frequency => _days.length;
 
   String get _frequencySummary {
-    if (_days.isEmpty) return 'Select days to repeat this habit.';
+    if (_days.isEmpty) return 'Choose at least one day.';
     final names = _dayOrder
         .where((d) => _days.contains(d.$1))
         .map((d) => d.$3)
         .toList();
     if (names.length == 7) {
-      return 'Repeat $_frequency times every week on all days.';
+      return 'Every day · $_frequency× per week';
     }
-    if (names.length >= 2 &&
-        _isConsecutiveWeekdays(names)) {
-      return 'Repeat $_frequency times every week on ${names.first} through ${names.last}.';
+    if (names.length >= 2 && _isConsecutiveWeekdays(names)) {
+      return '${names.first}–${names.last} · $_frequency× per week';
     }
-    return 'Repeat $_frequency times every week on ${names.join(', ')}.';
+    return '${names.join(', ')} · $_frequency× per week';
   }
 
   bool _isConsecutiveWeekdays(List<String> names) {
@@ -154,7 +240,15 @@ class _HabitEditViewState extends State<HabitEditView> {
         _ranges.remove(backendDay.toString());
       } else {
         _days.add(backendDay);
-        _ranges.putIfAbsent(backendDay.toString(), () => const [_defaultRange]);
+        _ranges.putIfAbsent(
+          backendDay.toString(),
+          () => [
+            _timePresets[_timeWindowPreset] ?? _defaultRange,
+          ],
+        );
+      }
+      if (_timeWindowPreset != 'custom') {
+        _applyTimePreset(_timeWindowPreset);
       }
     });
   }
@@ -191,6 +285,7 @@ class _HabitEditViewState extends State<HabitEditView> {
       final payload = {
         'title': title,
         'duration_minutes': _durationMin,
+        'duration_max_minutes': _durationMax,
         'frequency_per_week': _frequency,
         'preferred_days': _days.toList()..sort(),
         'preferred_time_ranges': {
@@ -248,20 +343,15 @@ class _HabitEditViewState extends State<HabitEditView> {
                     const SizedBox(height: AppTokens.space20),
                     _LabeledField(
                       label: 'Priority',
+                      helpText:
+                          'Higher priority habits keep their slot when the calendar gets crowded.',
                       child: _PrioritySelect(
                         value: _priority,
                         onChanged: (v) => setState(() => _priority = v),
                       ),
                     ),
                     const SizedBox(height: AppTokens.space16),
-                    _SectionLabel(
-                      label: 'Color & Category',
-                      trailing: Icon(
-                        Icons.info_outline,
-                        size: 16,
-                        color: AppColors.textTertiary,
-                      ),
-                    ),
+                    _SectionLabel(label: 'Color & category'),
                     const SizedBox(height: AppTokens.space8),
                     Row(
                       children: [
@@ -284,8 +374,9 @@ class _HabitEditViewState extends State<HabitEditView> {
                     ),
                     const SizedBox(height: AppTokens.space24),
                     _SectionHeader(
-                      title: 'Duration',
-                      subtitle: 'How long should each session be?',
+                      title: 'Session length',
+                      subtitle:
+                          'Shortest and longest each block can be. Synctra picks a length in this range.',
                     ),
                     const SizedBox(height: AppTokens.space12),
                     Row(
@@ -315,59 +406,72 @@ class _HabitEditViewState extends State<HabitEditView> {
                     ),
                     const SizedBox(height: AppTokens.space24),
                     _SectionHeader(
-                      title: 'Scheduling',
+                      title: 'When to schedule',
                       subtitle:
-                          'Set the scheduling hours, frequency, and ideal days & times for your Habit.',
+                          'Choose a time window, then pick which days it repeats.',
                     ),
                     const SizedBox(height: AppTokens.space16),
                     _LabeledField(
-                      label: 'Hours',
+                      label: 'Time window',
+                      helpText: _timePresetHelp(_timeWindowPreset),
                       child: _DropdownShell<String>(
-                        value: _hoursType,
-                        items: const ['One-off hours', 'Anytime', 'Morning', 'Afternoon', 'Evening'],
-                        itemLabel: (v) => v,
-                        onChanged: (v) => setState(() => _hoursType = v ?? _hoursType),
+                        value: _timeWindowPreset,
+                        items: _timePresetOptions,
+                        itemLabel: _timePresetLabel,
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => _timeWindowPreset = v);
+                          _applyTimePreset(v);
+                        },
                       ),
                     ),
                     const SizedBox(height: AppTokens.space16),
+                    _SectionLabel(label: 'Repeat on'),
+                    const SizedBox(height: AppTokens.space8),
                     _DayPillRow(
                       days: _dayOrder,
                       selected: _days,
                       onToggle: _toggleDay,
                     ),
                     const SizedBox(height: AppTokens.space20),
+                    if (_timeWindowPreset == 'custom') ...[
+                      Text(
+                        'Set the earliest and latest time Synctra can place this habit each day.',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          color: AppColors.textTertiary,
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: AppTokens.space12),
+                    ],
                     for (final (day, _, fullName) in _dayOrder)
                       if (_days.contains(day)) ...[
                         _DayScheduleRow(
                           dayName: fullName,
                           ranges: _ranges[day.toString()] ?? const [_defaultRange],
+                          readOnly: _timeWindowPreset != 'custom',
                           showCopyToAll: day == (_days.toList()..sort()).first,
                           onCopyToAll: _copyFirstRangeToAll,
-                          onRangeChanged: (i, r) => setState(() {
-                            final list = List<HabitTimeRange>.from(
-                              _ranges[day.toString()] ?? const [_defaultRange],
-                            );
-                            list[i] = r;
-                            _ranges[day.toString()] = list;
-                          }),
+                          onRangeChanged: (i, r) => _onTimeRangeEdited(day, i, r),
                           onAddRange: () => _addRangeForDay(day),
                         ),
                         const SizedBox(height: AppTokens.space12),
                       ],
                     const SizedBox(height: AppTokens.space24),
                     _SectionHeader(
-                      title: 'If your Habit can\'t be scheduled…',
+                      title: 'If the calendar is full',
                       subtitle: null,
                     ),
                     const SizedBox(height: AppTokens.space12),
                     _ConflictOption(
-                      label: 'Leave it on the calendar',
+                      label: 'Keep trying — show it when a slot opens',
                       selected: !_removeOnConflict,
                       onTap: () => setState(() => _removeOnConflict = false),
                     ),
                     const SizedBox(height: AppTokens.space8),
                     _ConflictOption(
-                      label: 'Remove it from the calendar',
+                      label: 'Skip this week if nothing fits',
                       selected: _removeOnConflict,
                       onTap: () => setState(() => _removeOnConflict = true),
                     ),
@@ -548,7 +652,7 @@ class _TitleField extends StatelessWidget {
           ),
         ),
         prefixIconConstraints: const BoxConstraints(minWidth: 48),
-        hintText: 'Lunch',
+        hintText: 'Habit name',
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppTokens.radiusMd),
           borderSide: const BorderSide(color: AppColors.border),
@@ -626,10 +730,15 @@ class _SectionLabel extends StatelessWidget {
 }
 
 class _LabeledField extends StatelessWidget {
-  const _LabeledField({required this.label, required this.child});
+  const _LabeledField({
+    required this.label,
+    required this.child,
+    this.helpText,
+  });
 
   final String label;
   final Widget child;
+  final String? helpText;
 
   @override
   Widget build(BuildContext context) {
@@ -646,6 +755,17 @@ class _LabeledField extends StatelessWidget {
         ),
         const SizedBox(height: AppTokens.space8),
         child,
+        if (helpText != null) ...[
+          const SizedBox(height: AppTokens.space8),
+          Text(
+            helpText!,
+            style: GoogleFonts.inter(
+              fontSize: 12,
+              color: AppColors.textTertiary,
+              height: 1.4,
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -889,6 +1009,7 @@ class _DayScheduleRow extends StatelessWidget {
   const _DayScheduleRow({
     required this.dayName,
     required this.ranges,
+    required this.readOnly,
     required this.showCopyToAll,
     required this.onCopyToAll,
     required this.onRangeChanged,
@@ -897,6 +1018,7 @@ class _DayScheduleRow extends StatelessWidget {
 
   final String dayName;
   final List<HabitTimeRange> ranges;
+  final bool readOnly;
   final bool showCopyToAll;
   final VoidCallback onCopyToAll;
   final void Function(int index, HabitTimeRange range) onRangeChanged;
@@ -924,6 +1046,7 @@ class _DayScheduleRow extends StatelessWidget {
               Expanded(
                 child: _TimeInput(
                   value: ranges[i].start,
+                  readOnly: readOnly,
                   onChanged: (v) => onRangeChanged(i, ranges[i].copyWith(start: v)),
                 ),
               ),
@@ -934,15 +1057,17 @@ class _DayScheduleRow extends StatelessWidget {
               Expanded(
                 child: _TimeInput(
                   value: ranges[i].end,
+                  readOnly: readOnly,
                   onChanged: (v) => onRangeChanged(i, ranges[i].copyWith(end: v)),
                 ),
               ),
-              IconButton(
-                icon: const Icon(Icons.add, color: AppColors.primary, size: 20),
-                onPressed: onAddRange,
-                tooltip: 'Add time range',
-              ),
-              if (showCopyToAll && i == 0)
+              if (!readOnly)
+                IconButton(
+                  icon: const Icon(Icons.add, color: AppColors.primary, size: 20),
+                  onPressed: onAddRange,
+                  tooltip: 'Add another window this day',
+                ),
+              if (showCopyToAll && i == 0 && !readOnly)
                 TextButton.icon(
                   onPressed: onCopyToAll,
                   icon: const Icon(Icons.copy, size: 14),
@@ -961,10 +1086,15 @@ class _DayScheduleRow extends StatelessWidget {
 }
 
 class _TimeInput extends StatefulWidget {
-  const _TimeInput({required this.value, required this.onChanged});
+  const _TimeInput({
+    required this.value,
+    required this.onChanged,
+    this.readOnly = false,
+  });
 
   final String value;
   final ValueChanged<String> onChanged;
+  final bool readOnly;
 
   @override
   State<_TimeInput> createState() => _TimeInputState();
@@ -997,12 +1127,13 @@ class _TimeInputState extends State<_TimeInput> {
   Widget build(BuildContext context) {
     return TextField(
       controller: _controller,
-      onChanged: widget.onChanged,
+      readOnly: widget.readOnly,
+      onChanged: widget.readOnly ? null : widget.onChanged,
       style: GoogleFonts.inter(fontSize: 14),
       decoration: InputDecoration(
         isDense: true,
         filled: true,
-        fillColor: AppColors.surface,
+        fillColor: widget.readOnly ? AppColors.grey100 : AppColors.surface,
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppTokens.radiusMd),

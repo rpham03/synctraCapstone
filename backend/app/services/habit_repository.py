@@ -95,16 +95,26 @@ def _minutes_to_clock(minutes: int) -> str:
     return f"{display_hour}{meridiem.lower()}"
 
 
+def _duration_bounds(row: dict) -> tuple[int, int]:
+    lo = int(row["duration_minutes"])
+    hi = int(row.get("duration_max_minutes") or lo)
+    if hi < lo:
+        hi = lo
+    return lo, hi
+
+
 def _to_habit(row: dict) -> Habit:
+    lo, hi = _duration_bounds(row)
     return Habit(
         id=row["id"],
         user_id=row["user_id"],
         title=row["title"],
-        duration_minutes=int(row["duration_minutes"]),
+        duration_minutes=lo,
         frequency_per_week=int(row["frequency_per_week"]),
         preferred_days=[int(d) for d in row.get("preferred_days", [])],
         preferred_time_ranges=_parse_time_ranges(row.get("preferred_time_ranges", {})),
         priority=int(row["priority"]),
+        duration_max_minutes=hi,
         is_active=bool(row.get("is_active", True)),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -112,11 +122,13 @@ def _to_habit(row: dict) -> Habit:
 
 
 def _from_habit(habit: Habit) -> dict:
+    hi = habit.duration_max_minutes if habit.duration_max_minutes >= habit.duration_minutes else habit.duration_minutes
     return {
         "id": habit.id,
         "user_id": habit.user_id,
         "title": habit.title,
         "duration_minutes": habit.duration_minutes,
+        "duration_max_minutes": hi,
         "frequency_per_week": habit.frequency_per_week,
         "preferred_days": habit.preferred_days,
         "preferred_time_ranges": _serialize_time_ranges(habit.preferred_time_ranges),
@@ -141,15 +153,20 @@ class HabitRepository:
 
     def create(self, user_id: str, payload: dict) -> Habit:
         now = datetime.utcnow()
+        lo = int(payload["duration_minutes"])
+        hi = int(payload.get("duration_max_minutes") or lo)
+        if hi < lo:
+            hi = lo
         habit = Habit(
             id=str(uuid.uuid4()),
             user_id=user_id,
             title=payload["title"],
-            duration_minutes=int(payload["duration_minutes"]),
+            duration_minutes=lo,
             frequency_per_week=int(payload["frequency_per_week"]),
             preferred_days=[int(d) for d in payload.get("preferred_days", [])],
             preferred_time_ranges=_parse_time_ranges(payload.get("preferred_time_ranges", {})),
             priority=int(payload["priority"]),
+            duration_max_minutes=hi,
             is_active=bool(payload.get("is_active", True)),
             created_at=now,
             updated_at=now,
@@ -176,6 +193,7 @@ class HabitRepository:
                         in {
                             "title",
                             "duration_minutes",
+                            "duration_max_minutes",
                             "frequency_per_week",
                             "preferred_days",
                             "priority",

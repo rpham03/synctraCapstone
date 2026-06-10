@@ -30,6 +30,7 @@ class Habit:
     preferred_days: List[int]  # 0=Monday … 6=Sunday (Python weekday)
     preferred_time_ranges: Dict[int, List[TimeRange]]
     priority: int  # 1–10
+    duration_max_minutes: int = 0  # 0 => same as duration_minutes
     is_active: bool = True
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
